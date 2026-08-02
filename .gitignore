@@ -1,0 +1,22 @@
+.godot/
+.teleop/
+.local_certs/
+.remote_control/
+config/local.toml
+*.uid
+*.os
+*.obj
+*.o
+*.pyc
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+native/realsense_shared_memory/godot-cpp/
+
+# Physical-device identity and calibration are deliberately local-only.
+tools/so101_arm_pair.json
+tools/so101_rest_pose.json
+user_data/

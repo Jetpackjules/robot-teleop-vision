@@ -1,0 +1,37 @@
+[stack]
+host = "0.0.0.0"
+https_port = 8765
+stream_port = 8780
+tracking_port = 4247
+calibration_status_port = 4251
+# "quick" creates a free temporary trycloudflare.com URL. Use only with a
+# strong GODOT_REMOTE_PASSWORD; named production tunnels belong in deployment.
+public_mode = "off"
+password_env = "GODOT_REMOTE_PASSWORD"
+password_default = "change-me"
+
+[godot]
+# Leave blank to auto-detect Godot 4.6+ from PATH or ~/Downloads.
+executable = ""
+project = "."
+launch_runtime = true
+# Set true only when executable points to an exported Robot Teleop Vision app.
+packaged_runtime = false
+
+[cameras]
+# Every connected RealSense is discovered dynamically by serial at runtime.
+adapters = ["realsense"]
+
+[robot]
+# Start with hardware disabled. After calibrating your own arm, copy its local
+# profile to tools/so101_arm_pair.json and switch these two values.
+adapter = "so101"
+enabled = false
+profile = "tools/so101_arm_pair.json"
+python = ""
+dry_run = false
+hold_on_connect = true
+ignore_motor_6 = false
+
+[tracking]
+adapter = "browser_mediapipe"

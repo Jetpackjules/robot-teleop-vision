@@ -1,0 +1,19 @@
+[stack]
+public_mode = "off"
+password_default = "change-me"
+
+[godot]
+executable = ""
+project = "."
+launch_runtime = true
+packaged_runtime = false
+
+[cameras]
+adapters = ["realsense"]
+
+[robot]
+adapter = "disabled"
+enabled = false
+
+[tracking]
+adapter = "disabled"

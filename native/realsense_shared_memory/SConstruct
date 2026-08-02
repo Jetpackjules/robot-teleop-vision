@@ -1,0 +1,124 @@
+#!/usr/bin/env python
+import os
+import shutil
+import subprocess
+
+env = SConscript("godot-cpp/SConstruct")
+
+env.Append(CPPPATH=["src"])
+platform = ARGUMENTS.get("platform", env.get("platform"))
+is_windows = platform == "windows"
+
+opencv_enabled = False
+opencv_candidates = []
+if os.environ.get("OPENCV_SDK_DIR"):
+    opencv_candidates.append(os.environ["OPENCV_SDK_DIR"])
+opencv_candidates.extend([
+    os.path.join("..", "..", ".local_deps", "opencv", "usr"),
+    "/usr",
+])
+
+if is_windows:
+    for opencv_dir in opencv_candidates:
+        include_dir = os.path.join(opencv_dir, "include")
+        if os.path.isdir(os.path.join(include_dir, "opencv2")):
+            env.Append(CPPPATH=[include_dir])
+            lib_dir = os.path.join(opencv_dir, "x64", "vc17", "lib")
+            if not os.path.isdir(lib_dir):
+                lib_dir = os.path.join(opencv_dir, "lib")
+            env.Append(LIBPATH=[lib_dir])
+            env.Append(LIBS=["opencv_aruco", "opencv_calib3d", "opencv_features2d", "opencv_imgproc", "opencv_core"])
+            env.Append(CPPDEFINES=["REALSENSE_NATIVE_CALIBRATION_ENABLED"])
+            opencv_enabled = True
+            print("RealSense native calibration enabled from OpenCV SDK:", opencv_dir)
+            break
+else:
+    for opencv_dir in opencv_candidates:
+        include_dir = os.path.join(opencv_dir, "include", "opencv4")
+        if not os.path.isfile(os.path.join(include_dir, "opencv2", "aruco.hpp")):
+            continue
+        env.Append(CPPPATH=[include_dir])
+        local_lib_dir = os.path.join(opencv_dir, "lib", "x86_64-linux-gnu")
+        if os.path.isdir(local_lib_dir):
+            env.Append(LIBPATH=[local_lib_dir])
+        env.Append(LIBS=["opencv_aruco", "opencv_calib3d", "opencv_features2d", "opencv_imgproc", "opencv_core"])
+        env.Append(CPPDEFINES=["REALSENSE_NATIVE_CALIBRATION_ENABLED"])
+        opencv_enabled = True
+        print("RealSense native calibration enabled from OpenCV headers:", include_dir)
+        break
+
+if not opencv_enabled:
+    print("RealSense native calibration disabled; OpenCV development headers were not found.")
+
+if is_windows:
+    env.Append(CXXFLAGS=["/EHsc"])
+else:
+    env.Append(CXXFLAGS=["-fexceptions", "-fvisibility=hidden", "-fvisibility-inlines-hidden"])
+    env.Append(LINKFLAGS=["-Wl,--exclude-libs,ALL"])
+    # Ubuntu's libjpeg ABI is provided by libjpeg-turbo. Use its SIMD encoder
+    # and zlib level-1 directly for the latency-sensitive RGB-D stream.
+    env.Append(LIBS=["jpeg", "z"])
+
+onnxruntime_include_dir = os.path.join("thirdparty", "onnxruntime", "include")
+onnxruntime_c_api = os.path.join(onnxruntime_include_dir, "onnxruntime", "core", "session", "onnxruntime_c_api.h")
+if os.path.exists(onnxruntime_c_api):
+    env.Append(CPPPATH=[onnxruntime_include_dir])
+    env.Append(CPPDEFINES=["REALSENSE_FOUNDATION_STEREO_ENABLED"])
+    print("RealSense native Foundation Stereo enabled from ONNX Runtime C API header:", onnxruntime_c_api)
+else:
+    print("RealSense native Foundation Stereo disabled; ONNX Runtime C API header not found.")
+
+sdk_candidates = []
+if os.environ.get("REALSENSE2_SDK_DIR"):
+    sdk_candidates.append(os.environ["REALSENSE2_SDK_DIR"])
+sdk_candidates.extend([
+    os.path.join("thirdparty", "realsense2"),
+    r"C:\Program Files (x86)\Intel RealSense SDK 2.0",
+    r"C:\Program Files\Intel RealSense SDK 2.0",
+])
+
+if is_windows:
+    for sdk_dir in sdk_candidates:
+        include_dir = os.path.join(sdk_dir, "include")
+        lib_dir = os.path.join(sdk_dir, "lib", "x64")
+        bin_dir = os.path.join(sdk_dir, "bin", "x64")
+        if not os.path.exists(os.path.join(lib_dir, "realsense2.lib")):
+            lib_dir = os.path.join(sdk_dir, "lib")
+        if not os.path.exists(os.path.join(bin_dir, "realsense2.dll")):
+            bin_dir = os.path.join(sdk_dir, "bin")
+        if os.path.exists(os.path.join(include_dir, "librealsense2", "rs.hpp")) and os.path.exists(os.path.join(lib_dir, "realsense2.lib")):
+            env.Append(CPPPATH=[include_dir])
+            env.Append(LIBPATH=[lib_dir])
+            env.Append(LIBS=["realsense2"])
+            env.Append(CPPDEFINES=["REALSENSE_DIRECT_ENABLED"])
+            dll_src = os.path.join(bin_dir, "realsense2.dll")
+            dll_dst = os.path.join("bin", "realsense2.dll")
+            if os.path.exists(dll_src):
+                os.makedirs("bin", exist_ok=True)
+                try:
+                    if not os.path.exists(dll_dst) or os.path.getsize(dll_src) != os.path.getsize(dll_dst):
+                        shutil.copy2(dll_src, dll_dst)
+                except PermissionError:
+                    print("RealSense runtime DLL is already present and locked; leaving existing bin/realsense2.dll in place.")
+            print("RealSense direct capture enabled from SDK:", sdk_dir)
+            break
+    else:
+        print("RealSense direct capture SDK not found; building explicit stub.")
+else:
+    try:
+        subprocess.check_call(["pkg-config", "--exists", "realsense2"])
+        env.ParseConfig("pkg-config --cflags --libs realsense2")
+        env.Append(CPPDEFINES=["REALSENSE_DIRECT_ENABLED"])
+        print("RealSense direct capture enabled from pkg-config realsense2.")
+    except (OSError, subprocess.CalledProcessError):
+        print("RealSense direct capture SDK not found; building explicit stub.")
+
+sources = Glob("src/*.cpp")
+output_name = ARGUMENTS.get("output_name", "realsense_shared_memory")
+
+library = env.SharedLibrary(
+    target=os.path.join("bin", output_name),
+    source=sources,
+)
+
+Default(library)

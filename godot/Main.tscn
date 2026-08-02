@@ -1,0 +1,61 @@
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="Script" path="res://godot/runtime/point_cloud/unified_point_cloud_view.gd" id="1_view"]
+[ext_resource type="Script" path="res://godot/robots/so101/so101_robot_overlay.gd" id="2_overlay"]
+[ext_resource type="Script" path="res://godot/runtime/point_cloud/so101_motion_calibrator.gd" id="3_calibrator"]
+[ext_resource type="Script" path="res://godot/runtime/remote_control_gateway.gd" id="4_gateway"]
+[ext_resource type="Script" path="res://godot/runtime/streaming/viewport_stream_server.gd" id="5_stream"]
+
+[sub_resource type="Environment" id="Environment_default"]
+background_mode = 1
+background_color = Color(0.03, 0.035, 0.04, 1)
+
+[node name="View" type="Node3D"]
+script = ExtResource("1_view")
+editor_stream_enabled = true
+show_debug_panel = false
+max_depth_m = 1.5
+render_mode = "independent_mesh"
+point_pixel_size = 1.5
+oakd_enabled = false
+lock_realsense_to_saved_alignment = false
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_default")
+
+[node name="PreviewLight" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-30, -45, 0)
+light_energy = 0.55
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.939693, 0.34202, 0, -0.34202, 0.939693, 0, 0.45, 1.1)
+current = true
+
+[node name="DebugPanelAnchor" type="Node3D" parent="."]
+
+[node name="WorldLevelAnchor" type="Node3D" parent="."]
+
+[node name="SO101RobotOverlay" type="Node3D" parent="WorldLevelAnchor"]
+script = ExtResource("2_overlay")
+overlay_enabled = true
+overlay_transparency = 0.4
+mask_scanned_robot = false
+
+[node name="CameraClouds" type="Node3D" parent="WorldLevelAnchor"]
+
+[node name="CalibrationPairs" type="Node3D" parent="WorldLevelAnchor"]
+
+[node name="Reference" type="Node3D" parent="WorldLevelAnchor/CalibrationPairs"]
+
+[node name="Target" type="Node3D" parent="WorldLevelAnchor/CalibrationPairs"]
+
+[node name="SO101MotionCalibrator" type="Node" parent="."]
+script = ExtResource("3_calibrator")
+
+[node name="RemoteControlGateway" type="Node" parent="."]
+script = ExtResource("4_gateway")
+
+[node name="ViewportStreamServer" type="Node" parent="."]
+script = ExtResource("5_stream")
+rgbd_root_path = NodePath("..")
+tracking_source_path = NodePath("../RemoteControlGateway")

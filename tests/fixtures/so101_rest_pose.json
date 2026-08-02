@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "test-rest",
+  "follower_serial": "test-follower",
+  "captured_unix_ms": 0,
+  "capture_samples": 1,
+  "raw_positions": [2048, 3641, 2958, 3072, 2048, 1400],
+  "normalized_positions": [0.0, 140.0, 80.0, 90.0, 0.0, 20.0]
+}

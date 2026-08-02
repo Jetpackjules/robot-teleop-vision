@@ -1,0 +1,31 @@
+{
+  "leader": {
+    "serial": "test-leader",
+    "port": "test://leader",
+    "calibration": {
+      "homing_offset": [-2048, -2048, -2048, -2048, -2048, 0],
+      "drive_mode": [0, 0, 0, 0, 0, 0],
+      "start_pos": [0, 0, 0, 0, 0, 1000],
+      "end_pos": [4095, 4095, 4095, 4095, 4095, 3000],
+      "calib_mode": ["DEGREE", "DEGREE", "DEGREE", "DEGREE", "DEGREE", "LINEAR"]
+    }
+  },
+  "follower": {
+    "serial": "test-follower",
+    "port": "test://follower",
+    "calibration": {
+      "homing_offset": [-2048, -2048, -2048, -2048, -2048, 0],
+      "drive_mode": [0, 0, 0, 0, 0, 0],
+      "start_pos": [0, 0, 0, 0, 0, 1000],
+      "end_pos": [4095, 4095, 4095, 4095, 4095, 3000],
+      "calib_mode": ["DEGREE", "DEGREE", "DEGREE", "DEGREE", "DEGREE", "LINEAR"]
+    }
+  },
+  "motor_names": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"],
+  "command_port": 14248,
+  "status_port": 14249,
+  "godot_status_port": 14250,
+  "watchdog_ms": 250,
+  "start_pose_tolerance": [20.0, 20.0, 20.0, 20.0, 25.0, 18.0],
+  "max_step": [4.0, 4.0, 4.0, 5.0, 6.0, 1.5]
+}

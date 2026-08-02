@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install -e ".[test,calibration]"
+      - name: Compile Python sources
+        run: python -m compileall -q robot_teleop tools tests
+      - name: Run hardware-free tests
+        run: python -m pytest -q
+
+  godot-scan:
+    name: Godot script/import scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Godot 4.6.3
+        run: |
+          curl -fL -o godot.zip https://github.com/godotengine/godot-builds/releases/download/4.6.3-stable/Godot_v4.6.3-stable_linux.x86_64.zip
+          unzip -q godot.zip
+          chmod +x Godot_v4.6.3-stable_linux.x86_64
+      - name: Scan without loading site-specific native libraries
+        run: |
+          mv native/realsense_shared_memory/realsense_shared_memory.gdextension native/realsense_shared_memory/realsense_shared_memory.gdextension.disabled
+          ./Godot_v4.6.3-stable_linux.x86_64 --headless --editor --path . --quit 2>&1 | tee godot-scan.log
+          ! grep -Eiq "parse error|script error" godot-scan.log
+
+  windows-package:
+    name: Windows packaged runtime
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Godot and export templates
+        run: |
+          curl -fL -o godot.zip https://github.com/godotengine/godot-builds/releases/download/4.6.3-stable/Godot_v4.6.3-stable_linux.x86_64.zip
+          curl -fL -o templates.tpz https://github.com/godotengine/godot-builds/releases/download/4.6.3-stable/Godot_v4.6.3-stable_export_templates.tpz
+          unzip -q godot.zip
+          chmod +x Godot_v4.6.3-stable_linux.x86_64
+          mkdir -p "$HOME/.local/share/godot/export_templates/4.6.3.stable"
+          unzip -q templates.tpz -d templates-unpacked
+          cp templates-unpacked/templates/* "$HOME/.local/share/godot/export_templates/4.6.3.stable/"
+      - name: Export Windows runtime
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("native/realsense_shared_memory/realsense_shared_memory.gdextension")
+          lines = [line for line in path.read_text().splitlines() if not line.startswith("linux.")]
+          path.write_text("\n".join(lines) + "\n")
+          PY
+          mkdir -p dist/windows
+          ./Godot_v4.6.3-stable_linux.x86_64 --headless --path . --export-release "Windows Desktop" dist/windows/RobotTeleopVision.exe
+      - name: Assemble operator package
+        run: |
+          mkdir -p package
+          cp -r dist/windows/* package/
+          cp -r robot_teleop tools web config native assets docs scripts package/
+          cp README.md pyproject.toml package/
+          rm -rf package/tests package/config/local.toml package/native/realsense_shared_memory/src package/native/realsense_shared_memory/bin/*.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: robot-teleop-vision-windows
+          path: package
+          if-no-files-found: error

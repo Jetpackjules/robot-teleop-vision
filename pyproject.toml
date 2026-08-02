@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "robot-teleop-vision"
+version = "0.1.0"
+description = "Modular RealSense point-cloud teleoperation with a Godot runtime and browser operator UI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "aiortc>=1.9",
+  "av>=12",
+  "numpy>=1.26",
+  "opencv-python-headless>=4.10",
+  "PyJWT[crypto]>=2.8",
+  "scipy>=1.11",
+  "tomli>=2; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+realsense = ["pyrealsense2>=2.55; platform_system != 'Darwin'"]
+calibration = ["open3d>=0.18"]
+test = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+robot-teleop = "robot_teleop.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["robot_teleop"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

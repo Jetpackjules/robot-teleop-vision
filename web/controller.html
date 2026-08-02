@@ -1,0 +1,1082 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Digital Window Controller</title>
+  <link rel="icon" href="data:,">
+  <script>
+    // One stable identity for every stream and control channel in this page.
+    window.robotTeleopPageId = (
+      window.crypto && typeof window.crypto.randomUUID === "function"
+        ? window.crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    ).replace(/[^A-Za-z0-9_-]/g, "");
+  </script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --panel: rgba(14, 16, 18, 0.88);
+      --line: rgba(255, 255, 255, 0.14);
+      --text: #f5f7fb;
+      --muted: #b7c0cb;
+      --ok: #53e391;
+      --warn: #ffd166;
+      --bad: #ff6b6b;
+      --accent: #8fd3ff;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      overflow: hidden;
+      background: #050607;
+      color: var(--text);
+      font: 15px/1.4 system-ui, sans-serif;
+    }
+#viewport-video,
+#viewport-image,
+#hybrid-canvas {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: contain;
+      background: #050607;
+      cursor: crosshair;
+    }
+#viewport-video[hidden],
+#viewport-image[hidden],
+#hybrid-canvas[hidden] {
+      display: none;
+    }
+    .topbar {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      right: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      pointer-events: none;
+      z-index: 3;
+    }
+    .control-stack {
+      width: min(360px, calc(100vw - 32px));
+      max-height: calc(100vh - 32px);
+      display: grid;
+      gap: 8px;
+      overflow-y: auto;
+      scrollbar-gutter: stable;
+      pointer-events: auto;
+    }
+    .status-chip,
+    details.settings {
+      pointer-events: auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(12px);
+    }
+    .status-chip {
+      min-width: min(360px, calc(100vw - 32px));
+      padding: 10px 12px;
+      border-radius: 8px;
+      font: 13px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .status-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+      font: 700 13px/1.2 system-ui, sans-serif;
+    }
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--warn);
+      flex: 0 0 auto;
+    }
+    .dot.ok { background: var(--ok); }
+    .dot.bad { background: var(--bad); }
+    .status-lines {
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+    .head-height-control {
+      margin-top: 10px;
+      padding-top: 9px;
+      border-top: 1px solid var(--line);
+    }
+    #claw-camera-panel {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 2;
+      width: min(30vw, 420px);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #050607;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.48);
+      overflow: hidden;
+    }
+    #claw-camera-panel[hidden],
+    #claw-camera-view[hidden] {
+      display: none;
+    }
+    #claw-camera-view {
+      display: block;
+      width: 100%;
+      max-height: 32vh;
+      object-fit: contain;
+    }
+    #claw-camera-status {
+      padding: 12px;
+      color: var(--muted);
+      font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .keyboard-guide {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .keyboard-guide strong {
+      color: var(--text);
+    }
+    kbd {
+      display: inline-block;
+      min-width: 42px;
+      margin-right: 5px;
+      padding: 1px 5px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--text);
+      text-align: center;
+      font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .network-stats {
+      padding: 10px 12px;
+      border: 1px solid #343434;
+      background: #151515;
+      color: #d8d8d8;
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-line;
+    }
+    .latency-panel {
+      padding: 9px 10px 7px;
+      border: 1px solid #343434;
+      background: #101010;
+      color: #d8d8d8;
+      font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    .latency-panel-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 5px;
+    }
+    #rgbd-latency-graph {
+      display: block;
+      width: 100%;
+      height: 96px;
+    }
+    details.settings {
+      width: min(360px, calc(100vw - 32px));
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 11px 13px;
+      font-weight: 700;
+    }
+    summary::-webkit-details-marker {
+      display: none;
+    }
+    .settings-body {
+      border-top: 1px solid var(--line);
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    select,
+    input[type="range"],
+    button,
+    a.button {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      font: inherit;
+    }
+    select {
+      padding: 0 10px;
+      background: #171a1e;
+    }
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+    .toggle-row {
+      grid-template-columns: 1fr auto;
+      align-items: center;
+    }
+    .value-label {
+      color: var(--text);
+      font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    button,
+    a.button {
+      display: grid;
+      place-items: center;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .button-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .primary {
+      background: rgba(143, 211, 255, 0.18);
+      border-color: rgba(143, 211, 255, 0.42);
+    }
+    .hold {
+      background: rgba(255, 107, 107, 0.2);
+      border-color: rgba(255, 107, 107, 0.7);
+      color: #fff;
+      font-weight: 800;
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+    .calibration-progress {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .calibration-progress progress {
+      width: 100%;
+      height: 12px;
+      accent-color: var(--accent);
+    }
+    #start-overlay {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(0, 0, 0, 0.55);
+      z-index: 4;
+    }
+    #start-overlay[hidden] {
+      display: none;
+    }
+    .start-card {
+      width: min(360px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
+    }
+    .start-card h1 {
+      margin: 0 0 12px;
+      font-size: 20px;
+    }
+    .start-card p {
+      color: var(--muted);
+      margin: 0 0 16px;
+    }
+    #video-preview {
+      display: none;
+    }
+    #manual-calibration-workspace {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 5;
+      width: min(980px, calc(100vw - 408px));
+      max-height: calc(100vh - 32px);
+      overflow: auto;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(8, 10, 12, 0.94);
+      box-shadow: 0 22px 70px rgba(0,0,0,.58);
+      backdrop-filter: blur(14px);
+    }
+    #manual-calibration-workspace[hidden] { display: none; }
+    .manual-preview-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(240px, .75fr);
+      gap: 10px;
+    }
+    .manual-preview-grid figure { margin: 0; }
+    .manual-preview-grid figcaption { margin-bottom: 5px; color: var(--muted); font-size: 12px; }
+    .manual-preview-grid canvas {
+      display: block;
+      width: 100%;
+      max-height: 43vh;
+      object-fit: contain;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #111;
+    }
+    .manual-controls {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(130px, 1fr));
+      gap: 9px;
+      margin-top: 10px;
+    }
+    .manual-controls label { min-width: 0; }
+    .manual-actions { display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; margin-top:10px; }
+    .manual-note { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+    @media (max-width: 760px) {
+      .topbar {
+        flex-direction: column;
+      }
+      .status-chip,
+      details.settings,
+      .control-stack {
+        width: 100%;
+      }
+      #claw-camera-panel {
+        width: min(46vw, 320px);
+      }
+    }
+  </style>
+<script type="module" src="./godot_webcam_tracker_bridge.js?v=20260720_cartesian_keys"></script>
+<script type="module" src="./so101_web_serial.js?v=20260731_rest_pose_v1"></script>
+<script type="module" src="./hybrid_rgbd_renderer.js?v=20260802_manual_claw_workspace_v3"></script>
+</head>
+<body>
+<video id="viewport-video" muted autoplay playsinline></video>
+<img id="viewport-image" alt="" hidden>
+<canvas id="hybrid-canvas" hidden></canvas>
+
+  <div class="topbar">
+    <div class="control-stack">
+      <details class="settings">
+      <summary>Settings</summary>
+      <div class="settings-body">
+        <label>
+          Stream
+          <select id="stream-preset">
+            <option value="quality" selected>Quality point cloud</option>
+            <option value="latency">Low latency point cloud</option>
+          </select>
+        </label>
+        <label class="toggle-row"><span>Persistent still-scene compression</span><input id="persistent-temporal-reference-enabled" type="checkbox" checked></label>
+        <label class="toggle-row"><span>Full RGB frame updates</span><input id="full-rgb-frame-updates-enabled" type="checkbox"></label>
+        <label class="toggle-row"><span>Claw camera</span><input id="claw-camera-enabled" type="checkbox" checked></label>
+        <div class="button-row">
+          <button id="recenter" class="primary" type="button">Recenter</button>
+          <button id="restart" type="button">Restart</button>
+        </div>
+        <div class="button-row">
+          <button id="arm-connect" type="button">Connect Leader</button>
+          <button id="arm-keyboard" type="button" title="WASD moves the claw in its captured level plane; R/F raises/lowers it; I/K pitches and J/L rolls the wrist; Q/E opens/closes it; Shift enables precision motion.">Keyboard Control</button>
+        </div>
+        <button id="arm-enable" class="primary" type="button" disabled>Enable Arm</button>
+        <button id="arm-hold" class="hold" type="button">Hold Arm</button>
+        <button id="arm-return-rest" type="button" title="Slowly returns to the saved encoder pose after a modeled-clearance preflight. Hold Arm interrupts it.">Return Arm to Rest Pose</button>
+        <label class="toggle-row" title="Opt-in only: modeled robot/base checks cannot detect a person or loose object in the path."><span>Auto-return to rest after 10 min</span><input id="arm-idle-return-enabled" type="checkbox"></label>
+        <button id="arm-restart" type="button">Restart Arm Connection</button>
+        <label class="toggle-row"><span>Live measured arm feedback</span><input id="arm-measured-feedback-enabled" type="checkbox" checked></label>
+        <label class="toggle-row"><span>Show commanded target ghost</span><input id="arm-target-ghost-enabled" type="checkbox" checked></label>
+        <label class="toggle-row"><span>Stop on following error / contact</span><input id="arm-following-error-safety-enabled" type="checkbox" checked></label>
+        <label class="toggle-row"><span>Freeze overlay if telemetry is stale</span><input id="arm-freeze-overlay-on-stale-enabled" type="checkbox" checked></label>
+        <label class="toggle-row"><span>Wrist / claw visual correction</span><input id="arm-d455-visual-correction-enabled" type="checkbox"></label>
+        <div id="arm-health" class="network-stats">Follower status unavailable</div>
+        <div id="network-stats" class="network-stats">Network stats unavailable</div>
+        <div class="latency-panel">
+          <div class="latency-panel-header"><span>RGB-D capture latency · 120s</span><span id="rgbd-latency-value">—</span></div>
+          <canvas id="rgbd-latency-graph" width="336" height="96" aria-label="RGB-D latency over the last 120 seconds"></canvas>
+        </div>
+<a class="button" href="./webcam_tracker_test.html">Advanced</a>
+<a id="transport-link" class="button" href="/frame-stream">Frame Stream Fallback</a>
+      </div>
+      </details>
+      <details class="settings" id="view-settings">
+        <summary>View</summary>
+        <div class="settings-body">
+          <label class="toggle-row"><span>Inspect orbit</span><input id="inspect-enabled" type="checkbox" checked></label>
+          <label>Orbit span <span id="orbit-span-value" class="value-label">160 deg</span><input id="orbit-span" type="range" min="30" max="360" step="5" value="160"></label>
+          <label>Orbit response <span id="orbit-response-value" class="value-label">2.5</span><input id="orbit-response" type="range" min="0.4" max="6" step="0.1" value="2.5"></label>
+          <label>View distance <span id="orbit-distance-value" class="value-label">0.35 m</span><input id="orbit-distance" type="range" min="0.25" max="2.5" step="0.05" value="0.35"></label>
+          <label class="toggle-row"><span>Head Z zoom</span><input id="dolly-enabled" type="checkbox" checked></label>
+          <label>Zoom strength <span id="dolly-gain-value" class="value-label">0.008 m/cm</span><input id="dolly-gain" type="range" min="0" max="0.04" step="0.001" value="0.008"></label>
+          <label>Field of view <span id="inspect-fov-value" class="value-label">55 deg</span><input id="inspect-fov" type="range" min="30" max="100" step="1" value="55"></label>
+          <label class="toggle-row"><span>White background</span><input id="white-background-enabled" type="checkbox"></label>
+          <label class="toggle-row"><span>Crisp robot overlay</span><input id="robot-overlay-enabled" type="checkbox" checked></label>
+          <label>Robot overlay style
+            <select id="robot-overlay-style">
+              <option value="alignment" selected>Alignment (transparent + outlines)</option>
+              <option value="solid">Solid yellow</option>
+            </select>
+          </label>
+          <label class="toggle-row"><span>Overlay occludes scanned arm</span><input id="robot-overlay-occlusion-enabled" type="checkbox" checked></label>
+          <button id="arm-position-calibrate" class="primary" type="button">Calibrate Full Arm</button>
+          <div class="calibration-progress">
+            <progress id="arm-calibration-progress" max="1" value="0"></progress>
+            <span id="arm-calibration-progress-value" class="value-label">0%</span>
+          </div>
+          <button id="arm-joints-refine" type="button">Refine Arm Servos</button>
+          <button id="manual-claw-calibration-open" type="button">Manual Wrist / Claw Calibration</button>
+          <div id="arm-position-status" class="network-stats">Arm position calibration idle</div>
+          <button id="inspect-recenter" type="button">Recenter Inspect View</button>
+        </div>
+      </details>
+    </div>
+    <div class="status-chip">
+      <div class="status-main"><span id="status-dot" class="dot"></span><span id="status-title">Starting</span></div>
+      <div id="status-lines" class="status-lines">Preparing controller</div>
+      <label class="head-height-control">Height above robot base <span id="head-height-value" class="value-label">0.35 m</span><input id="head-height" type="range" min="0" max="1" step="0.01" value="0.35"></label>
+      <label class="head-height-control">View elevation <span id="orbit-elevation-value" class="value-label">0 deg</span><input id="orbit-elevation" type="range" min="-60" max="60" step="1" value="0"></label>
+      <div id="keyboard-controls-guide" class="keyboard-guide" hidden>
+        <strong>Keyboard claw control</strong><br>
+        <kbd>W / S</kbd> forward / back<br>
+        <kbd>A / D</kbd> left / right<br>
+        <kbd>R / F</kbd> up / down<br>
+        <kbd>Q / E</kbd> open / close claw<br>
+        <kbd>I / K</kbd> wrist up / down<br>
+        <kbd>J / L</kbd> wrist rotate left / right<br>
+        <kbd>Shift</kbd> precision speed
+      </div>
+    </div>
+  </div>
+
+  <div id="claw-camera-panel" hidden>
+    <img id="claw-camera-view" alt="Arm claw camera" hidden>
+    <div id="claw-camera-status">Connecting to claw camera…</div>
+  </div>
+
+  <section id="manual-calibration-workspace" hidden aria-label="Manual wrist and claw calibration">
+    <div class="manual-preview-grid">
+      <figure><figcaption>Aligned RGB + exact projected 3D geometry</figcaption><canvas id="manual-rgb-canvas"></canvas></figure>
+      <figure><figcaption>Automatic claw crop</figcaption><canvas id="manual-crop-canvas"></canvas></figure>
+    </div>
+    <div class="manual-controls">
+      <label>Wrist flex zero <span data-manual-value="manual_wrist_flex_trim_degrees" class="value-label">0.0°</span><input data-manual-key="manual_wrist_flex_trim_degrees" type="range" min="-90" max="90" step="0.5" value="0"></label>
+      <label>Wrist rotation zero <span data-manual-value="manual_wrist_roll_trim_degrees" class="value-label">0.0°</span><input data-manual-key="manual_wrist_roll_trim_degrees" type="range" min="-180" max="180" step="0.5" value="0"></label>
+      <label>Wrist direction<select id="manual-wrist-direction"><option value="0" selected>Keep saved direction</option><option value="1">Normal (+)</option><option value="-1">Reversed (−)</option></select></label>
+      <label>Overlay opacity <span data-manual-value="manual_overlay_opacity" class="value-label">30%</span><input data-manual-key="manual_overlay_opacity" type="range" min="0.05" max="0.9" step="0.05" value="0.3"></label>
+      <label>Tool X <span data-manual-value="manual_tool_x" class="value-label">0.0 mm</span><input data-manual-key="manual_tool_x" type="range" min="-0.05" max="0.05" step="0.0005" value="0"></label>
+      <label>Tool Y <span data-manual-value="manual_tool_y" class="value-label">0.0 mm</span><input data-manual-key="manual_tool_y" type="range" min="-0.05" max="0.05" step="0.0005" value="0"></label>
+      <label>Tool Z <span data-manual-value="manual_tool_z" class="value-label">0.0 mm</span><input data-manual-key="manual_tool_z" type="range" min="-0.05" max="0.05" step="0.0005" value="0"></label>
+      <label>Tool roll <span data-manual-value="manual_tool_roll" class="value-label">0.0°</span><input data-manual-key="manual_tool_roll" type="range" min="-180" max="180" step="0.5" value="0"></label>
+      <label>Tool pitch <span data-manual-value="manual_tool_pitch" class="value-label">0.0°</span><input data-manual-key="manual_tool_pitch" type="range" min="-180" max="180" step="0.5" value="0"></label>
+      <label>Tool yaw <span data-manual-value="manual_tool_yaw" class="value-label">0.0°</span><input data-manual-key="manual_tool_yaw" type="range" min="-180" max="180" step="0.5" value="0"></label>
+      <label>Opening offset <span data-manual-value="manual_opening_offset_degrees" class="value-label">0.0°</span><input data-manual-key="manual_opening_offset_degrees" type="range" min="-35" max="35" step="0.25" value="0"></label>
+      <label>Opening scale <span data-manual-value="manual_opening_scale" class="value-label">1.000×</span><input data-manual-key="manual_opening_scale" type="range" min="0.5" max="1.5" step="0.005" value="1"></label>
+    </div>
+    <p class="manual-note">Preview only. This does not move the arm or modify the saved registration until Save is pressed. The live point cloud remains visible and orbitable behind this panel.</p>
+    <div class="manual-actions"><button id="manual-calibration-reset" type="button">Reset Preview</button><button id="manual-calibration-cancel" type="button">Cancel</button><button id="manual-calibration-save" class="primary" type="button">Save Calibration</button></div>
+  </section>
+
+  <div id="start-overlay" hidden>
+    <div class="start-card">
+      <h1>Start Controller</h1>
+      <p id="start-message">Camera permission needs a tap.</p>
+      <button id="start-button" class="primary" type="button">Start</button>
+    </div>
+  </div>
+
+  <div id="video-preview"></div>
+
+<script type="text/plain" id="legacy-controller-script">
+    const viewportVideo = document.getElementById("viewport-video");
+    const viewportImage = document.getElementById("viewport-image");
+    const streamPresetSelect = document.getElementById("stream-preset");
+    const statusDot = document.getElementById("status-dot");
+    const statusTitle = document.getElementById("status-title");
+    const statusLines = document.getElementById("status-lines");
+    const startOverlay = document.getElementById("start-overlay");
+    const startMessage = document.getElementById("start-message");
+    const startButton = document.getElementById("start-button");
+    const armConnectButton = document.getElementById("arm-connect");
+    const armKeyboardButton = document.getElementById("arm-keyboard");
+    const armEnableButton = document.getElementById("arm-enable");
+    const armHoldButton = document.getElementById("arm-hold");
+    const armRestartButton = document.getElementById("arm-restart");
+    const armHealth = document.getElementById("arm-health");
+    const networkStats = document.getElementById("network-stats");
+    const armPositionButton = document.getElementById("arm-position-calibrate");
+    const armJointsButton = document.getElementById("arm-joints-refine");
+    const armPositionStatus = document.getElementById("arm-position-status");
+    const viewControlIds = ["orbit-span", "orbit-response", "orbit-distance", "dolly-gain", "inspect-fov"];
+
+    let peer = null;
+    let imageUrl = "";
+    let streamMode = "quality";
+    let streamState = "idle";
+    let trackingState = "idle";
+    let stats = { fps: 0, bitrateKbps: 0, framesDecoded: 0, framesDropped: 0, packetsLost: 0, lossPercent: 0, jitterMs: 0, rttMs: 0, connection: "--" };
+    let previousStats = null;
+    let userStarted = false;
+
+    function viewSettingsPayload(extra = {}) {
+      const span = Number(document.getElementById("orbit-span").value);
+      const response = Number(document.getElementById("orbit-response").value);
+      const orbitDistance = Number(document.getElementById("orbit-distance").value);
+      return {
+        inspect_enabled: document.getElementById("inspect-enabled").checked,
+        yaw_gain: response,
+        pitch_gain: response * 0.73,
+        max_yaw: span * 0.5,
+        max_pitch: Math.min(89, span * 0.28),
+        focus_distance: 0.45,
+        orbit_distance: orbitDistance,
+        dolly_enabled: document.getElementById("dolly-enabled").checked,
+        dolly_gain: Number(document.getElementById("dolly-gain").value),
+        min_distance: 0.2,
+        max_distance: 3.0,
+        fov: Number(document.getElementById("inspect-fov").value),
+        robot_overlay_enabled: document.getElementById("robot-overlay-enabled").checked,
+        ...extra,
+      };
+    }
+
+    function updateViewLabels() {
+      document.getElementById("orbit-span-value").textContent = `${document.getElementById("orbit-span").value} deg`;
+      document.getElementById("orbit-response-value").textContent = document.getElementById("orbit-response").value;
+      document.getElementById("orbit-distance-value").textContent = `${Number(document.getElementById("orbit-distance").value).toFixed(2)} m`;
+      document.getElementById("dolly-gain-value").textContent = `${Number(document.getElementById("dolly-gain").value).toFixed(3)} m/cm`;
+      document.getElementById("inspect-fov-value").textContent = `${document.getElementById("inspect-fov").value} deg`;
+    }
+
+    function sendViewSettings(extra = {}) {
+      updateViewLabels();
+      const payload = viewSettingsPayload(extra);
+      localStorage.setItem("digitalWindowViewSettings", JSON.stringify(payload));
+      return window.sendGodotViewSettings && window.sendGodotViewSettings(payload);
+    }
+
+    function restoreViewSettings() {
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem("digitalWindowViewSettings") || "null"); } catch (_) {}
+      if (!saved) return updateViewLabels();
+      document.getElementById("inspect-enabled").checked = saved.inspect_enabled === true;
+      document.getElementById("orbit-span").value = String(Math.max(30, Math.min(360, (saved.max_yaw || 80) * 2)));
+      document.getElementById("orbit-response").value = String(saved.yaw_gain || 2.2);
+      document.getElementById("orbit-distance").value = String(saved.orbit_distance || 0.65);
+      document.getElementById("dolly-enabled").checked = saved.dolly_enabled !== false;
+      document.getElementById("dolly-gain").value = String(saved.dolly_gain ?? 0.008);
+      document.getElementById("inspect-fov").value = String(saved.fov || 60);
+      document.getElementById("robot-overlay-enabled").checked = false;
+      updateViewLabels();
+    }
+
+    function normalizedStreamClick(event, element) {
+      const mediaWidth = element.videoWidth || element.naturalWidth || 0;
+      const mediaHeight = element.videoHeight || element.naturalHeight || 0;
+      const rect = element.getBoundingClientRect();
+      if (!mediaWidth || !mediaHeight || rect.width <= 0 || rect.height <= 0) return null;
+      const scale = Math.min(rect.width / mediaWidth, rect.height / mediaHeight);
+      const displayedWidth = mediaWidth * scale;
+      const displayedHeight = mediaHeight * scale;
+      const left = rect.left + (rect.width - displayedWidth) * 0.5;
+      const top = rect.top + (rect.height - displayedHeight) * 0.5;
+      const x = event.clientX - left;
+      const y = event.clientY - top;
+      if (x < 0 || y < 0 || x > displayedWidth || y > displayedHeight) return null;
+      return [x / displayedWidth, y / displayedHeight];
+    }
+
+    function focusInspectAtStreamClick(event) {
+      const coordinates = normalizedStreamClick(event, event.currentTarget);
+      if (!coordinates) return;
+      document.getElementById("inspect-enabled").checked = true;
+      sendViewSettings({
+        inspect_enabled: true,
+        focus_pick_uv: coordinates,
+        focus_pick_sent_unix_ms: Date.now(),
+      });
+    }
+
+    const streamPresets = {
+      latency: {
+        label: "Latency",
+        width: 960,
+        fps: 30,
+        jpegQuality: 60,
+        source: "raw",
+        webrtcBitrateKbps: 7000,
+        videoBitrate: "7000k",
+        av1Bitrate: "2200k",
+        webmBitrate: "6000k",
+      },
+      quality: {
+        label: "Quality",
+        width: 1280,
+        fps: 30,
+        jpegQuality: 90,
+        source: "raw",
+        webrtcBitrateKbps: 16000,
+        videoBitrate: "16000k",
+        av1Bitrate: "3600k",
+        webmBitrate: "12000k",
+      },
+    };
+
+    const trackingPreset = {
+      trackingWidth: 480,
+      trackingHeight: 360,
+      trackingFps: 20,
+      trackingInitialScale: 3.2,
+      trackingStepSize: 2,
+      trackingEdgesDensity: 0.09,
+    };
+
+    function pageHost() {
+      return window.location.hostname || "127.0.0.1";
+    }
+
+    function remoteUrl() {
+      if (window.location.protocol === "https:") {
+        return `wss://${window.location.host}/head-tracking`;
+      }
+      return `ws://${pageHost()}:8766`;
+    }
+
+    function streamBaseUrl() {
+      const preset = currentPreset();
+      if (window.location.protocol === "https:") {
+        return `${window.location.origin}/stream?w=${preset.width}&q=${preset.jpegQuality}&fps=${preset.fps}`;
+      }
+      return `http://${pageHost()}:8780/stream?w=${preset.width}&q=${preset.jpegQuality}&fps=${preset.fps}`;
+    }
+
+    function videoUrl(codec = "h264") {
+      const preset = currentPreset();
+      const path = codec === "av1" ? "video-av1.webm" : "video.mp4";
+      const bitrate = codec === "av1" ? preset.av1Bitrate : preset.videoBitrate;
+      if (window.location.protocol === "https:") {
+        return `${window.location.origin}/${path}?w=${preset.width}&q=${preset.jpegQuality}&fps=${preset.fps}&bitrate=${bitrate}&encoder=auto`;
+      }
+      return `https://${pageHost()}:8765/${path}?w=${preset.width}&q=${preset.jpegQuality}&fps=${preset.fps}&bitrate=${bitrate}&encoder=auto`;
+    }
+
+    function browserSupportsAv1() {
+      const type = 'video/webm; codecs="av01.0.05M.08"';
+      return (typeof MediaSource !== "undefined" && MediaSource.isTypeSupported(type))
+        || viewportVideo.canPlayType(type) !== "";
+    }
+
+    function currentPreset() {
+      return streamPresets[streamPresetSelect.value] || streamPresets.quality;
+    }
+
+    async function waitForBridge() {
+      for (let i = 0; i < 80; i += 1) {
+        if (typeof window.startGodotWebcamTracker === "function") return true;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return false;
+    }
+
+    function showVideo() {
+      viewportImage.hidden = true;
+      viewportVideo.hidden = false;
+    }
+
+    function showImage() {
+      viewportVideo.hidden = true;
+      viewportImage.hidden = false;
+    }
+
+    function stopViewport() {
+      if (peer) {
+        peer.close();
+        peer = null;
+      }
+      viewportVideo.pause();
+      viewportVideo.removeAttribute("src");
+      viewportVideo.srcObject = null;
+      viewportVideo.load();
+      if (imageUrl) {
+        URL.revokeObjectURL(imageUrl);
+        imageUrl = "";
+      }
+      viewportImage.removeAttribute("src");
+      previousStats = null;
+      stats = { fps: 0, bitrateKbps: 0, framesDecoded: 0, framesDropped: 0, packetsLost: 0, lossPercent: 0, jitterMs: 0, rttMs: 0, connection: "--" };
+    }
+
+    async function waitForIceGatheringComplete(pc) {
+      if (pc.iceGatheringState === "complete") return;
+      await new Promise((resolve) => {
+        const check = () => {
+          if (pc.iceGatheringState === "complete") {
+            pc.removeEventListener("icegatheringstatechange", check);
+            resolve();
+          }
+        };
+        pc.addEventListener("icegatheringstatechange", check);
+        setTimeout(resolve, 1500);
+      });
+    }
+
+    async function startWebRtcViewport() {
+      stopViewport();
+      if (!window.RTCPeerConnection) {
+        startVideoFallback();
+        return;
+      }
+      const preset = currentPreset();
+      streamMode = preset.label;
+      streamState = "connecting";
+      updateStatus();
+      const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+      peer = pc;
+      showVideo();
+      viewportVideo.muted = true;
+      viewportVideo.playsInline = true;
+      viewportVideo.autoplay = true;
+
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.ontrack = (event) => {
+        const receiver = pc.getReceivers().find((candidate) => candidate.track === event.track);
+        if (receiver && "playoutDelayHint" in receiver) receiver.playoutDelayHint = 0;
+        if (receiver && "jitterBufferTarget" in receiver) receiver.jitterBufferTarget = 0;
+        viewportVideo.srcObject = event.streams[0] || new MediaStream([event.track]);
+        const play = viewportVideo.play();
+        if (play && typeof play.catch === "function") play.catch(() => {});
+      };
+      pc.onconnectionstatechange = () => {
+        streamState = `webrtc ${pc.connectionState}`;
+        updateStatus();
+        if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+          startVideoFallback();
+        }
+      };
+
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await waitForIceGatheringComplete(pc);
+        const response = await fetch("/webrtc-offer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sdp: pc.localDescription.sdp,
+            type: pc.localDescription.type,
+            width: preset.width,
+            fps: preset.fps,
+            quality: preset.jpegQuality,
+            source: preset.source,
+            bitrateKbps: preset.webrtcBitrateKbps,
+          }),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        await pc.setRemoteDescription(await response.json());
+      } catch (err) {
+        streamState = `webrtc failed: ${err && err.message ? err.message : err}`;
+        updateStatus();
+        startVideoFallback();
+      }
+    }
+
+    function startVideoFallback() {
+      stopViewport();
+      showVideo();
+      const useAv1 = browserSupportsAv1();
+      streamState = useAv1 ? "AV1 fallback" : "H.264 fallback";
+      viewportVideo.muted = true;
+      viewportVideo.playsInline = true;
+      viewportVideo.autoplay = true;
+      viewportVideo.src = `${videoUrl(useAv1 ? "av1" : "h264")}&t=${Date.now()}`;
+      viewportVideo.onerror = () => useAv1 ? startH264Fallback() : startDirectFallback();
+      const play = viewportVideo.play();
+      if (play && typeof play.catch === "function") play.catch(() => {});
+    }
+
+    function startH264Fallback() {
+      stopViewport();
+      showVideo();
+      streamState = "H.264 fallback";
+      viewportVideo.muted = true;
+      viewportVideo.playsInline = true;
+      viewportVideo.autoplay = true;
+      viewportVideo.src = `${videoUrl("h264")}&t=${Date.now()}`;
+      viewportVideo.onerror = () => startDirectFallback();
+      const play = viewportVideo.play();
+      if (play && typeof play.catch === "function") play.catch(() => {});
+    }
+
+    function startDirectFallback() {
+      stopViewport();
+      showImage();
+      streamState = "direct fallback";
+      viewportImage.onerror = () => {
+        streamState = "stream unavailable";
+        updateStatus();
+      };
+      viewportImage.src = `${streamBaseUrl()}&t=${Date.now()}`;
+    }
+
+    async function startTracking() {
+      trackingState = "starting";
+      updateStatus();
+      if (!await waitForBridge()) throw new Error("tracker bridge did not load");
+      await window.startGodotWebcamTracker({
+        ...trackingPreset,
+        neutralZCm: 35,
+        xScale: -1,
+        zScale: 1,
+        maxZM: 5,
+        smoothing: 0.35,
+        preview: false,
+        debug: false,
+        showVideo: false,
+        videoContainerId: "video-preview",
+        showFaceOverlay: false,
+        holdLastPoseMs: 1200,
+        preferredLabel: "ACER HD",
+        backend: "mediapipe",
+        remoteEnabled: true,
+        remoteUrl: remoteUrl(),
+        remoteMaxHz: 90,
+      });
+      trackingState = "tracking";
+      window.setTimeout(() => sendViewSettings(), 150);
+      updateStatus();
+    }
+
+    async function startController() {
+      userStarted = true;
+      startOverlay.hidden = true;
+      try {
+        await Promise.all([startWebRtcViewport(), startTracking()]);
+      } catch (err) {
+        trackingState = `needs start: ${err && err.message ? err.message : err}`;
+        startMessage.textContent = "Camera permission needs a tap.";
+        startOverlay.hidden = false;
+        updateStatus();
+      }
+    }
+
+    async function collectStats() {
+      if (!peer) return;
+      const report = await peer.getStats();
+      let inbound = null;
+      let selectedPair = null;
+      report.forEach((item) => {
+        if (item.type === "inbound-rtp" && item.kind === "video") inbound = item;
+        if (item.type === "candidate-pair" && item.state === "succeeded" && (item.selected || item.nominated)) selectedPair = item;
+      });
+      if (inbound) {
+        const now = inbound.timestamp;
+        let bitrateKbps = 0;
+        let lossPercent = stats.lossPercent || 0;
+        if (previousStats && now > previousStats.timestamp) {
+          bitrateKbps = ((inbound.bytesReceived - previousStats.bytesReceived) * 8) / (now - previousStats.timestamp);
+          const receivedDelta = Math.max(0, (inbound.packetsReceived || 0) - previousStats.packetsReceived);
+          const lostDelta = Math.max(0, (inbound.packetsLost || 0) - previousStats.packetsLost);
+          const packetDelta = receivedDelta + lostDelta;
+          lossPercent = packetDelta ? (lostDelta * 100) / packetDelta : 0;
+        }
+        stats = {
+          ...stats,
+          fps: inbound.framesPerSecond || stats.fps || 0,
+          bitrateKbps: Math.max(0, bitrateKbps),
+          framesDecoded: inbound.framesDecoded || 0,
+          framesDropped: inbound.framesDropped || 0,
+          packetsLost: inbound.packetsLost || 0,
+          lossPercent,
+          jitterMs: Math.max(0, (inbound.jitter || 0) * 1000),
+        };
+        previousStats = {
+          timestamp: now,
+          bytesReceived: inbound.bytesReceived,
+          packetsReceived: inbound.packetsReceived || 0,
+          packetsLost: inbound.packetsLost || 0,
+        };
+      }
+      if (selectedPair) {
+        const local = report.get(selectedPair.localCandidateId);
+        const remoteCandidate = report.get(selectedPair.remoteCandidateId);
+        stats.rttMs = Math.max(0, (selectedPair.currentRoundTripTime || 0) * 1000);
+        const localType = local && local.candidateType ? local.candidateType : "unknown";
+        const remoteType = remoteCandidate && remoteCandidate.candidateType ? remoteCandidate.candidateType : "unknown";
+        const protocol = (local && local.protocol) || "udp";
+        stats.connection = `${localType}->${remoteType} ${protocol}`;
+      }
+    }
+
+    function updateStatus() {
+      const latest = window.godotWebcamTrackerLatest || {};
+      const remote = window.getGodotRemoteHeadTrackingStatus ? window.getGodotRemoteHeadTrackingStatus() : {};
+      const arm = window.getSo101ArmStatus ? window.getSo101ArmStatus() : {};
+      const calibration = (arm.status && arm.status.robot_calibration) || {};
+      const active = latest.active === true;
+      const connected = peer && peer.connectionState === "connected";
+      statusDot.className = "dot " + (connected && active ? "ok" : connected ? "" : "bad");
+      statusTitle.textContent = connected && active ? "Connected" : connected ? "Stream connected" : "Connecting";
+      const size = viewportVideo.videoWidth > 0 ? `${viewportVideo.videoWidth}x${viewportVideo.videoHeight}` : "--";
+      const fps = stats.fps ? `${Math.round(stats.fps)} fps` : "-- fps";
+      const bitrate = stats.bitrateKbps ? `${Math.round(stats.bitrateKbps)} kbps` : "-- kbps";
+      networkStats.textContent = [
+        `Resolution  ${size} @ ${fps}`,
+        `Bitrate     ${bitrate}`,
+        `RTT / jitter ${stats.rttMs.toFixed(1)} / ${stats.jitterMs.toFixed(1)} ms`,
+        `Packet loss ${stats.lossPercent.toFixed(2)}% (${stats.packetsLost} total)`,
+        `Frames      ${stats.framesDecoded} decoded / ${stats.framesDropped} dropped`,
+        `Route       ${stats.connection}`,
+      ].join("\n");
+      statusLines.textContent = [
+        `Stream ${streamMode} | ${size} | ${fps} | ${bitrate}`,
+        `Tracking ${latest.status || trackingState} | ${remote.connected ? "bridge on" : "bridge ..."}`,
+        `Arm ${arm.state || "loading"} | ${arm.keyboardConnected ? "keyboard on" : arm.leaderConnected ? `leader ${arm.leaderHz || 0} Hz` : "controller off"} | follower ${arm.followerConnected ? "on" : "off"}`,
+      ].join("\n");
+      armConnectButton.textContent = arm.leaderConnected ? "Leader Connected" : "Connect Leader";
+      armKeyboardButton.textContent = arm.keyboardConnected ? "Keyboard Enabled" : "Keyboard Control";
+      armKeyboardButton.classList.toggle("primary", arm.keyboardConnected === true);
+      document.getElementById("keyboard-controls-guide").hidden = arm.keyboardConnected !== true;
+      const followerBlocksEnable = ["fault", "restarting", "calibrating", "unresponsive"].includes(arm.state);
+      armEnableButton.disabled = !((arm.leaderConnected || arm.keyboardConnected) && arm.serverConnected && arm.followerConnected) || arm.armed || followerBlocksEnable;
+      armEnableButton.textContent = arm.armed ? "Arm Enabled" : "Enable Arm";
+      armRestartButton.disabled = !arm.serverConnected || arm.restartRequested;
+      armRestartButton.textContent = arm.restartRequested ? "Restarting Arm..." : "Restart Arm Connection";
+      const followerStatus = arm.status || {};
+      armHealth.textContent = [
+        `Follower ${followerStatus.follower_responsive === false ? "UNRESPONSIVE" : followerStatus.follower_connected ? "connected" : "offline"} | ${followerStatus.state || arm.state || "--"}`,
+        `Commands ${followerStatus.command_rate_hz || 0}/s | writes ${followerStatus.write_rate_hz || 0}/s | status age ${followerStatus.status_age_ms == null ? "--" : `${Math.round(followerStatus.status_age_ms)}ms`}`,
+        `Last write ${followerStatus.last_write_age_ms == null ? "--" : `${Math.round(followerStatus.last_write_age_ms)}ms ago`} | restart #${followerStatus.restart_count || 0}`,
+        `Status ${followerStatus.message || "--"}`,
+        `Fault ${arm.fault || "none"}`,
+      ].join("\n");
+      const calibrationCapturing = calibration.state === "capturing";
+      const calibrationSolving = calibration.state === "solving";
+      const calibrationOffline = calibration.state === "offline";
+      const calibrationMode = calibration.calibration_mode || "base";
+      armPositionButton.textContent = calibrationCapturing && calibrationMode === "base" ? "Cancel Arm Calibration" : calibrationSolving && calibrationMode === "base" ? "Fitting Arm Position" : calibrationOffline ? "Godot Calibration Offline" : "Locate Robot Arm";
+      armPositionButton.disabled = calibrationSolving || calibrationOffline || (calibrationCapturing && calibrationMode !== "base");
+      armJointsButton.textContent = calibrationCapturing && calibrationMode === "joints" ? "Cancel Servo Refinement" : calibrationSolving && calibrationMode === "joints" ? "Fitting Arm Servos" : calibrationOffline ? "Godot Calibration Offline" : "Refine Arm Servos";
+      armJointsButton.disabled = calibrationSolving || calibrationOffline || (calibrationCapturing && calibrationMode !== "joints");
+      armPositionStatus.textContent = [
+        calibration.message || "Arm position calibration idle",
+        `Frames ${calibration.frames || 0} | confidence ${Math.round((calibration.confidence || 0) * 100)}%`,
+      ].join("\n");
+    }
+
+    streamPresetSelect.addEventListener("change", () => {
+      if (userStarted) startWebRtcViewport();
+      updateStatus();
+    });
+    document.getElementById("restart").addEventListener("click", startController);
+    document.getElementById("recenter").addEventListener("click", () => {
+      window.recenterGodotWebcamTracker && window.recenterGodotWebcamTracker();
+    });
+    armConnectButton.addEventListener("click", async () => {
+      try {
+        await window.so101ArmController.connectLeader();
+      } catch (err) {
+        window.so101ArmController.latest.fault = String(err && err.message ? err.message : err);
+        window.so101ArmController.emitStatus();
+      }
+    });
+    armKeyboardButton.addEventListener("click", async () => {
+      if (window.so101ArmController.latest.keyboardConnected) {
+        window.so101ArmController.disconnectKeyboard(true);
+      } else {
+        await window.so101ArmController.connectKeyboard();
+      }
+    });
+    armEnableButton.addEventListener("click", () => {
+      try {
+        window.so101ArmController.enableArm();
+      } catch (err) {
+        window.so101ArmController.latest.fault = String(err && err.message ? err.message : err);
+        window.so101ArmController.emitStatus();
+      }
+    });
+    armHoldButton.addEventListener("click", () => window.so101ArmController && window.so101ArmController.hold());
+    armRestartButton.addEventListener("click", () => {
+      try {
+        window.so101ArmController.restartFollower();
+      } catch (err) {
+        window.so101ArmController.latest.fault = String(err && err.message ? err.message : err);
+        window.so101ArmController.emitStatus();
+      }
+    });
+    for (const id of viewControlIds) {
+      const control = document.getElementById(id);
+      control.addEventListener("input", () => sendViewSettings());
+      control.addEventListener("change", () => control.blur());
+    }
+    for (const id of ["inspect-enabled", "dolly-enabled", "robot-overlay-enabled"]) {
+      const control = document.getElementById(id);
+      control.addEventListener("change", () => {
+        sendViewSettings();
+        control.blur();
+      });
+    }
+    document.getElementById("inspect-recenter").addEventListener("click", () => sendViewSettings({ recenter: true }));
+    viewportVideo.addEventListener("click", focusInspectAtStreamClick);
+    viewportImage.addEventListener("click", focusInspectAtStreamClick);
+    armPositionButton.addEventListener("click", () => {
+      const arm = window.getSo101ArmStatus ? window.getSo101ArmStatus() : {};
+      const calibration = (arm.status && arm.status.robot_calibration) || {};
+      const capturing = calibration.state === "capturing";
+      if (!capturing && calibration.state === "offline") {
+        armPositionStatus.textContent = "Godot arm calibrator is offline. Start the Godot runtime, then try again.";
+        return;
+      }
+      if (!capturing && !window.confirm(
+        "The follower robot will perform a bounded calibration sweep.\n\nClear its workspace, stay ready to remove physical power, then press OK to continue."
+      )) return;
+      const sent = sendViewSettings(capturing ? { cancel_robot_position_calibration: true } : { calibrate_robot_position: true });
+      if (!sent) armPositionStatus.textContent = "Start the controller so the Godot bridge can receive calibration commands.";
+    });
+    armJointsButton.addEventListener("click", () => {
+      const arm = window.getSo101ArmStatus ? window.getSo101ArmStatus() : {};
+      const calibration = (arm.status && arm.status.robot_calibration) || {};
+      const capturing = calibration.state === "capturing" && calibration.calibration_mode === "joints";
+      if (!capturing && calibration.state === "offline") {
+        armPositionStatus.textContent = "Godot arm calibrator is offline. Start the Godot runtime, then try again.";
+        return;
+      }
+      if (!capturing && !window.confirm(
+        "Run this only after Locate Robot Arm succeeds.\n\nThe follower will raise, then sweep shoulder, elbow, and wrist flex one at a time. Clear its workspace and stay ready to remove physical power."
+      )) return;
+      const sent = sendViewSettings(capturing ? { cancel_robot_position_calibration: true } : { refine_robot_joint_alignment: true });
+      if (!sent) armPositionStatus.textContent = "Start the controller so the Godot bridge can receive calibration commands.";
+    });
+    startButton.addEventListener("click", startController);
+
+    setInterval(() => {
+      collectStats().catch(() => {});
+      updateStatus();
+    }, 500);
+
+    restoreViewSettings();
+    startController();
+</script>
+<script type="module" src="./controller_hybrid.js?v=20260802_manual_claw_workspace_v2"></script>
+<script type="module" src="./claw_camera_view.js?v=20260721_shared_live_hub"></script>
+</body>
+</html>
