@@ -33,6 +33,16 @@ robot-teleop open
 
 You can instead open this repository directly in Godot and use the **Teleop Setup** dock. It invokes the same commands and does not create a second operator UI.
 
+### Opening the correct Godot project
+
+The repository root is the Godot project root. From Godot's Project Manager, choose **Import**, select this repository's `project.godot`, then choose **Import & Edit**. From a terminal:
+
+```bash
+godot --editor --path /path/to/robot-teleop-vision
+```
+
+The project should appear as **Robot Teleop Vision** with the cyan-and-gold claw icon. If Godot still says **2.5D window V3**, that is the original research workspace, not this repository. The standalone project does not load the legacy views or old Windows experiments.
+
 `start` stays in the foreground and supervises all child processes. Stop with `Ctrl+C` or `robot-teleop stop`; the launcher sends Robot Hold before terminating processes.
 
 ## Add an SO-101
