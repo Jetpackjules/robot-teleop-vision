@@ -4,6 +4,8 @@ config_version=5
 [application]
 
 config/name="Robot Teleop Vision"
+config/description="Modular RealSense point-cloud teleoperation and robot calibration"
+config/icon="res://assets/branding/robot_teleop_vision_icon.png"
 run/main_scene="res://godot/Main.tscn"
 
 [display]
