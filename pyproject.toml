@@ -20,7 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 realsense = ["pyrealsense2>=2.55; platform_system != 'Darwin'"]
-calibration = ["open3d>=0.18"]
+calibration = ["open3d>=0.18", "trimesh>=4.4"]
 test = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
