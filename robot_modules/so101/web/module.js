@@ -31,6 +31,16 @@ const RENDERER = {
     rgbCanvas: "manual-rgb-canvas",
     cropCanvas: "manual-crop-canvas",
   },
+  // Visualization only. The hardware service remains authoritative for joint
+  // limits, path clearance, and contact handling.
+  workspaceBoundary: {
+    shape: "cylinder",
+    anchorLink: "base_link",
+    innerRadius: 0.07,
+    outerRadius: 0.43,
+    minimumHeight: 0.015,
+    maximumHeight: 0.48,
+  },
 };
 
 const MODULE_STYLE = `
@@ -67,6 +77,9 @@ const SETTINGS_MARKUP = `
   <button id="so101-enable" class="primary" type="button" disabled>Enable Arm</button>
   <button id="so101-hold" class="hold" type="button">Hold Arm</button>
   <button id="so101-return-rest" type="button">Return Arm to Rest Pose</button>
+`;
+
+const SETUP_MARKUP = `
   <label class="toggle-row" title="Opt-in: modeled checks cannot detect a person or loose object in the path."><span>Auto-return to rest after 10 min</span><input id="so101-idle-return-enabled" type="checkbox"></label>
   <button id="so101-restart" type="button">Restart Arm Connection</button>
   <label class="toggle-row"><span>Live measured arm feedback</span><input id="so101-measured-feedback-enabled" type="checkbox" checked></label>
@@ -137,12 +150,13 @@ class So101WebModule {
     this.manualInputs = [];
   }
 
-  async mount({ settingsRoot, viewRoot, statusRoot, floatingRoot }) {
+  async mount({ settingsRoot, setupRoot, viewRoot, statusRoot, floatingRoot }) {
     const style = document.createElement("style");
     style.dataset.robotModule = "so101";
     style.textContent = MODULE_STYLE;
     document.head.append(style);
     if (settingsRoot) settingsRoot.innerHTML = SETTINGS_MARKUP;
+    if (setupRoot) setupRoot.innerHTML = SETUP_MARKUP;
     if (viewRoot) viewRoot.innerHTML = VIEW_MARKUP;
     if (statusRoot) statusRoot.innerHTML = STATUS_MARKUP;
     if (floatingRoot) floatingRoot.innerHTML = FLOATING_MARKUP;

@@ -232,6 +232,16 @@ class So101Operator(GenericRobotOperator):
             "manual_claw_calibration_save",
         )
 
+    def persistent_view_settings(self) -> tuple[str, ...]:
+        return (
+            "arm_measured_feedback_enabled",
+            "arm_target_ghost_enabled",
+            "arm_following_error_safety_enabled",
+            "arm_freeze_overlay_on_stale_enabled",
+            "arm_d455_visual_correction_enabled",
+            "arm_idle_return_enabled",
+        )
+
     def resolve_auxiliary_device(self, view_id: str, configured: str = "") -> str:
         if view_id != "wrist_rgb":
             return ""

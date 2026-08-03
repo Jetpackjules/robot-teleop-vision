@@ -7,6 +7,7 @@ const EMPTY_ROBOT_RENDERER = Object.freeze({
   calibrationBoundsLinks: [],
   maskChain: { names: [], radii: [] },
   manualView: {},
+  workspaceBoundary: null,
 });
 
 function activeRobotRenderer() {
@@ -22,6 +23,7 @@ const state = {
   robotProgram: null,
   robotUniforms: null,
   robotVao: null,
+  workspaceGuide: null,
   robotMeshes: {},
   robotRenderer: EMPTY_ROBOT_RENDERER,
   robotTransforms: {},
@@ -32,6 +34,9 @@ const state = {
   manualOverlayCanvas: null,
   manualOverlaySignature: "",
   manualOverlayBounds: null,
+  rgbDisplayCanvas: null,
+  rgbDisplayBaseCanvas: null,
+  rgbDisplayCameraId: "",
   robotLoadToken: 0,
   dataChannel: null,
   dataChannelHandlers: null,
@@ -100,6 +105,11 @@ const state = {
     robot_overlay_style: "alignment",
     robot_overlay_mask_scanned_robot: true,
     white_background_enabled: false,
+    workspace_surface_enabled: true,
+    workspace_boundary_enabled: true,
+    workspace_surface_offset: 0,
+    workspace_surface_size: 1.2,
+    workspace_surface_opacity: 0.18,
   },
   stats: {
     status: "idle",
@@ -710,6 +720,151 @@ function deleteRobotMeshes(gl, meshes = state.robotMeshes) {
     }
   }
   if (meshes === state.robotMeshes) state.robotMeshes = {};
+}
+
+function deleteWorkspaceGuide(gl) {
+  if (!gl || !state.workspaceGuide) return;
+  for (const item of Object.values(state.workspaceGuide.items || {})) {
+    if (item.buffer) gl.deleteBuffer(item.buffer);
+  }
+  state.workspaceGuide = null;
+}
+
+function lineRing(vertices, centerX, centerY, centerZ, radius, segments = 64) {
+  if (!(radius > 0)) return;
+  for (let index = 0; index < segments; index += 1) {
+    const first = (index / segments) * Math.PI * 2;
+    const second = ((index + 1) / segments) * Math.PI * 2;
+    vertices.push(
+      centerX + Math.cos(first) * radius, centerY, centerZ + Math.sin(first) * radius,
+      centerX + Math.cos(second) * radius, centerY, centerZ + Math.sin(second) * radius,
+    );
+  }
+}
+
+function workspaceGuideGeometry() {
+  const anchorName = String(state.robotRenderer.workspaceBoundary?.anchorLink || state.robotRenderer.baseLink || "");
+  const anchor = transformDictionaryMatrix(state.robotTransforms[anchorName]);
+  const centerX = anchor ? anchor[12] : 0;
+  const anchorY = anchor ? anchor[13] : 0;
+  const centerZ = anchor ? anchor[14] : 0;
+  const offset = Number(state.settings.workspace_surface_offset || 0);
+  const size = clamp(Number(state.settings.workspace_surface_size || 1.2), 0.2, 10);
+  const surfaceY = anchorY + offset;
+  const half = size * 0.5;
+  const fill = [
+    centerX - half, surfaceY, centerZ - half,
+    centerX + half, surfaceY, centerZ - half,
+    centerX - half, surfaceY, centerZ + half,
+    centerX - half, surfaceY, centerZ + half,
+    centerX + half, surfaceY, centerZ - half,
+    centerX + half, surfaceY, centerZ + half,
+  ];
+  const grid = [];
+  const divisions = 12;
+  for (let index = 0; index <= divisions; index += 1) {
+    const along = -half + (size * index) / divisions;
+    grid.push(
+      centerX - half, surfaceY + 0.0005, centerZ + along,
+      centerX + half, surfaceY + 0.0005, centerZ + along,
+      centerX + along, surfaceY + 0.0005, centerZ - half,
+      centerX + along, surfaceY + 0.0005, centerZ + half,
+    );
+  }
+
+  const boundary = [];
+  const descriptor = state.robotRenderer.workspaceBoundary;
+  if (descriptor?.shape === "cylinder") {
+    const inner = Math.max(0, Number(descriptor.innerRadius || 0));
+    const outer = Math.max(inner, Number(descriptor.outerRadius || 0));
+    const minimumY = anchorY + Number(descriptor.minimumHeight || 0);
+    const maximumY = anchorY + Number(descriptor.maximumHeight || 0);
+    for (const height of [minimumY, maximumY]) {
+      lineRing(boundary, centerX, height, centerZ, inner);
+      lineRing(boundary, centerX, height, centerZ, outer);
+    }
+    for (let index = 0; index < 12; index += 1) {
+      const angle = (index / 12) * Math.PI * 2;
+      boundary.push(
+        centerX + Math.cos(angle) * outer, minimumY, centerZ + Math.sin(angle) * outer,
+        centerX + Math.cos(angle) * outer, maximumY, centerZ + Math.sin(angle) * outer,
+      );
+    }
+  }
+  return { anchorName, anchor, fill, grid, boundary };
+}
+
+function ensureWorkspaceGuide() {
+  const gl = state.gl;
+  if (!gl) return null;
+  const geometry = workspaceGuideGeometry();
+  const signature = JSON.stringify([
+    geometry.anchorName,
+    geometry.anchor ? [geometry.anchor[12], geometry.anchor[13], geometry.anchor[14]] : null,
+    state.settings.workspace_surface_offset,
+    state.settings.workspace_surface_size,
+    state.robotRenderer.workspaceBoundary || null,
+  ]);
+  if (state.workspaceGuide?.signature === signature) return state.workspaceGuide;
+  deleteWorkspaceGuide(gl);
+  const upload = (values, mode) => {
+    if (!values.length) return null;
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(values), gl.STATIC_DRAW);
+    return { buffer, count: values.length / 3, mode };
+  };
+  state.workspaceGuide = {
+    signature,
+    items: {
+      fill: upload(geometry.fill, gl.TRIANGLES),
+      grid: upload(geometry.grid, gl.LINES),
+      boundary: upload(geometry.boundary, gl.LINES),
+    },
+  };
+  return state.workspaceGuide;
+}
+
+function drawWorkspaceGuide(viewProjection) {
+  if (!state.robotProgram || !state.robotVao) return;
+  const showSurface = state.settings.workspace_surface_enabled !== false;
+  const showBoundary = state.settings.workspace_boundary_enabled !== false
+    && state.robotRenderer.workspaceBoundary;
+  if (!showSurface && !showBoundary) return;
+  const guide = ensureWorkspaceGuide();
+  if (!guide) return;
+  const gl = state.gl;
+  gl.useProgram(state.robotProgram);
+  gl.bindVertexArray(state.robotVao);
+  gl.uniformMatrix4fv(state.robotUniforms.viewProjection, false, viewProjection);
+  gl.uniformMatrix4fv(state.robotUniforms.model, false, identityMatrix());
+  gl.uniform2f(state.robotUniforms.viewport, Math.max(gl.canvas.width, 1), Math.max(gl.canvas.height, 1));
+  gl.uniform1f(state.robotUniforms.outlinePixels, 0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+  gl.disableVertexAttribArray(1);
+  gl.vertexAttrib3f(1, 0, 1, 0);
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthFunc(gl.LEQUAL);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.depthMask(false);
+  const draw = (item, color) => {
+    if (!item) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, item.buffer);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.uniform4fv(state.robotUniforms.color, color);
+    gl.drawArrays(item.mode, 0, item.count);
+  };
+  if (showSurface) {
+    const opacity = clamp(Number(state.settings.workspace_surface_opacity || 0.18), 0.01, 0.8);
+    draw(guide.items.fill, [0.08, 0.7, 0.92, opacity]);
+    draw(guide.items.grid, [0.22, 0.84, 1.0, Math.min(0.75, opacity + 0.24)]);
+  }
+  if (showBoundary) draw(guide.items.boundary, [1.0, 0.28, 0.08, 0.9]);
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(null);
 }
 
 function drawRobotOverlay(viewProjection) {
@@ -1330,6 +1485,7 @@ function uploadCamera(decoded) {
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   updateManualRgbBase(camera);
+  updateRgbDisplay(camera);
   if (camera.bitmap) {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGB, gl.UNSIGNED_BYTE, camera.bitmap);
     camera.bitmap.close();
@@ -1410,6 +1566,51 @@ function updateManualRgbBase(camera) {
       0,
     );
   }
+}
+
+function updateRgbDisplay(camera) {
+  const visible = state.rgbDisplayCanvas;
+  if (!(visible instanceof HTMLCanvasElement)) return;
+  const model = String(camera.metadata.model || "").toLowerCase();
+  const cameraId = String(camera.metadata.id || camera.metadata.serial || model || "camera");
+  const isPreferred = model.includes("455");
+  if (state.rgbDisplayCameraId && state.rgbDisplayCameraId !== cameraId && !isPreferred) return;
+  if (state.rgbDisplayCameraId !== cameraId) {
+    state.rgbDisplayCameraId = cameraId;
+    state.rgbDisplayBaseCanvas = null;
+  }
+  let base = state.rgbDisplayBaseCanvas;
+  if (!(base instanceof HTMLCanvasElement)) {
+    base = document.createElement("canvas");
+    state.rgbDisplayBaseCanvas = base;
+  }
+  if (base.width !== camera.width || base.height !== camera.height) {
+    base.width = camera.width;
+    base.height = camera.height;
+  }
+  const baseContext = base.getContext("2d", { alpha: false });
+  if (camera.bitmap) {
+    baseContext.drawImage(camera.bitmap, 0, 0, camera.width, camera.height);
+  } else if (Array.isArray(camera.colorTileUpdates)) {
+    for (const update of camera.colorTileUpdates) {
+      baseContext.putImageData(
+        new ImageData(rgbToRgba(update.pixels), update.width, update.height),
+        update.x,
+        update.y,
+      );
+    }
+  } else if (camera.colorPixels) {
+    baseContext.putImageData(
+      new ImageData(rgbToRgba(camera.colorPixels), camera.width, camera.height),
+      0,
+      0,
+    );
+  }
+  if (visible.width !== camera.width || visible.height !== camera.height) {
+    visible.width = camera.width;
+    visible.height = camera.height;
+  }
+  visible.getContext("2d", { alpha: false }).drawImage(base, 0, 0);
 }
 
 function renderManualCalibrationPreview(camera) {
@@ -1875,6 +2076,7 @@ function render() {
       gl.drawArrays(gl.POINTS, 0, camera.width * camera.height);
     }
   }
+  drawWorkspaceGuide(viewProjection);
   drawRobotOverlay(viewProjection);
   state.stats.renderFrames += 1;
 }
@@ -2329,6 +2531,11 @@ export async function startGodotHybridRenderer(options = {}) {
   const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, depth: true, powerPreference: "high-performance" });
   if (!gl) throw new Error("WebGL2 is required for the hybrid RGB-D renderer");
   state.canvas = canvas;
+  const rgbDisplayCanvas = typeof options.rgbDisplayCanvas === "string"
+    ? document.getElementById(options.rgbDisplayCanvas) : options.rgbDisplayCanvas;
+  state.rgbDisplayCanvas = rgbDisplayCanvas instanceof HTMLCanvasElement ? rgbDisplayCanvas : null;
+  state.rgbDisplayBaseCanvas = null;
+  state.rgbDisplayCameraId = "";
   state.robotRenderer = activeRobotRenderer();
   attachPointerNavigation();
   const manualView = state.robotRenderer.manualView || {};
@@ -2449,6 +2656,7 @@ export function stopGodotHybridRenderer() {
   for (const camera of state.cameras) deleteCameraTextures(camera);
   state.cameras = [];
   const gl = state.gl;
+  deleteWorkspaceGuide(gl);
   deleteRobotMeshes(gl);
   if (gl && state.robotProgram) gl.deleteProgram(state.robotProgram);
   if (gl && state.robotVao) gl.deleteVertexArray(state.robotVao);
@@ -2459,6 +2667,7 @@ export function stopGodotHybridRenderer() {
   state.robotProgram = null;
   state.robotUniforms = null;
   state.robotVao = null;
+  state.workspaceGuide = null;
   state.robotTransforms = {};
   state.robotRenderer = EMPTY_ROBOT_RENDERER;
   state.baseViewer = null;
@@ -2470,6 +2679,9 @@ export function stopGodotHybridRenderer() {
   state.lastHeadDelta = [0, 0, 0];
   state.headBaseline = null;
   state.lastHeadActive = false;
+  state.rgbDisplayCanvas = null;
+  state.rgbDisplayBaseCanvas = null;
+  state.rgbDisplayCameraId = "";
   state.stats.connected = false;
 }
 
@@ -2495,6 +2707,27 @@ export function recenterGodotHybridRenderer() {
   state.manualOrbitPitch = 0;
   state.manualDolly = 0;
   state.manualPan = [0, 0, 0];
+}
+
+export function getGodotHybridNavigationState() {
+  return {
+    orbit_yaw: Number(state.manualOrbitYaw || 0),
+    orbit_pitch: Number(state.manualOrbitPitch || 0),
+    dolly: Number(state.manualDolly || 0),
+    pan: state.manualPan.slice(0, 3).map((value) => Number(value || 0)),
+  };
+}
+
+export function setGodotHybridNavigationState(value = {}) {
+  if (!value || typeof value !== "object") return false;
+  const finite = (candidate, fallback, minimum, maximum) => Number.isFinite(Number(candidate))
+    ? clamp(Number(candidate), minimum, maximum) : fallback;
+  state.manualOrbitYaw = finite(value.orbit_yaw, 0, -180, 180);
+  state.manualOrbitPitch = finite(value.orbit_pitch, 0, -80, 80);
+  state.manualDolly = finite(value.dolly, 0, -8, 8);
+  const pan = Array.isArray(value.pan) ? value.pan : [0, 0, 0];
+  state.manualPan = [0, 1, 2].map((index) => finite(pan[index], 0, -20, 20));
+  return true;
 }
 
 export function focusGodotHybridRendererAt(clientX, clientY) {
@@ -2555,5 +2788,7 @@ window.startGodotHybridRenderer = startGodotHybridRenderer;
 window.stopGodotHybridRenderer = stopGodotHybridRenderer;
 window.setGodotHybridViewSettings = setGodotHybridViewSettings;
 window.recenterGodotHybridRenderer = recenterGodotHybridRenderer;
+window.getGodotHybridNavigationState = getGodotHybridNavigationState;
+window.setGodotHybridNavigationState = setGodotHybridNavigationState;
 window.focusGodotHybridRendererAt = focusGodotHybridRendererAt;
 window.getGodotHybridRendererStatus = getGodotHybridRendererStatus;

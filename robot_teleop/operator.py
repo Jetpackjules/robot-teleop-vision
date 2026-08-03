@@ -183,6 +183,15 @@ class GenericRobotOperator:
     def enum_view_settings(self) -> Mapping[str, frozenset[str]]:
         return {}
 
+    def persistent_view_settings(self) -> tuple[str, ...]:
+        """Module settings that are safe to store as installation defaults.
+
+        Action flags such as calibrate, restart, and save must never be
+        persisted because applying a saved setup must remain non-mutating.
+        """
+
+        return ()
+
     def resolve_auxiliary_device(self, view_id: str, configured: str = "") -> str:
         return str(configured or "")
 
