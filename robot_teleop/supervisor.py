@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 from robot_teleop.config import AppConfig, REPO_ROOT
 from robot_teleop.doctor import find_cloudflared, find_godot
@@ -23,6 +24,20 @@ from robot_teleop.registry import create
 RUN_DIR = REPO_ROOT / ".teleop"
 STATE_PATH = RUN_DIR / "run.json"
 QUICK_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.I)
+
+
+def operator_ui_response_ready(response_url: str, status: int, body: bytes) -> bool:
+    """Accept either the operator shell or its expected password gate."""
+
+    if status != 200:
+        return False
+    if b"hybrid-canvas" in body:
+        return True
+    return (
+        urlparse(response_url).path == "/login"
+        and b'<form method="post" action="/login">' in body
+        and b'name="password"' in body
+    )
 
 
 def _port_available(port: int) -> bool:
@@ -110,7 +125,8 @@ class Supervisor:
         while time.monotonic() < deadline and not self.stopping.is_set():
             try:
                 with urllib.request.urlopen(self.local_url, context=context, timeout=2) as response:
-                    if response.status == 200 and b"hybrid-canvas" in response.read(200_000):
+                    body = response.read(200_000)
+                    if operator_ui_response_ready(response.geturl(), response.status, body):
                         return
             except Exception as exc:
                 last_error = exc
