@@ -1,5 +1,5 @@
 [stack]
-public_mode = "off"
+public_mode = "quick"
 password_default = "change-me"
 
 [godot]

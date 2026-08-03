@@ -66,14 +66,16 @@ Place that arm's local LeRobot pair profile at `robot_modules/so101/local/arm_pa
 
 ## Free temporary public access
 
-Set `stack.public_mode = "quick"` in `config/local.toml`, install `cloudflared`, and provide a strong password:
+Cloudflare Quick Tunnel access is enabled by default. `robot-teleop init` writes a unique,
+strong operator password into ignored `config/local.toml`; install `cloudflared`, then start:
 
 ```bash
-export GODOT_REMOTE_PASSWORD='use-a-long-unique-password'
 robot-teleop start
 ```
 
 The supervisor verifies the transient `trycloudflare.com/controller.html` URL before publishing it in `robot-teleop status`. Only the newest browser owns streaming and control; a newer page immediately Holds and supersedes the old controller.
+
+For an explicitly local-only deployment, set `stack.public_mode = "off"`.
 
 ## Streaming features
 

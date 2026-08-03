@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
+import secrets
 import sys
 import time
 import webbrowser
@@ -27,7 +27,12 @@ def _initialize(destination: Path, example: str, force: bool) -> int:
         print(f"Already exists: {destination}", file=sys.stderr)
         return 1
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, destination)
+    contents = source.read_text(encoding="utf-8")
+    contents = contents.replace(
+        'password_default = "change-me"',
+        f'password_default = "{secrets.token_urlsafe(24)}"',
+    )
+    destination.write_text(contents, encoding="utf-8")
     try:
         os.chmod(destination, 0o600)
     except OSError:
