@@ -12,6 +12,11 @@ func _enter_tree() -> void:
 	_python = _find_python()
 	_dock = VBoxContainer.new()
 	_dock.name = "Teleop Setup"
+	# Give wrapped labels a real width before Godot asks for their minimum
+	# height. Without this, a freshly restored dock can briefly be 17 px wide;
+	# the wrapped description then reports a multi-thousand-pixel minimum
+	# height and stretches the entire editor viewport.
+	_dock.custom_minimum_size = Vector2(280, 0)
 
 	var title := Label.new()
 	title.text = "Robot Teleop Vision"
@@ -21,6 +26,8 @@ func _enter_tree() -> void:
 	var description := Label.new()
 	description.text = "Setup and diagnostics live here.\nCalibration, motion, and view controls live in the operator website."
 	description.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	description.custom_minimum_size = Vector2(240, 64)
+	description.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_dock.add_child(description)
 
 	_status_label = Label.new()
@@ -35,7 +42,9 @@ func _enter_tree() -> void:
 
 	_output = RichTextLabel.new()
 	_output.fit_content = false
-	_output.custom_minimum_size = Vector2(280, 220)
+	_output.custom_minimum_size = Vector2(0, 180)
+	_output.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_output.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_output.scroll_active = true
 	_output.bbcode_enabled = false
 	_output.text = "Open README.md for first-run setup."

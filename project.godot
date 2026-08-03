@@ -1,12 +1,20 @@
-; Robot Teleop Vision — open this folder directly in Godot 4.6 or newer.
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
 config_version=5
 
 [application]
 
 config/name="Robot Teleop Vision"
 config/description="Modular RealSense point-cloud teleoperation and robot calibration"
-config/icon="res://assets/branding/robot_teleop_vision_icon.png"
 run/main_scene="res://godot/Main.tscn"
+config/features=PackedStringArray("4.6")
+config/icon="res://assets/branding/robot_teleop_vision_icon.png"
 
 [display]
 
@@ -22,6 +30,4 @@ enabled=PackedStringArray("res://addons/teleop_setup/plugin.cfg")
 
 [rendering]
 
-renderer/rendering_method="gl_compatibility"
-renderer/rendering_method.mobile="gl_compatibility"
 environment/defaults/default_clear_color=Color(0.03, 0.035, 0.04, 1)
