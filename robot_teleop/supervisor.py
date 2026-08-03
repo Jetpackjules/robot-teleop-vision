@@ -70,6 +70,7 @@ class Supervisor:
         self.processes: list[tuple[str, subprocess.Popen]] = []
         self.stopping = threading.Event()
         self.public_url = ""
+        self._pending_public_url = ""
         self.local_url = f"https://127.0.0.1:{config.stack.https_port}/controller.html"
         self.robot = create("robot", config.robot.adapter, config=config.robot)
         self.robot_manifest = public_robot_module(
@@ -98,10 +99,13 @@ class Supervisor:
         for line in process.stdout:
             print(f"[{name}] {line}", end="", flush=True)
             match = QUICK_URL_PATTERN.search(line)
-            if match and not self.public_url:
-                self.public_url = f"{match.group(0)}/controller.html"
-                self._publish_state("running")
-                threading.Thread(target=self._verify_public_url, daemon=True).start()
+            if match and not self.public_url and not self._pending_public_url:
+                self._pending_public_url = f"{match.group(0)}/controller.html"
+                threading.Thread(
+                    target=self._verify_public_url,
+                    args=(self._pending_public_url,),
+                    daemon=True,
+                ).start()
 
     def _publish_state(self, status: str, detail: str = "") -> None:
         _write_state(
@@ -133,18 +137,23 @@ class Supervisor:
             time.sleep(0.25)
         raise RuntimeError(f"operator UI health check failed: {last_error}")
 
-    def _verify_public_url(self) -> None:
+    def _verify_public_url(self, candidate_url: str) -> None:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not self.stopping.is_set():
             try:
-                request = urllib.request.Request(self.public_url, method="GET")
+                request = urllib.request.Request(candidate_url, method="GET")
                 with urllib.request.urlopen(request, timeout=5) as response:
-                    if response.status in {200, 302, 303}:
-                        print(f"Verified public operator URL: {self.public_url}", flush=True)
+                    body = response.read(200_000)
+                    if operator_ui_response_ready(response.geturl(), response.status, body):
+                        self.public_url = candidate_url
+                        self._pending_public_url = ""
+                        self._publish_state("running")
+                        print(f"Verified public operator URL: {candidate_url}", flush=True)
                         return
             except Exception:
                 time.sleep(0.5)
-        print(f"WARNING: public URL did not pass its health check: {self.public_url}", flush=True)
+        self._pending_public_url = ""
+        print(f"WARNING: public URL did not pass its health check: {candidate_url}", flush=True)
 
     def start(self) -> None:
         for port, label in (

@@ -26,7 +26,7 @@ class StackConfig:
     stream_port: int = 8780
     tracking_port: int = 4247
     calibration_status_port: int = 4251
-    public_mode: str = "off"
+    public_mode: str = "quick"
     password_env: str = "GODOT_REMOTE_PASSWORD"
     password_default: str = "change-me"
 
