@@ -3,19 +3,21 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://bqwlna5v6ejas"
-path="res://.godot/imported/upper_arm_link.glb-f788177c1bdd34ce74b220454f150b83.scn"
+uid="uid://bst7sbyf2xxod"
+path="res://.godot/imported/wrist_link.glb-4cee80ef4de258cd1c20eb2ecbf7ab90.scn"
 
 [deps]
 
-source_file="res://assets/robots/so101/upper_arm_link.glb"
-dest_files=["res://.godot/imported/upper_arm_link.glb-f788177c1bdd34ce74b220454f150b83.scn"]
+source_file="res://robot_modules/so101/assets/wrist_link.glb"
+dest_files=["res://.godot/imported/wrist_link.glb-4cee80ef4de258cd1c20eb2ecbf7ab90.scn"]
 
 [params]
 
 nodes/root_type=""
 nodes/root_name=""
 nodes/root_script=null
+mesh_library/use_node_names_as_mesh_names=false
+array_mesh/deduplicate_surfaces=true
 nodes/apply_root_scale=true
 nodes/root_scale=1.0
 nodes/import_as_skeleton_bones=false
@@ -40,3 +42,4 @@ materials/extract_path=""
 _subresources={}
 gltf/naming_version=2
 gltf/embedded_image_handling=1
+gltf/texture_map_mode=0

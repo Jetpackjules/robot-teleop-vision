@@ -3,15 +3,14 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from typing import Iterable
 
 
-DURABLE_STATE_FILES = (
+SHARED_DURABLE_STATE_FILES = (
     "camera_alignment_registry.json",
     "realsense_alignment_ground_truth.json",
     "realsense_cloud_alignment_result.json",
     "screen_setup.json",
-    "so101_robot_registration.depth_validated_anchor.json",
-    "so101_robot_registration.json",
     "unified_world_level.json",
 )
 
@@ -29,6 +28,7 @@ def migrate_project_state(
     *,
     root: Path | None = None,
     force: bool = False,
+    extra_state_files: Iterable[str] = (),
 ) -> list[Path]:
     """Copy only durable calibration state; never copy captures, logs, or device dumps."""
     base = root or godot_app_userdata_root()
@@ -38,7 +38,13 @@ def migrate_project_state(
         raise FileNotFoundError(f"Godot state directory not found: {source}")
     target.mkdir(parents=True, exist_ok=True)
     copied: list[Path] = []
-    for name in DURABLE_STATE_FILES:
+    state_files = list(SHARED_DURABLE_STATE_FILES)
+    for name in extra_state_files:
+        if Path(name).name != name or not name:
+            raise ValueError(f"unsafe durable state file name: {name!r}")
+        if name not in state_files:
+            state_files.append(name)
+    for name in state_files:
         source_file = source / name
         target_file = target / name
         if not source_file.is_file() or (target_file.exists() and not force):

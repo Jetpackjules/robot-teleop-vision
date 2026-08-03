@@ -1,8 +1,7 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://godot/runtime/point_cloud/unified_point_cloud_view.gd" id="1_view"]
-[ext_resource type="Script" path="res://godot/robots/so101/so101_robot_overlay.gd" id="2_overlay"]
-[ext_resource type="Script" path="res://godot/runtime/point_cloud/so101_motion_calibrator.gd" id="3_calibrator"]
+[ext_resource type="Script" path="res://godot/runtime/robots/robot_module_host.gd" id="2_modules"]
 [ext_resource type="Script" path="res://godot/runtime/remote_control_gateway.gd" id="4_gateway"]
 [ext_resource type="Script" path="res://godot/runtime/streaming/viewport_stream_server.gd" id="5_stream"]
 
@@ -35,12 +34,6 @@ current = true
 
 [node name="WorldLevelAnchor" type="Node3D" parent="."]
 
-[node name="SO101RobotOverlay" type="Node3D" parent="WorldLevelAnchor"]
-script = ExtResource("2_overlay")
-overlay_enabled = true
-overlay_transparency = 0.4
-mask_scanned_robot = false
-
 [node name="CameraClouds" type="Node3D" parent="WorldLevelAnchor"]
 
 [node name="CalibrationPairs" type="Node3D" parent="WorldLevelAnchor"]
@@ -49,8 +42,8 @@ mask_scanned_robot = false
 
 [node name="Target" type="Node3D" parent="WorldLevelAnchor/CalibrationPairs"]
 
-[node name="SO101MotionCalibrator" type="Node" parent="."]
-script = ExtResource("3_calibrator")
+[node name="RobotModuleHost" type="Node" parent="."]
+script = ExtResource("2_modules")
 
 [node name="RemoteControlGateway" type="Node" parent="."]
 script = ExtResource("4_gateway")

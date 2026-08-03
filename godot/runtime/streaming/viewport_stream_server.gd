@@ -608,7 +608,7 @@ func _publish_rgbd_packet(
 	return true
 
 func _robot_overlay_metadata() -> Dictionary:
-	for node in get_tree().get_nodes_in_group("so101_robot_overlay"):
+	for node in get_tree().get_nodes_in_group("robot_overlay"):
 		if node.has_method("get_hybrid_render_state"):
 			var state = node.call("get_hybrid_render_state")
 			if state is Dictionary:

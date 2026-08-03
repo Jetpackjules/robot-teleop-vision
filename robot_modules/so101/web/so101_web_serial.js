@@ -26,7 +26,7 @@ function isTextEditingTarget(target) {
 function armSocketUrl() {
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
   const client = encodeURIComponent(String(window.robotTeleopPageId || ""));
-  return `${scheme}://${window.location.host}/arm-control?client=${client}`;
+  return `${scheme}://${window.location.host}/robot-control?client=${client}`;
 }
 
 function packetChecksum(bytes, endExclusive) {

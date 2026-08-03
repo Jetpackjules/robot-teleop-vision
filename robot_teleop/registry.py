@@ -9,11 +9,15 @@ Factory = Callable[..., Any]
 _BUILTINS: dict[str, dict[str, Factory]] = {"camera": {}, "robot": {}, "tracking": {}}
 
 
-def _load_builtins(kind: str) -> None:
+def _load_builtins(kind: str, *, module_paths: tuple[str, ...] = ()) -> None:
     if kind not in _BUILTINS:
         raise KeyError(f"unknown adapter kind: {kind}")
     module = "tracking" if kind == "tracking" else f"{kind}s"
     import_module(f"robot_teleop.{module}")
+    if kind == "robot":
+        from robot_teleop.modules import load_robot_modules
+
+        load_robot_modules(module_paths)
 
 
 def register(kind: str, name: str, factory: Factory) -> None:
@@ -23,7 +27,9 @@ def register(kind: str, name: str, factory: Factory) -> None:
 
 
 def create(kind: str, name: str, **kwargs: Any) -> Any:
-    _load_builtins(kind)
+    config = kwargs.get("config")
+    module_paths = tuple(getattr(config, "module_paths", ())) if kind == "robot" else ()
+    _load_builtins(kind, module_paths=module_paths)
     factory = _BUILTINS.get(kind, {}).get(name)
     if factory is not None:
         return factory(**kwargs)

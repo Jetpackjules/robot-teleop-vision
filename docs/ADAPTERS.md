@@ -1,6 +1,8 @@
-# Adding adapters
+# Adding hardware
 
-## Camera
+Camera and tracking sources use small shared adapters. A robot uses a module because its geometry, controls, status translation, safety process, and calibration often need to ship together.
+
+## Camera adapter
 
 Implement `CameraAdapter.discover()` and register it:
 
@@ -9,29 +11,36 @@ from robot_teleop.registry import register
 
 class MyCamera:
     name = "my_camera"
+
     def discover(self):
         return []
 
 register("camera", MyCamera.name, MyCamera)
 ```
 
-Add the module import to `robot_teleop/cameras/__init__.py`, or publish an entry point named `my_camera` in group `robot_teleop.cameras`. Device identifiers must be local discovery keys; do not embed a lab's serials in source.
+Add the built-in import to `robot_teleop/cameras/__init__.py`, or publish an entry point in `robot_teleop.cameras`. Device identifiers must be locally discovered keys; never embed a lab's serials in source.
 
-## Robot
+## Robot module
 
-Implement `launch_spec()` and `hold()`. `hold()` must be idempotent and safe to call before or during shutdown. Register under `robot`, add a hardware-disabled example configuration, and put robot-specific Godot geometry under `godot/robots/<name>/`.
+Copy `robot_modules/so101` as a structural reference, then replace its implementation rather than adding conditions to core. At minimum a module provides:
 
-The browser/operator server should send semantic commands. Hardware protocols and motor writes stay inside the isolated robot process, where watchdog and limit enforcement can be tested without a browser.
+- `robot.json`, including negotiated capabilities and the required `hold` action.
+- A Python `RobotAdapter` with `launch_spec()`, idempotent `hold()`, `public_manifest()`, and optional operator environment.
+- A hardware process that enforces command age, watchdog, limits, and Hold independently of the browser.
 
-## Tracking
+Godot geometry/calibration and web controls are optional. Without them the common point-cloud viewer and semantic robot transport still work. Full details and examples are in [Robot modules](ROBOT_MODULES.md).
 
-A tracking adapter describes the tracking source. Use `disabled` for mouse-only orbit/pan teleoperation. Browser MediaPipe is optional and never required for arm control.
+## Tracking adapter
+
+A tracking adapter describes the tracking source. Use `disabled` for direct mouse orbit/pan/zoom. Browser MediaPipe is optional and never required for robot control.
 
 ## Acceptance checklist
 
-- Clean clone launches with all physical motion disabled.
-- `doctor` discovers zero, one, and multiple devices without source edits.
-- Adapter has hardware-free tests or a fake transport.
-- Disconnect/reconnect and duplicate-browser ownership are tested.
-- Stop/crash paths call Hold.
-- No physical serials, motor ports, tokens, passwords, or calibration payloads are committed.
+- Clean clone launches with physical motion disabled.
+- `doctor` handles zero, one, and multiple cameras without source edits.
+- Module has hardware-free tests or a fake transport.
+- Hold is idempotent and works before, during, and after startup.
+- Disconnect/reconnect, stale commands, and newest-browser ownership are tested.
+- Stop/crash paths invoke Hold.
+- No physical serials, ports, tokens, passwords, or calibration payloads are committed.
+- Shared `robot_teleop`, `godot`, `web`, and `tools` code contains no module's wire commands or model names.

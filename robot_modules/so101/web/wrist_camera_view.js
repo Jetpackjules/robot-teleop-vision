@@ -1,8 +1,8 @@
-const toggle = document.getElementById("claw-camera-enabled");
-const image = document.getElementById("claw-camera-view");
-const panel = document.getElementById("claw-camera-panel");
-const status = document.getElementById("claw-camera-status");
-const storageKey = "digitalWindowClawCameraEnabled";
+const toggle = document.getElementById("so101-wrist-camera-enabled");
+const image = document.getElementById("so101-wrist-camera-view");
+const panel = document.getElementById("so101-wrist-camera-panel");
+const status = document.getElementById("so101-wrist-camera-status");
+const storageKey = "robotTeleop.so101.wristCameraEnabled";
 
 if (toggle) {
   toggle.checked = localStorage.getItem(storageKey) !== "false";
@@ -12,7 +12,7 @@ let retryTimer = 0;
 let generation = 0;
 
 function streamUrl() {
-  return `${window.location.origin}/claw-stream?w=1280&h=720&fps=30&v=${Date.now()}`;
+  return `${window.location.origin}/robot-view/wrist_rgb?w=1280&h=720&fps=30&v=${Date.now()}`;
 }
 
 function stopClawCamera() {
@@ -69,4 +69,4 @@ if (toggle?.checked) startClawCamera();
 
 window.addEventListener("beforeunload", stopClawCamera);
 window.addEventListener("pagehide", stopClawCamera);
-window.godotClawCameraView = { start: startClawCamera, stop: stopClawCamera };
+window.so101WristCameraView = { start: startClawCamera, stop: stopClawCamera };

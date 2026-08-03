@@ -4,9 +4,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools import solve_so101_staged_joints as staged
-from tools.so101_kinematics import rendered_link_transforms
+TOOLS = Path(__file__).resolve().parents[1] / "robot_modules" / "so101" / "tools"
+sys.path.insert(0, str(TOOLS))
+import solve_so101_staged_joints as staged
+from so101_kinematics import rendered_link_transforms
 
 
 def test_moving_jaw_orientation_check_uses_measured_openness():

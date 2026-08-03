@@ -1,3 +1,19 @@
+const EMPTY_ROBOT_RENDERER = Object.freeze({
+  modelUrls: {},
+  colors: {},
+  baseLink: "",
+  accentLinks: [],
+  calibrationLinks: [],
+  calibrationBoundsLinks: [],
+  maskChain: { names: [], radii: [] },
+  manualView: {},
+});
+
+function activeRobotRenderer() {
+  const renderer = window.robotTeleopActiveModule?.renderer;
+  return renderer && typeof renderer === "object" ? renderer : EMPTY_ROBOT_RENDERER;
+}
+
 const state = {
   canvas: null,
   gl: null,
@@ -7,6 +23,7 @@ const state = {
   robotUniforms: null,
   robotVao: null,
   robotMeshes: {},
+  robotRenderer: EMPTY_ROBOT_RENDERER,
   robotTransforms: {},
   robotTransformsUpdatedMs: 0,
   manualRgbCanvas: null,
@@ -81,7 +98,7 @@ const state = {
     point_underlay: false,
     robot_overlay_enabled: true,
     robot_overlay_style: "alignment",
-    robot_overlay_mask_scanned_arm: true,
+    robot_overlay_mask_scanned_robot: true,
     white_background_enabled: false,
   },
   stats: {
@@ -105,7 +122,7 @@ const state = {
     cameraFps: {},
     cameraEncodeMs: {},
     robotModelsLoaded: 0,
-    robotModelsExpected: 8,
+    robotModelsExpected: 0,
     robotTransforms: 0,
     robotLoadError: "",
     transport: "--",
@@ -325,26 +342,6 @@ void main() {
   out_color = u_color;
 }
 `;
-
-const ROBOT_MODEL_URLS = {
-  base_link: "/assets/robots/so101/base_link.glb",
-  shoulder_link: "/assets/robots/so101/shoulder_link.glb",
-  upper_arm_link: "/assets/robots/so101/upper_arm_link.glb",
-  lower_arm_link: "/assets/robots/so101/lower_arm_link.glb",
-  wrist_link: "/assets/robots/so101/wrist_link.glb",
-  gripper_link: "/assets/robots/so101/gripper_link.glb",
-  moving_jaw_so101_v1_link: "/assets/robots/so101/moving_jaw_so101_v1_link.glb",
-};
-
-const ROBOT_LINK_COLORS = {
-  base_link: [0.91, 0.76, 0.18, 1],
-  shoulder_link: [0.78, 0.64, 0.12, 1],
-  upper_arm_link: [0.95, 0.81, 0.24, 1],
-  lower_arm_link: [0.78, 0.64, 0.12, 1],
-  wrist_link: [0.95, 0.81, 0.24, 1],
-  gripper_link: [0.78, 0.64, 0.12, 1],
-  moving_jaw_so101_v1_link: [0.95, 0.81, 0.24, 1],
-};
 
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
@@ -645,10 +642,11 @@ async function loadRobotMeshes(gl, token) {
   deleteRobotMeshes(gl, state.robotMeshes);
   state.robotMeshes = {};
   state.stats.robotModelsLoaded = 0;
-  state.stats.robotModelsExpected = Object.keys(ROBOT_MODEL_URLS).length;
+  const modelUrls = state.robotRenderer.modelUrls || {};
+  state.stats.robotModelsExpected = Object.keys(modelUrls).length;
   state.stats.robotLoadError = "";
   const failures = [];
-  await Promise.all(Object.entries(ROBOT_MODEL_URLS).map(async ([name, url]) => {
+  await Promise.all(Object.entries(modelUrls).map(async ([name, url]) => {
     let uploaded = [];
     try {
       const response = await fetch(url, { cache: "no-cache" });
@@ -670,7 +668,7 @@ async function loadRobotMeshes(gl, token) {
           gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
           gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, primitive.indices, gl.STATIC_DRAW);
         }
-        const keepForCalibration = ["wrist_link", "gripper_link", "moving_jaw_so101_v1_link"].includes(name);
+        const keepForCalibration = (state.robotRenderer.calibrationLinks || []).includes(name);
         return {
           ...primitive,
           cpuPositions: keepForCalibration ? primitive.positions : null,
@@ -729,12 +727,12 @@ function drawRobotOverlay(viewProjection) {
     for (const [name, primitives] of Object.entries(state.robotMeshes)) {
       const globalMatrix = transformDictionaryMatrix(state.robotTransforms[name]);
       if (!globalMatrix) continue;
-      const movingJaw = name === "moving_jaw_so101_v1_link";
+      const accentLink = (state.robotRenderer.accentLinks || []).includes(name);
       const color = alignmentStyle
-        ? movingJaw
+        ? accentLink
           ? [0.0, 0.88, 1.0, outline ? 0.95 : 0.24]
           : [1.0, 0.82, 0.0, outline ? 0.95 : 0.20]
-        : ROBOT_LINK_COLORS[name] || [0.9, 0.75, 0.18, 1];
+        : state.robotRenderer.colors?.[name] || [0.9, 0.75, 0.18, 1];
       gl.uniform4fv(state.robotUniforms.color, color);
       for (const primitive of primitives) {
       gl.bindBuffer(gl.ARRAY_BUFFER, primitive.positionBuffer);
@@ -775,8 +773,10 @@ function drawRobotOverlay(viewProjection) {
 }
 
 function robotMaskCapsules() {
-  const names = ["base_link", "shoulder_link", "upper_arm_link", "lower_arm_link", "wrist_link", "gripper_link", "moving_jaw_so101_v1_link"];
-  const radii = [0.065, 0.060, 0.050, 0.047, 0.043, 0.040];
+  const chain = state.robotRenderer.maskChain || {};
+  const names = Array.isArray(chain.names) ? chain.names : [];
+  const radii = Array.isArray(chain.radii) ? chain.radii.slice(0, 6) : [];
+  if (!radii.length || names.length < radii.length + 1) return null;
   const starts = new Float32Array(24);
   const ends = new Float32Array(24);
   for (let index = 0; index < radii.length; index += 1) {
@@ -1439,7 +1439,8 @@ function renderManualCalibrationPreview(camera) {
     : null;
   if (!cameraMatrix || !Array.isArray(camera.metadata.intrinsics)) return;
   const opacity = Math.max(0.05, Math.min(0.9, Number(state.settings.manual_overlay_opacity ?? 0.3)));
-  const distalNames = ["wrist_link", "gripper_link", "moving_jaw_so101_v1_link"];
+  const distalNames = state.robotRenderer.calibrationLinks || [];
+  if (!distalNames.length) return;
   const signature = JSON.stringify([
     camera.width,
     camera.height,
@@ -1465,7 +1466,7 @@ function renderManualCalibrationPreview(camera) {
       const primitives = state.robotMeshes[name] || [];
       const globalMatrix = transformDictionaryMatrix(state.robotTransforms[name]);
       if (!globalMatrix) continue;
-      overlayContext.fillStyle = name === "moving_jaw_so101_v1_link" ? "#00e1ff" : "#ffd200";
+      overlayContext.fillStyle = (state.robotRenderer.accentLinks || []).includes(name) ? "#00e1ff" : "#ffd200";
       for (const primitive of primitives) {
         const positions = primitive.cpuPositions;
         if (!positions) continue;
@@ -1483,7 +1484,7 @@ function renderManualCalibrationPreview(camera) {
           overlayContext.beginPath();
           overlayContext.moveTo(a[0], a[1]); overlayContext.lineTo(b[0], b[1]); overlayContext.lineTo(c[0], c[1]); overlayContext.closePath();
           overlayContext.fill();
-          if (name !== "wrist_link") {
+          if ((state.robotRenderer.calibrationBoundsLinks || []).includes(name)) {
             for (const point of [a, b, c]) {
               projectedBounds.minX = Math.min(projectedBounds.minX, point[0]);
               projectedBounds.minY = Math.min(projectedBounds.minY, point[1]);
@@ -1632,7 +1633,7 @@ function translatedViewer(base, delta) {
 }
 
 function robotBasePosition() {
-  const matrix = transformDictionaryMatrix(state.robotTransforms.base_link);
+  const matrix = transformDictionaryMatrix(state.robotTransforms[state.robotRenderer.baseLink]);
   return matrix ? [matrix[12], matrix[13], matrix[14]] : null;
 }
 
@@ -1818,7 +1819,7 @@ function render() {
   gl.disable(gl.BLEND);
   gl.useProgram(state.program);
   gl.uniformMatrix4fv(state.uniforms.viewProjection, false, viewProjection);
-  const maskCapsules = state.settings.robot_overlay_enabled && state.settings.robot_overlay_mask_scanned_arm
+  const maskCapsules = state.settings.robot_overlay_enabled && state.settings.robot_overlay_mask_scanned_robot
     ? robotMaskCapsules()
     : null;
   gl.uniform1i(state.uniforms.robotMaskEnabled, maskCapsules ? 1 : 0);
@@ -2328,11 +2329,15 @@ export async function startGodotHybridRenderer(options = {}) {
   const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, depth: true, powerPreference: "high-performance" });
   if (!gl) throw new Error("WebGL2 is required for the hybrid RGB-D renderer");
   state.canvas = canvas;
+  state.robotRenderer = activeRobotRenderer();
   attachPointerNavigation();
-  state.manualRgbCanvas = typeof options.manualRgbCanvas === "string"
-    ? document.getElementById(options.manualRgbCanvas) : options.manualRgbCanvas;
-  state.manualCropCanvas = typeof options.manualCropCanvas === "string"
-    ? document.getElementById(options.manualCropCanvas) : options.manualCropCanvas;
+  const manualView = state.robotRenderer.manualView || {};
+  const manualRgbCanvas = options.manualRgbCanvas ?? manualView.rgbCanvas;
+  const manualCropCanvas = options.manualCropCanvas ?? manualView.cropCanvas;
+  state.manualRgbCanvas = typeof manualRgbCanvas === "string"
+    ? document.getElementById(manualRgbCanvas) : manualRgbCanvas;
+  state.manualCropCanvas = typeof manualCropCanvas === "string"
+    ? document.getElementById(manualCropCanvas) : manualCropCanvas;
   state.gl = gl;
   state.program = createProgram(gl);
   state.uniforms = findUniforms(gl, state.program);
@@ -2370,7 +2375,7 @@ export async function startGodotHybridRenderer(options = {}) {
     cameraFps: {},
     cameraEncodeMs: {},
     robotModelsLoaded: 0,
-    robotModelsExpected: Object.keys(ROBOT_MODEL_URLS).length,
+    robotModelsExpected: Object.keys(state.robotRenderer.modelUrls || {}).length,
     robotTransforms: 0,
     robotLoadError: "",
     transport: "--",
@@ -2455,6 +2460,7 @@ export function stopGodotHybridRenderer() {
   state.robotUniforms = null;
   state.robotVao = null;
   state.robotTransforms = {};
+  state.robotRenderer = EMPTY_ROBOT_RENDERER;
   state.baseViewer = null;
   state.currentViewer = null;
   state.focusWorld = null;

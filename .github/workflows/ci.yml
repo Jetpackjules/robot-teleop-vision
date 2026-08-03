@@ -31,7 +31,7 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -e ".[test,calibration]"
       - name: Compile Python sources
-        run: python -m compileall -q robot_teleop tools tests
+        run: python -m compileall -q robot_teleop robot_modules tools tests
       - name: Run hardware-free tests
         run: python -m pytest -q
 
@@ -80,7 +80,7 @@ jobs:
         run: |
           mkdir -p package
           cp -r dist/windows/* package/
-          cp -r robot_teleop tools web config native assets docs scripts package/
+          cp -r robot_teleop robot_modules tools web config native assets docs scripts package/
           cp README.md pyproject.toml package/
           rm -rf package/tests package/config/local.toml package/native/realsense_shared_memory/src package/native/realsense_shared_memory/bin/*.so
       - uses: actions/upload-artifact@v4

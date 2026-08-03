@@ -32,7 +32,12 @@ from aiortc import RTCRtpSender
 from aiortc.codecs import h264, vpx
 from aiortc.exceptions import InvalidStateError
 
-from so101_arm_common import ArmProtocolError, validate_browser_arm_message
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from robot_teleop.modules import public_robot_module
+from robot_teleop.operator import RobotCommandError, load_robot_operator
 
 
 h264.MAX_BITRATE = 24_000_000
@@ -45,11 +50,11 @@ MAX_WEBSOCKET_FRAME = 64 * 1024
 MAX_WEBRTC_PEERS = 4
 MAX_FFMPEG_PROCESSES = 2
 MAX_RGBD_HTTP_REQUESTS = 48
-MAX_CLAW_STREAMS = 4
+MAX_ROBOT_VIEW_STREAMS = 4
 MAX_REMEMBERED_RGBD_CLIENTS = 1024
-MAX_ARM_TRANSPORT_AGE_MS = 250
-ARM_CLOCK_REBASE_SAMPLE_COUNT = 4
-ARM_CLOCK_REBASE_RANGE_MS = 40
+MAX_ROBOT_TRANSPORT_AGE_MS = 250
+ROBOT_CLOCK_REBASE_SAMPLE_COUNT = 4
+ROBOT_CLOCK_REBASE_RANGE_MS = 40
 
 TEMPORAL_DEPTH_MAGIC = b"DTL1"
 TEMPORAL_DEPTH_HEADER = struct.Struct("<4sIHHHI")
@@ -1360,8 +1365,8 @@ class TemporalRgbdDepthEncoder:
             return packet, False
 
 
-class ClawCameraHub:
-    """One persistent camera capture shared by all MJPEG browser clients."""
+class AuxiliaryCameraHub:
+    """One persistent camera capture shared by MJPEG clients for one module view."""
 
     def __init__(self) -> None:
         self.condition = threading.Condition()
@@ -1699,15 +1704,16 @@ class LanRemoteServer(ThreadingHTTPServer):
         stream_host: str,
         stream_port: int,
         password: str,
-        arm_command_port: int = 4248,
-        arm_status_port: int = 4249,
-        public_arm: bool = False,
-        allow_quick_tunnel_arm: bool = False,
+        robot_command_port: int | None = None,
+        robot_status_port: int | None = None,
+        public_robot: bool = False,
+        allow_quick_tunnel_robot: bool = False,
         public_hostname: str = "",
         access_team_domain: str = "",
         access_audience: str = "",
         robot_calibration_status_port: int = 4251,
-        claw_camera_device: str = "",
+        robot_view_devices: dict[str, str] | None = None,
+        robot_module: str = "",
     ):
         super().__init__(address, handler)
         self.root = root
@@ -1716,70 +1722,99 @@ class LanRemoteServer(ThreadingHTTPServer):
         self.stream_host = stream_host
         self.stream_port = stream_port
         self.password = password
-        self.arm_command_port = arm_command_port
-        self.arm_status_port = arm_status_port
+        self.robot_module = robot_module or os.environ.get("ROBOT_TELEOP_MODULE", "disabled")
+        module_paths = tuple(
+            item
+            for item in os.environ.get("ROBOT_TELEOP_MODULE_PATH", "").split(os.pathsep)
+            if item
+        )
+        self.robot_operator = load_robot_operator(self.robot_module, module_paths)
+        self.robot_manifest = public_robot_module(self.robot_module, module_paths)
+        self.robot_command_port = int(
+            robot_command_port
+            if robot_command_port is not None
+            else os.environ.get("ROBOT_TELEOP_COMMAND_PORT", self.robot_operator.command_port)
+        )
+        self.robot_status_port = int(
+            robot_status_port
+            if robot_status_port is not None
+            else os.environ.get("ROBOT_TELEOP_STATUS_PORT", self.robot_operator.status_port)
+        )
         self.robot_calibration_status_port = robot_calibration_status_port
-        self.public_arm = public_arm
-        self.allow_quick_tunnel_arm = allow_quick_tunnel_arm
+        self.public_robot = public_robot
+        self.allow_quick_tunnel_robot = allow_quick_tunnel_robot
         self.public_hostname = public_hostname.strip().lower()
         self.access_team_domain = access_team_domain.strip().lower().removeprefix("https://").rstrip("/")
         self.access_audience = access_audience.strip()
         self.access_jwk_client = None
         self.session_cookie = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.arm_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.robot_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.packet_count = 0
         self.last_report_sec = time.monotonic()
         self.last_report_count = 0
         self.peer_connections: set[RTCPeerConnection] = set()
         self.peer_lock = threading.Lock()
         self.ffmpeg_slots = threading.BoundedSemaphore(MAX_FFMPEG_PROCESSES)
-        # Streaming and arm control share one newest-browser-wins owner. A
+        # Streaming and robot control share one newest-browser-wins owner. A
         # stable per-page ID prevents a superseded tab from stealing either
         # channel back during transport fallback or reconnect.
         self.browser_client_lock = threading.Lock()
         self.browser_client_id: str | None = None
         self.browser_client_handlers: dict[str, object | None] = {
             "rgbd": None,
-            "arm": None,
+            "robot": None,
         }
         self.browser_superseded_clients: set[str] = set()
         self.browser_superseded_order: deque[str] = deque()
         self.rgbd_http_slots = threading.BoundedSemaphore(MAX_RGBD_HTTP_REQUESTS)
         self.rgbd_latest_hub = LatestRgbdHub()
-        self.claw_camera_device = resolve_claw_camera_device(claw_camera_device)
-        self.claw_stream_slots = threading.BoundedSemaphore(MAX_CLAW_STREAMS)
-        self.claw_camera_hub = ClawCameraHub()
-        self.arm_controller_lock = threading.Lock()
-        self.arm_controller_id: str | None = None
-        self.arm_controller_peer = ""
-        self.arm_controller_handler = None
-        self.arm_last_command_at = 0.0
-        self.arm_command_times: deque[float] = deque()
-        self.arm_browser_clock_offset_ms: int | None = None
-        self.arm_browser_clock_rebase_samples: deque[int] = deque(
-            maxlen=ARM_CLOCK_REBASE_SAMPLE_COUNT
-        )
-        self.arm_stale_command_drop_count = 0
-        self.arm_restart_requested_at = 0.0
-        self.arm_restart_baseline_count = 0
-        self.arm_status_lock = threading.Lock()
-        self.arm_status_received_at = 0.0
-        self.arm_status: dict = {
-            "type": "arm_status",
-            "follower_connected": False,
-            "state": "offline",
-            "armed": False,
-            "torque_enabled": False,
-            "fault": "follower service unavailable",
+        configured_views = dict(robot_view_devices or {})
+        if not configured_views:
+            try:
+                environment_views = json.loads(os.environ.get("ROBOT_TELEOP_VIEW_DEVICES", "{}"))
+                if isinstance(environment_views, dict):
+                    configured_views = {str(key): str(value) for key, value in environment_views.items()}
+            except json.JSONDecodeError:
+                configured_views = {}
+        self.robot_view_devices = {
+            view_id: self.robot_operator.resolve_auxiliary_device(
+                view_id,
+                configured_views.get(view_id, ""),
+            )
+            for view_id in self.robot_operator.auxiliary_views
         }
-        self.arm_status_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.arm_status_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.arm_status_socket.bind(("127.0.0.1", self.arm_status_port))
-        self.arm_status_socket.settimeout(0.5)
-        self.arm_status_running = True
-        self.arm_status_thread = threading.Thread(target=self._listen_for_arm_status, daemon=True)
-        self.arm_status_thread.start()
+        self.robot_view_slots = {
+            view_id: threading.BoundedSemaphore(MAX_ROBOT_VIEW_STREAMS)
+            for view_id in self.robot_operator.auxiliary_views
+        }
+        self.robot_view_hubs = {
+            view_id: AuxiliaryCameraHub()
+            for view_id in self.robot_operator.auxiliary_views
+        }
+        self.robot_controller_lock = threading.Lock()
+        self.robot_controller_id: str | None = None
+        self.robot_controller_peer = ""
+        self.robot_controller_handler = None
+        self.robot_last_command_at = 0.0
+        self.robot_command_times: deque[float] = deque()
+        self.robot_browser_clock_offset_ms: int | None = None
+        self.robot_browser_clock_rebase_samples: deque[int] = deque(
+            maxlen=ROBOT_CLOCK_REBASE_SAMPLE_COUNT
+        )
+        self.robot_stale_command_drop_count = 0
+        self.robot_restart_requested_at = 0.0
+        self.robot_restart_baseline_count = 0
+        self.robot_status_lock = threading.Lock()
+        self.robot_status_received_at = 0.0
+        self.robot_status: dict = self.robot_operator.default_status()
+        self.robot_status_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.robot_status_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.robot_status_socket.bind(("127.0.0.1", self.robot_status_port))
+        self.robot_status_socket.settimeout(0.5)
+        self.robot_status_running = True
+        self.robot_status_thread = threading.Thread(target=self._listen_for_robot_status, daemon=True)
+        self.robot_status_thread.start()
         self.robot_calibration_lock = threading.Lock()
         self.robot_calibration_received_at = 0.0
         self.robot_calibration_status: dict = {
@@ -1788,7 +1823,7 @@ class LanRemoteServer(ThreadingHTTPServer):
             "progress": 0.0,
             "frames": 0,
             "confidence": 0.0,
-            "message": "Waiting for Godot arm calibrator.",
+            "message": "Waiting for the Godot robot calibration module.",
         }
         self.robot_calibration_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.robot_calibration_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1815,47 +1850,49 @@ class LanRemoteServer(ThreadingHTTPServer):
             self.last_report_sec = now
             print(f"lan remote tracking wss->udp {hz}/s total={self.packet_count}", flush=True)
 
-    def forward_arm(self, message: dict) -> None:
-        if message.get("type") in ("arm_command", "arm_cartesian_velocity", "arm_joint_velocity", "arm_tool_velocity"):
+    def forward_robot(self, message: dict) -> None:
+        if self.robot_operator.is_motion(message):
             now = time.monotonic()
-            self.arm_last_command_at = now
-            self.arm_command_times.append(now)
-            while self.arm_command_times and now - self.arm_command_times[0] > 1.0:
-                self.arm_command_times.popleft()
-        if message.get("type") == "arm_restart":
-            with self.arm_status_lock:
-                self.arm_restart_baseline_count = int(self.arm_status.get("restart_count", 0))
-            self.arm_restart_requested_at = time.monotonic()
+            self.robot_last_command_at = now
+            self.robot_command_times.append(now)
+            while self.robot_command_times and now - self.robot_command_times[0] > 1.0:
+                self.robot_command_times.popleft()
+        if self.robot_operator.is_restart(message):
+            with self.robot_status_lock:
+                self.robot_restart_baseline_count = self.robot_operator.restart_marker(
+                    self.robot_status
+                )
+            self.robot_restart_requested_at = time.monotonic()
         payload = json.dumps(message, separators=(",", ":")).encode("utf-8")
-        self.arm_udp.sendto(payload, ("127.0.0.1", self.arm_command_port))
+        self.robot_udp.sendto(payload, ("127.0.0.1", self.robot_command_port))
 
-    def claim_arm_controller(
+    def claim_robot_controller(
         self,
         peer: str,
         client_id: str = "",
         handler=None,
     ) -> str | None:
-        if client_id and not self.claim_browser_client(client_id, "arm", handler):
+        if client_id and not self.claim_browser_client(client_id, "robot", handler):
             return None
         previous_handler = None
-        with self.arm_controller_lock:
-            if not client_id and self.arm_controller_id is not None:
+        with self.robot_controller_lock:
+            if not client_id and self.robot_controller_id is not None:
                 return None
-            previous_handler = self.arm_controller_handler
+            previous_handler = self.robot_controller_handler
             controller_id = uuid.uuid4().hex
-            self.arm_controller_id = controller_id
-            self.arm_controller_peer = peer
-            self.arm_controller_handler = handler
-            self.arm_last_command_at = 0.0
-            self.arm_command_times.clear()
-            self.arm_browser_clock_offset_ms = None
-            self.arm_browser_clock_rebase_samples.clear()
+            self.robot_controller_id = controller_id
+            self.robot_controller_peer = peer
+            self.robot_controller_handler = handler
+            self.robot_last_command_at = 0.0
+            self.robot_command_times.clear()
+            self.robot_browser_clock_offset_ms = None
+            self.robot_browser_clock_rebase_samples.clear()
         if previous_handler is not None and previous_handler is not handler:
-            self.forward_arm({"type": "arm_hold"})
-            previous_handler.preempt_arm_websocket()
+            self.forward_robot(self.robot_operator.hold_message())
+            previous_handler.preempt_robot_websocket()
         return controller_id
 
-    def normalize_browser_arm_timing(
+    def normalize_browser_robot_timing(
         self,
         message: dict,
         bridge_ms: int | None = None,
@@ -1872,99 +1909,69 @@ class LanRemoteServer(ThreadingHTTPServer):
         bridge_ms = int(time.time() * 1000) if bridge_ms is None else int(bridge_ms)
         browser_ms = int(message["sent_unix_ms"])
         observed_offset = bridge_ms - browser_ms
-        baseline = self.arm_browser_clock_offset_ms
+        baseline = self.robot_browser_clock_offset_ms
         if (
             baseline is None
             or observed_offset < baseline
             or abs(observed_offset - baseline) > 5000
         ):
             baseline = observed_offset
-            self.arm_browser_clock_offset_ms = baseline
-            self.arm_browser_clock_rebase_samples.clear()
+            self.robot_browser_clock_offset_ms = baseline
+            self.robot_browser_clock_rebase_samples.clear()
         transport_age_ms = float(max(0, observed_offset - baseline))
-        if transport_age_ms > MAX_ARM_TRANSPORT_AGE_MS:
-            samples = self.arm_browser_clock_rebase_samples
+        if transport_age_ms > MAX_ROBOT_TRANSPORT_AGE_MS:
+            samples = self.robot_browser_clock_rebase_samples
             samples.append(observed_offset)
             stable_shift = (
-                len(samples) >= ARM_CLOCK_REBASE_SAMPLE_COUNT
-                and max(samples) - min(samples) <= ARM_CLOCK_REBASE_RANGE_MS
+                len(samples) >= ROBOT_CLOCK_REBASE_SAMPLE_COUNT
+                and max(samples) - min(samples) <= ROBOT_CLOCK_REBASE_RANGE_MS
             )
             if stable_shift:
                 baseline = int(round(sum(samples) / len(samples)))
-                self.arm_browser_clock_offset_ms = baseline
+                self.robot_browser_clock_offset_ms = baseline
                 samples.clear()
                 transport_age_ms = float(max(0, observed_offset - baseline))
             else:
-                self.arm_stale_command_drop_count += 1
+                self.robot_stale_command_drop_count += 1
                 return False, transport_age_ms
         else:
-            self.arm_browser_clock_rebase_samples.clear()
+            self.robot_browser_clock_rebase_samples.clear()
         message["browser_sent_unix_ms"] = browser_ms
         message["bridge_recv_unix_ms"] = bridge_ms
         message["transport_age_ms"] = transport_age_ms
-        # The follower watchdog uses the main PC's clock, not the browser's.
+        # The hardware watchdog uses the bridge clock, not the browser clock.
         message["sent_unix_ms"] = bridge_ms
         return True, transport_age_ms
 
-    def resume_keyboard_after_transient_watchdog(
+    def resume_after_transient_watchdog(
         self,
         controller_id: str,
         message: dict,
     ) -> bool:
-        """Re-arm only a same-session keyboard watchdog pause.
+        """Let a module recover only watchdog states it explicitly recognizes."""
 
-        Explicit Hold, contact/following error, IK/clearance guards, and
-        hardware faults deliberately do not qualify.
-        """
-
-        if (
-            message.get("type")
-            not in (
-                "arm_cartesian_velocity",
-                "arm_joint_velocity",
-                "arm_tool_velocity",
-            )
-            or message.get("deadman") is not True
-        ):
+        status = self.latest_robot_status(controller_id)
+        recovery = self.robot_operator.recovery_message(message, status, controller_id)
+        if recovery is None:
             return False
-        status = self.latest_arm_status(controller_id)
-        recoverable_messages = (
-            "command watchdog expired",
-            "received keyboard command is older than watchdog limit",
-        )
-        if (
-            status.get("state") != "hold"
-            or status.get("control_session") != controller_id
-            or not any(
-                str(status.get("message", "")).startswith(reason)
-                for reason in recoverable_messages
-            )
-        ):
-            return False
-        self.forward_arm(
-            {
-                "type": "arm_enable",
-                "source": "keyboard",
-                "control_session": controller_id,
-            }
-        )
+        self.forward_robot(recovery)
         return True
 
-    def release_arm_controller(
+    def release_robot_controller(
         self,
         controller_id: str,
         client_id: str = "",
         handler=None,
     ) -> None:
-        with self.arm_controller_lock:
-            if self.arm_controller_id != controller_id:
+        with self.robot_controller_lock:
+            if self.robot_controller_id != controller_id:
                 return
-            self.forward_arm({"type": "arm_hold"})
-            self.arm_controller_id = None
-            self.arm_controller_peer = ""
-            self.arm_controller_handler = None
+            self.forward_robot(self.robot_operator.hold_message())
+            self.robot_controller_id = None
+            self.robot_controller_peer = ""
+            self.robot_controller_handler = None
         if client_id and handler is not None:
-            self.release_browser_client(client_id, "arm", handler)
+            self.release_browser_client(client_id, "robot", handler)
 
     def _remember_superseded_browser_client(self, client_id: str) -> None:
         if not client_id or client_id in self.browser_superseded_clients:
@@ -1998,18 +2005,18 @@ class LanRemoteServer(ThreadingHTTPServer):
                     if active is not None and active is not handler
                 ]
                 self.browser_client_id = client_id
-                self.browser_client_handlers = {"rgbd": None, "arm": None}
+                self.browser_client_handlers = {"rgbd": None, "robot": None}
             else:
                 active = self.browser_client_handlers[channel]
                 if handler is not None and active is not None and active is not handler:
                     previous_handlers.append((channel, active))
             if handler is not None:
                 self.browser_client_handlers[channel] = handler
-        if owner_changed and any(name == "arm" for name, _active in previous_handlers):
-            self.forward_arm({"type": "arm_hold"})
+        if owner_changed and any(name == "robot" for name, _active in previous_handlers):
+            self.forward_robot(self.robot_operator.hold_message())
         for name, active in previous_handlers:
-            if name == "arm":
-                active.preempt_arm_websocket()
+            if name == "robot":
+                active.preempt_robot_websocket()
             else:
                 active.preempt_rgbd_websocket()
         return True
@@ -2030,54 +2037,46 @@ class LanRemoteServer(ThreadingHTTPServer):
     def release_rgbd_client(self, client_id: str, handler) -> None:
         self.release_browser_client(client_id, "rgbd", handler)
 
-    def latest_arm_status(self, controller_id: str | None = None) -> dict:
-        with self.arm_status_lock:
-            status = dict(self.arm_status)
-            status_received_at = self.arm_status_received_at
+    def latest_robot_status(self, controller_id: str | None = None) -> dict:
+        with self.robot_status_lock:
+            status = dict(self.robot_status)
+            status_received_at = self.robot_status_received_at
         status_age_ms = None if not status_received_at else (time.monotonic() - status_received_at) * 1000.0
-        status["status_age_ms"] = status_age_ms
-        status["follower_responsive"] = bool(status_age_ms is not None and status_age_ms <= 500.0)
-        if status_age_ms is not None and status_age_ms > 500.0:
-            status["follower_connected"] = False
-            status["armed"] = False
-            status["state"] = "unresponsive"
-            status["fault"] = f"follower status stalled for {status_age_ms:.0f} ms"
-        if self.arm_restart_requested_at:
-            restart_age = time.monotonic() - self.arm_restart_requested_at
-            completed = int(status.get("restart_count", 0)) > self.arm_restart_baseline_count and status.get("state") != "restarting"
-            if completed:
-                self.arm_restart_requested_at = 0.0
-            elif restart_age <= 8.0:
-                status["state"] = "restarting"
-                status["armed"] = False
-                status["fault"] = ""
-                status["message"] = "Restarting follower motor connection..."
-            else:
-                self.arm_restart_requested_at = 0.0
-                status["state"] = "fault"
-                status["armed"] = False
-                status["fault"] = "follower restart timed out; check USB power/cable and retry"
-        with self.arm_controller_lock:
-            status["controller_active"] = self.arm_controller_id is not None
-            status["controller_is_self"] = bool(controller_id and controller_id == self.arm_controller_id)
-            status["controller_peer"] = self.arm_controller_peer if self.arm_controller_id else ""
-            status["leader_data_fresh"] = bool(
-                self.arm_last_command_at and time.monotonic() - self.arm_last_command_at <= 0.25
+        restart_age = (
+            time.monotonic() - self.robot_restart_requested_at
+            if self.robot_restart_requested_at
+            else None
+        )
+        status, clear_restart = self.robot_operator.browser_status(
+            status,
+            status_age_ms,
+            restart_age,
+            self.robot_restart_baseline_count,
+        )
+        if clear_restart:
+            self.robot_restart_requested_at = 0.0
+        with self.robot_controller_lock:
+            status["controller_active"] = self.robot_controller_id is not None
+            status["controller_is_self"] = bool(controller_id and controller_id == self.robot_controller_id)
+            status["controller_peer"] = self.robot_controller_peer if self.robot_controller_id else ""
+            status["control_data_fresh"] = bool(
+                self.robot_last_command_at and time.monotonic() - self.robot_last_command_at <= 0.25
             )
-            status["command_rate_hz"] = len(self.arm_command_times)
+            # Compatibility data is module-owned; the shared status name is neutral.
+            status["command_rate_hz"] = len(self.robot_command_times)
         with self.robot_calibration_lock:
             calibration = dict(self.robot_calibration_status)
             calibration_received_at = self.robot_calibration_received_at
         if calibration_received_at and time.monotonic() - calibration_received_at > 2.0:
             calibration["state"] = "offline"
-            calibration["message"] = "Godot arm calibrator is not responding."
+            calibration["message"] = "Godot robot calibration module is not responding."
         status["robot_calibration"] = calibration
         return status
 
-    def _listen_for_arm_status(self) -> None:
-        while self.arm_status_running:
+    def _listen_for_robot_status(self) -> None:
+        while self.robot_status_running:
             try:
-                payload, address = self.arm_status_socket.recvfrom(64 * 1024)
+                payload, address = self.robot_status_socket.recvfrom(64 * 1024)
             except socket.timeout:
                 continue
             except OSError:
@@ -2088,11 +2087,12 @@ class LanRemoteServer(ThreadingHTTPServer):
                 status = json.loads(payload.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
-            if not isinstance(status, dict) or status.get("type") != "arm_status":
+            status = self.robot_operator.validate_status(status)
+            if status is None:
                 continue
-            with self.arm_status_lock:
-                self.arm_status = status
-                self.arm_status_received_at = time.monotonic()
+            with self.robot_status_lock:
+                self.robot_status = status
+                self.robot_status_received_at = time.monotonic()
 
     def _listen_for_robot_calibration_status(self) -> None:
         while self.robot_calibration_running:
@@ -2135,12 +2135,13 @@ class LanRemoteServer(ThreadingHTTPServer):
             return False
 
     def server_close(self):
-        self.arm_status_running = False
+        self.robot_status_running = False
         self.robot_calibration_running = False
-        self.claw_camera_hub.stop()
+        for hub in self.robot_view_hubs.values():
+            hub.stop()
         self.rgbd_latest_hub.stop()
         try:
-            self.arm_status_socket.close()
+            self.robot_status_socket.close()
         except OSError:
             pass
         try:
@@ -2148,7 +2149,7 @@ class LanRemoteServer(ThreadingHTTPServer):
         except OSError:
             pass
         self.udp.close()
-        self.arm_udp.close()
+        self.robot_udp.close()
         try:
             future = asyncio.run_coroutine_threadsafe(self._close_peer_connections(), self.async_loop)
             future.result(timeout=2.0)
@@ -2192,9 +2193,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if not self.websocket_origin_allowed():
                 self.send_error(403, "WebSocket origin rejected")
                 return
-            if parsed.path == "/arm-control":
-                if not self.arm_authorized():
-                    self.send_websocket_auth_required("arm control requires an authorized LAN session or Cloudflare Access identity")
+            if parsed.path == "/robot-control":
+                if not self.robot_authorized():
+                    self.send_websocket_auth_required("robot control requires an authorized LAN session or Cloudflare Access identity")
                     return
             elif self.auth_required() and not self.is_authorized():
                 self.send_websocket_auth_required()
@@ -2219,8 +2220,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path == "/stream":
             self.proxy_stream(parsed.query)
             return
-        if parsed.path == "/claw-stream":
-            self.stream_claw_camera(parsed.query)
+        if parsed.path == "/api/v1/robot-module":
+            self.serve_json(self.server.robot_manifest)
+            return
+        if parsed.path.startswith("/robot-view/"):
+            self.stream_robot_view(parsed.path.removeprefix("/robot-view/"), parsed.query)
             return
         if parsed.path == "/rgbd-latest":
             self.serve_latest_rgbd(parsed.query)
@@ -2318,9 +2322,13 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=godotframe")
             self.end_headers()
             return
-        if parsed.path == "/claw-stream":
+        if parsed.path.startswith("/robot-view/"):
+            view_id = parsed.path.removeprefix("/robot-view/")
+            if view_id not in self.server.robot_operator.auxiliary_views:
+                self.send_error(404, "Unknown robot view")
+                return
             self.send_response(200)
-            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=clawframe")
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=robotviewframe")
             self.end_headers()
             return
         if parsed.path in ("/", "/hybrid", "/hybrid/", "/hybrid/controller.html"):
@@ -2383,16 +2391,16 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         token = self.headers.get("Cf-Access-Jwt-Assertion", "")
         return self.server.verify_access_token(token)
 
-    def arm_authorized(self) -> bool:
+    def robot_authorized(self) -> bool:
         if self.is_cloudflare_request():
             request_host = self.headers.get("Host", "").split(":", 1)[0].lower()
             if (
-                self.server.public_arm
+                self.server.public_robot
                 and self.server.public_hostname
                 and request_host == self.server.public_hostname
             ):
                 return self.cloudflare_access_authorized()
-            if getattr(self.server, "allow_quick_tunnel_arm", False) and request_host.endswith(".trycloudflare.com"):
+            if getattr(self.server, "allow_quick_tunnel_robot", False) and request_host.endswith(".trycloudflare.com"):
                 return self.session_cookie_authorized()
             return False
         return self.is_authorized()
@@ -2494,11 +2502,29 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
 </html>
 """.encode("utf-8")
 
+    def serve_json(self, payload: object, include_body: bool = True) -> None:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if include_body:
+            self.wfile.write(body)
+
     def serve_file(self, rel: str, include_body: bool = True):
         root = self.server.root.resolve()
-        # The operator UI is its own document root; robot models live in the
-        # repository's shared assets tree and are exposed read-only here.
-        if rel.startswith("assets/"):
+        module_prefix = "robot-modules/"
+        if rel.startswith(module_prefix):
+            module_rel = rel.removeprefix(module_prefix)
+            module_id, separator, module_file = module_rel.partition("/")
+            manifest = self.server.robot_operator.manifest
+            if not separator or manifest is None or module_id != manifest.id:
+                self.send_error(404, "Robot module file not found")
+                return
+            allowed_root = manifest.path.parent.resolve()
+            target = (allowed_root / module_file).resolve()
+        # Shared web assets remain available to the vision-only application.
+        elif rel.startswith("assets/"):
             allowed_root = (root.parent / "assets").resolve()
             target = (root.parent / rel).resolve()
         else:
@@ -2554,31 +2580,35 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         finally:
             upstream.close()
 
-    def stream_claw_camera(self, query: str) -> None:
-        device = self.server.claw_camera_device
+    def stream_robot_view(self, view_id: str, query: str) -> None:
+        view = self.server.robot_operator.auxiliary_views.get(view_id)
+        if view is None or view.stream != "mjpeg":
+            self.send_error(404, "Unknown or unsupported robot view")
+            return
+        device = self.server.robot_view_devices.get(view_id, "")
         if not device or not Path(device).exists():
-            # The arm camera is often plugged in after the remote stack starts.
-            # Re-scan here so the default-on browser preview recovers without a
-            # server restart as soon as USB2.0_CAM1 appears.
-            device = resolve_claw_camera_device("")
-            self.server.claw_camera_device = device
+            # Auxiliary cameras may be plugged in after startup. Let the
+            # selected module re-discover its own hardware on demand.
+            device = self.server.robot_operator.resolve_auxiliary_device(view_id)
+            self.server.robot_view_devices[view_id] = device
             if not device or not Path(device).exists():
-                self.send_error(503, "Claw camera is not connected")
+                self.send_error(503, f"{view.label} is not connected")
                 return
-        if not self.server.claw_stream_slots.acquire(blocking=False):
-            self.send_error(503, "Claw camera client capacity reached")
+        slots = self.server.robot_view_slots[view_id]
+        if not slots.acquire(blocking=False):
+            self.send_error(503, f"{view.label} client capacity reached")
             return
         params = parse_qs(query)
         width = clamp_int(params.get("w", params.get("width", ["1280"]))[0], 320, 1920)
         height = clamp_int(params.get("h", params.get("height", ["720"]))[0], 240, 1080)
         fps = clamp_int(params.get("fps", ["30"])[0], 1, 30)
-        hub = self.server.claw_camera_hub
+        hub = self.server.robot_view_hubs[view_id]
         if not hub.ensure_running(device, width, height, fps):
-            self.server.claw_stream_slots.release()
-            self.send_error(503, f"Could not start claw camera: {hub.last_error or 'capture unavailable'}")
+            slots.release()
+            self.send_error(503, f"Could not start {view.label}: {hub.last_error or 'capture unavailable'}")
             return
         self.send_response(200)
-        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=clawframe")
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=robotviewframe")
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.send_header("X-Accel-Buffering", "no")
         self.send_header("Connection", "keep-alive")
@@ -2594,7 +2624,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     continue
                 sequence = next_sequence
                 header = (
-                    "--clawframe\r\n"
+                    "--robotviewframe\r\n"
                     "Content-Type: image/jpeg\r\n"
                     f"Content-Length: {len(frame)}\r\n"
                     f"X-Capture-Unix-Ms: {capture_unix_ms}\r\n"
@@ -2604,7 +2634,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionError, OSError):
             pass
         finally:
-            self.server.claw_stream_slots.release()
+            slots.release()
 
     def proxy_encoded_video(self, query: str, container: str):
         if not self.server.ffmpeg_slots.acquire(blocking=False):
@@ -3088,11 +3118,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
 
     def handle_websocket(self):
         path = urlsplit(self.path).path
-        if path not in ("/head-tracking", "/arm-control", "/av1-stream", "/rgbd-stream"):
+        if path not in ("/head-tracking", "/robot-control", "/av1-stream", "/rgbd-stream"):
             self.send_error(404, "Unknown websocket path")
             return
-        if path == "/arm-control":
-            self.handle_arm_websocket()
+        if path == "/robot-control":
+            self.handle_robot_websocket()
             return
         if path == "/av1-stream":
             self.handle_av1_websocket()
@@ -3498,7 +3528,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     pass
             self.server.ffmpeg_slots.release()
 
-    def handle_arm_websocket(self):
+    def handle_robot_websocket(self):
         params = parse_qs(urlsplit(self.path).query)
         client_id = params.get("client", [""])[0]
         if (
@@ -3509,26 +3539,26 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 for character in client_id
             )
         ):
-            self.send_error(400, "Invalid arm control client")
+            self.send_error(400, "Invalid robot control client")
             return
         peer = f"{self.client_address[0]}:{self.client_address[1]}"
-        self.arm_preempted = threading.Event()
-        self.arm_send_lock = threading.Lock()
+        self.robot_preempted = threading.Event()
+        self.robot_send_lock = threading.Lock()
         if not self.accept_websocket():
             return
-        controller_id = self.server.claim_arm_controller(peer, client_id, self)
+        controller_id = self.server.claim_robot_controller(peer, client_id, self)
         if controller_id is None:
             self.send_ws_frame(
                 struct.pack("!H", 4001) + b"superseded by newer browser",
                 0x8,
             )
             return
-        print(f"SO-101 arm controller connected: {peer}", flush=True)
+        print(f"{self.server.robot_manifest['label']} controller connected: {peer}", flush=True)
         rate_window: deque[float] = deque()
-        self.send_arm_status(controller_id)
+        self.send_robot_status(controller_id)
         try:
             while True:
-                if self.arm_preempted.is_set():
+                if self.robot_preempted.is_set():
                     break
                 frame = self.read_ws_frame()
                 if frame is None:
@@ -3544,40 +3574,42 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     continue
                 try:
                     self.check_websocket_rate(rate_window, 75)
-                    message = validate_browser_arm_message(json.loads(payload.decode("utf-8")))
-                    if message["type"] in ("arm_command", "arm_cartesian_velocity", "arm_joint_velocity", "arm_tool_velocity"):
+                    message = self.server.robot_operator.validate_command(
+                        json.loads(payload.decode("utf-8"))
+                    )
+                    if self.server.robot_operator.needs_transport_timing(message):
                         accepted, _transport_age_ms = (
-                            self.server.normalize_browser_arm_timing(message)
+                            self.server.normalize_browser_robot_timing(message)
                         )
                         if not accepted:
-                            self.send_arm_status(controller_id)
+                            self.send_robot_status(controller_id)
                             continue
-                    if message["type"] != "arm_status_request":
-                        message["control_session"] = controller_id
-                        self.server.forward_arm(message)
-                        self.server.resume_keyboard_after_transient_watchdog(
+                    if not self.server.robot_operator.is_status_request(message):
+                        self.server.robot_operator.add_control_session(message, controller_id)
+                        self.server.forward_robot(message)
+                        self.server.resume_after_transient_watchdog(
                             controller_id,
                             message,
                         )
-                    self.send_arm_status(controller_id)
-                except (UnicodeDecodeError, json.JSONDecodeError, ArmProtocolError, ValueError) as exc:
-                    status = self.server.latest_arm_status(controller_id)
+                    self.send_robot_status(controller_id)
+                except (UnicodeDecodeError, json.JSONDecodeError, RobotCommandError, ValueError) as exc:
+                    status = self.server.latest_robot_status(controller_id)
                     status["fault"] = f"browser command rejected: {exc}"
                     self.send_ws_frame(json.dumps(status, separators=(",", ":")).encode("utf-8"))
         except (ConnectionError, OSError, ValueError):
             pass
         finally:
-            self.server.release_arm_controller(controller_id, client_id, self)
-            print(f"SO-101 arm controller disconnected: {peer}", flush=True)
+            self.server.release_robot_controller(controller_id, client_id, self)
+            print(f"{self.server.robot_manifest['label']} controller disconnected: {peer}", flush=True)
 
-    def preempt_arm_websocket(self) -> None:
+    def preempt_robot_websocket(self) -> None:
         """Hold and close this controller when a newer page takes ownership."""
 
-        preempted = getattr(self, "arm_preempted", None)
+        preempted = getattr(self, "robot_preempted", None)
         if preempted is None or preempted.is_set():
             return
         preempted.set()
-        send_lock = getattr(self, "arm_send_lock", None)
+        send_lock = getattr(self, "robot_send_lock", None)
         acquired = bool(send_lock and send_lock.acquire(timeout=0.1))
         try:
             if acquired:
@@ -3596,15 +3628,15 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-    def send_arm_status(self, controller_id: str) -> None:
-        status = self.server.latest_arm_status(controller_id)
+    def send_robot_status(self, controller_id: str) -> None:
+        status = self.server.latest_robot_status(controller_id)
         payload = json.dumps(status, separators=(",", ":")).encode("utf-8")
-        send_lock = getattr(self, "arm_send_lock", None)
+        send_lock = getattr(self, "robot_send_lock", None)
         if send_lock is None:
             self.send_ws_frame(payload)
             return
         with send_lock:
-            if not self.arm_preempted.is_set():
+            if not self.robot_preempted.is_set():
                 self.send_ws_frame(payload)
 
     def check_websocket_rate(self, window: deque[float], limit: int) -> None:
@@ -3662,19 +3694,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             "min_distance": (0.1, 8.0),
             "max_distance": (0.2, 20.0),
             "fov": (25.0, 110.0),
-            "manual_wrist_flex_trim_degrees": (-90.0, 90.0),
-            "manual_wrist_roll_trim_degrees": (-180.0, 180.0),
-            "manual_wrist_roll_direction": (-1.0, 1.0),
-            "manual_tool_x": (-0.05, 0.05),
-            "manual_tool_y": (-0.05, 0.05),
-            "manual_tool_z": (-0.05, 0.05),
-            "manual_tool_roll": (-180.0, 180.0),
-            "manual_tool_pitch": (-180.0, 180.0),
-            "manual_tool_yaw": (-180.0, 180.0),
-            "manual_opening_offset_degrees": (-35.0, 35.0),
-            "manual_opening_scale": (0.5, 1.5),
-            "manual_overlay_opacity": (0.05, 0.9),
         }
+        for key, value in self.server.robot_operator.numeric_view_settings().items():
+            bounds.setdefault(key, value)
         packet: dict[str, object] = {"type": "view_settings"}
         for key, (minimum, maximum) in bounds.items():
             if key not in data:
@@ -3683,26 +3705,16 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value):
                 raise ValueError(f"{key} must be finite")
             packet[key] = max(minimum, min(maximum, float(value)))
-        for key in (
+        boolean_settings = {
             "inspect_enabled",
             "dolly_enabled",
             "robot_overlay_enabled",
-            "robot_overlay_mask_scanned_arm",
+            "robot_overlay_mask_scanned_robot",
             "recenter",
-            "calibrate_robot_position",
-            "refine_robot_joint_alignment",
-            "cancel_robot_position_calibration",
-            "arm_measured_feedback_enabled",
-            "arm_target_ghost_enabled",
-            "arm_following_error_safety_enabled",
-            "arm_freeze_overlay_on_stale_enabled",
-            "arm_d455_visual_correction_enabled",
             "white_background_enabled",
-            "manual_claw_calibration_begin",
-            "manual_claw_calibration_reset",
-            "manual_claw_calibration_cancel",
-            "manual_claw_calibration_save",
-        ):
+        }
+        boolean_settings.update(self.server.robot_operator.boolean_view_settings())
+        for key in boolean_settings:
             if key in data:
                 if not isinstance(data[key], bool):
                     raise ValueError(f"{key} must be boolean")
@@ -3712,6 +3724,13 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if not isinstance(style, str) or style not in ("alignment", "solid"):
                 raise ValueError("robot_overlay_style must be alignment or solid")
             packet["robot_overlay_style"] = style
+        for key, allowed in self.server.robot_operator.enum_view_settings().items():
+            if key not in data:
+                continue
+            value = data[key]
+            if not isinstance(value, str) or value not in allowed:
+                raise ValueError(f"{key} must be one of {sorted(allowed)}")
+            packet[key] = value
         if "focus_pick_uv" in data:
             value = data["focus_pick_uv"]
             if not isinstance(value, list) or len(value) != 2:
@@ -4408,56 +4427,44 @@ def parse_http_headers(text: str) -> dict[str, str]:
     return headers
 
 
-def resolve_claw_camera_device(configured: str) -> str:
-    requested = str(configured or "").strip()
-    if requested.lower() in ("off", "none", "disabled"):
-        return ""
-    if requested:
-        path = Path(requested).expanduser()
-        return str(path.resolve()) if path.exists() else str(path)
-    by_id = Path("/dev/v4l/by-id")
-    if by_id.is_dir():
-        matches = sorted(by_id.glob("*USB2.0_CAM1*video-index0"))
-        if matches:
-            return str(matches[0])
-    for name_path in sorted(Path("/sys/class/video4linux").glob("video*/name")):
-        try:
-            if "USB2.0_CAM1" in name_path.read_text(encoding="utf-8", errors="replace"):
-                return f"/dev/{name_path.parent.name}"
-        except OSError:
-            continue
-    return ""
-
-
 def main():
-    parser = argparse.ArgumentParser(description="HTTPS LAN page, WSS head tracking bridge, and HTTPS viewport stream proxy.")
+    parser = argparse.ArgumentParser(description="Robot Teleop Vision operator gateway and stream proxy.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--root", default=str(Path(__file__).resolve().parents[1] / "web"))
+    parser.add_argument("--root", default=str(REPO_ROOT / "web"))
     parser.add_argument("--udp-host", default="127.0.0.1")
     parser.add_argument("--udp-port", type=int, default=4247)
     parser.add_argument("--stream-host", default="127.0.0.1")
     parser.add_argument("--stream-port", type=int, default=8780)
     parser.add_argument("--password", default=os.environ.get("GODOT_REMOTE_PASSWORD", ""))
-    parser.add_argument("--arm-command-port", type=int, default=4248)
-    parser.add_argument("--arm-status-port", type=int, default=4249)
+    parser.add_argument("--robot-module", default=os.environ.get("ROBOT_TELEOP_MODULE", "disabled"))
+    parser.add_argument("--robot-command-port", type=int)
+    parser.add_argument("--robot-status-port", type=int)
     parser.add_argument("--robot-calibration-status-port", type=int, default=4251)
     parser.add_argument(
-        "--claw-camera-device",
-        default=os.environ.get("GODOT_REMOTE_CLAW_CAMERA", ""),
-        help="V4L2 claw-camera device; defaults to the USB2.0_CAM1 video-index0 device, or 'off'.",
+        "--robot-view-device",
+        action="append",
+        default=[],
+        metavar="VIEW_ID=DEVICE",
+        help="Override a module-provided auxiliary view device; repeat for multiple views.",
     )
-    parser.add_argument("--public-arm", action="store_true")
-    parser.add_argument("--allow-quick-tunnel-arm", action="store_true")
+    parser.add_argument("--public-robot", action="store_true")
+    parser.add_argument("--allow-quick-tunnel-robot", action="store_true")
     parser.add_argument("--public-hostname", default=os.environ.get("GODOT_REMOTE_PUBLIC_HOSTNAME", ""))
     parser.add_argument("--access-team-domain", default=os.environ.get("CLOUDFLARE_ACCESS_TEAM_DOMAIN", ""))
     parser.add_argument("--access-audience", default=os.environ.get("CLOUDFLARE_ACCESS_AUD", ""))
-    parser.add_argument("--cert", default=str(Path(__file__).resolve().parents[1] / ".local_certs" / "lan_remote.crt"))
-    parser.add_argument("--key", default=str(Path(__file__).resolve().parents[1] / ".local_certs" / "lan_remote.key"))
+    parser.add_argument("--cert", default=str(REPO_ROOT / ".local_certs" / "lan_remote.crt"))
+    parser.add_argument("--key", default=str(REPO_ROOT / ".local_certs" / "lan_remote.key"))
     args = parser.parse_args()
 
-    if args.public_arm and not (args.public_hostname and args.access_team_domain and args.access_audience):
-        parser.error("--public-arm requires --public-hostname, --access-team-domain, and --access-audience")
+    if args.public_robot and not (args.public_hostname and args.access_team_domain and args.access_audience):
+        parser.error("--public-robot requires --public-hostname, --access-team-domain, and --access-audience")
+    robot_view_devices: dict[str, str] = {}
+    for item in args.robot_view_device:
+        view_id, separator, device = item.partition("=")
+        if not separator or not view_id or "/" in view_id:
+            parser.error("--robot-view-device must use VIEW_ID=DEVICE")
+        robot_view_devices[view_id] = device
 
     cert = Path(args.cert)
     key = Path(args.key)
@@ -4476,15 +4483,16 @@ def main():
         args.stream_host,
         args.stream_port,
         args.password,
-        args.arm_command_port,
-        args.arm_status_port,
-        args.public_arm,
-        args.allow_quick_tunnel_arm,
+        args.robot_command_port,
+        args.robot_status_port,
+        args.public_robot,
+        args.allow_quick_tunnel_robot,
         args.public_hostname,
         args.access_team_domain,
         args.access_audience,
         robot_calibration_status_port=args.robot_calibration_status_port,
-        claw_camera_device=args.claw_camera_device,
+        robot_view_devices=robot_view_devices,
+        robot_module=args.robot_module,
     )
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile=cert, keyfile=key)
@@ -4496,16 +4504,16 @@ def main():
         print("Controller password gate is ON.", flush=True)
     else:
         print("Controller password gate is OFF. Use --password or GODOT_REMOTE_PASSWORD before exposing publicly.", flush=True)
-    if args.public_arm:
-        print(f"Public arm control enabled for named Access hostname: {args.public_hostname}", flush=True)
-    elif args.allow_quick_tunnel_arm:
-        print("WARNING: quick-tunnel arm control is ON and protected only by the controller password.", flush=True)
+    if args.public_robot:
+        print(f"Public robot control enabled for named Access hostname: {args.public_hostname}", flush=True)
+    elif args.allow_quick_tunnel_robot:
+        print("WARNING: quick-tunnel robot control is ON and protected only by the controller password.", flush=True)
     else:
-        print("Public arm control is OFF; /arm-control accepts authenticated direct-LAN sessions only.", flush=True)
-    if server.claw_camera_device:
-        print(f"Claw camera ready on /claw-stream: {server.claw_camera_device}", flush=True)
-    else:
-        print("Claw camera unavailable; /claw-stream will return 503.", flush=True)
+        print("Public robot control is OFF; /robot-control accepts authenticated direct-LAN sessions only.", flush=True)
+    for view_id, view in server.robot_operator.auxiliary_views.items():
+        device = server.robot_view_devices.get(view_id, "")
+        availability = device or "waiting for device"
+        print(f"Robot view {view.label!r} on /robot-view/{view_id}: {availability}", flush=True)
     print("The first visit will show a self-signed certificate warning; accept it for LAN testing.", flush=True)
     try:
         server.serve_forever()

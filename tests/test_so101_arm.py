@@ -10,7 +10,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "robot_modules" / "so101" / "tools"))
 
 import so101_follower_service as follower_service
 from so101_arm_common import ArmPairProfile, ArmProtocolError, limit_step, validate_browser_arm_message
@@ -1175,7 +1175,7 @@ def test_joint_calibration_sweep_moves_only_one_servo_at_a_time():
 
 
 def test_joint_capture_wrist_coverage_matches_external_five_pose_gate():
-    source = (ROOT / "godot/runtime/point_cloud/so101_motion_calibrator.gd").read_text()
+    source = (ROOT / "robot_modules/so101/godot/so101_motion_calibrator.gd").read_text()
     assert "var minimum_distinct := 5 if joint_index == 4 else 3" in source
 
 

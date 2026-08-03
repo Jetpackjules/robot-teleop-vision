@@ -100,7 +100,7 @@ func _run_async(arguments: PackedStringArray) -> int:
 
 
 func _initialize() -> void:
-	_run_sync(PackedStringArray(["init", "--example", "so101_realsense"]))
+	_run_sync(PackedStringArray(["init", "--example", "vision_only"]))
 
 
 func _doctor() -> void:
