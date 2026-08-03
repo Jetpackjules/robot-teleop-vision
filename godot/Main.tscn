@@ -27,8 +27,9 @@ rotation_degrees = Vector3(-30, -45, 0)
 light_energy = 0.55
 
 [node name="Camera3D" type="Camera3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 0.939693, 0.34202, 0, -0.34202, 0.939693, 0, 0.45, 1.1)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.05)
 current = true
+fov = 60.0
 
 [node name="DebugPanelAnchor" type="Node3D" parent="."]
 

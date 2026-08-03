@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 from robot_teleop.config import AppConfig, REPO_ROOT
 from robot_teleop.doctor import find_cloudflared, find_godot
@@ -23,6 +24,20 @@ from robot_teleop.registry import create
 RUN_DIR = REPO_ROOT / ".teleop"
 STATE_PATH = RUN_DIR / "run.json"
 QUICK_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.I)
+
+
+def operator_ui_response_ready(response_url: str, status: int, body: bytes) -> bool:
+    """Accept either the operator shell or its expected password gate."""
+
+    if status != 200:
+        return False
+    if b"hybrid-canvas" in body:
+        return True
+    return (
+        urlparse(response_url).path == "/login"
+        and b'<form method="post" action="/login">' in body
+        and b'name="password"' in body
+    )
 
 
 def _port_available(port: int) -> bool:
@@ -55,6 +70,7 @@ class Supervisor:
         self.processes: list[tuple[str, subprocess.Popen]] = []
         self.stopping = threading.Event()
         self.public_url = ""
+        self._pending_public_url = ""
         self.local_url = f"https://127.0.0.1:{config.stack.https_port}/controller.html"
         self.robot = create("robot", config.robot.adapter, config=config.robot)
         self.robot_manifest = public_robot_module(
@@ -83,10 +99,13 @@ class Supervisor:
         for line in process.stdout:
             print(f"[{name}] {line}", end="", flush=True)
             match = QUICK_URL_PATTERN.search(line)
-            if match and not self.public_url:
-                self.public_url = f"{match.group(0)}/controller.html"
-                self._publish_state("running")
-                threading.Thread(target=self._verify_public_url, daemon=True).start()
+            if match and not self.public_url and not self._pending_public_url:
+                self._pending_public_url = f"{match.group(0)}/controller.html"
+                threading.Thread(
+                    target=self._verify_public_url,
+                    args=(self._pending_public_url,),
+                    daemon=True,
+                ).start()
 
     def _publish_state(self, status: str, detail: str = "") -> None:
         _write_state(
@@ -110,25 +129,31 @@ class Supervisor:
         while time.monotonic() < deadline and not self.stopping.is_set():
             try:
                 with urllib.request.urlopen(self.local_url, context=context, timeout=2) as response:
-                    if response.status == 200 and b"hybrid-canvas" in response.read(200_000):
+                    body = response.read(200_000)
+                    if operator_ui_response_ready(response.geturl(), response.status, body):
                         return
             except Exception as exc:
                 last_error = exc
             time.sleep(0.25)
         raise RuntimeError(f"operator UI health check failed: {last_error}")
 
-    def _verify_public_url(self) -> None:
+    def _verify_public_url(self, candidate_url: str) -> None:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not self.stopping.is_set():
             try:
-                request = urllib.request.Request(self.public_url, method="GET")
+                request = urllib.request.Request(candidate_url, method="GET")
                 with urllib.request.urlopen(request, timeout=5) as response:
-                    if response.status in {200, 302, 303}:
-                        print(f"Verified public operator URL: {self.public_url}", flush=True)
+                    body = response.read(200_000)
+                    if operator_ui_response_ready(response.geturl(), response.status, body):
+                        self.public_url = candidate_url
+                        self._pending_public_url = ""
+                        self._publish_state("running")
+                        print(f"Verified public operator URL: {candidate_url}", flush=True)
                         return
             except Exception:
                 time.sleep(0.5)
-        print(f"WARNING: public URL did not pass its health check: {self.public_url}", flush=True)
+        self._pending_public_url = ""
+        print(f"WARNING: public URL did not pass its health check: {candidate_url}", flush=True)
 
     def start(self) -> None:
         for port, label in (

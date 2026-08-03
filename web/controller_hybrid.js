@@ -4,6 +4,8 @@
     const viewportVideo = document.getElementById("viewport-video");
     const viewportImage = document.getElementById("viewport-image");
     const hybridCanvas = document.getElementById("hybrid-canvas");
+    const rgbCameraCanvas = document.getElementById("rgb-camera-canvas");
+    const displayModeSelect = document.getElementById("display-mode");
     const streamPresetSelect = document.getElementById("stream-preset");
     const statusDot = document.getElementById("status-dot");
     const statusTitle = document.getElementById("status-title");
@@ -15,9 +17,15 @@
     const rgbdLatencyGraph = document.getElementById("rgbd-latency-graph");
     const rgbdLatencyValue = document.getElementById("rgbd-latency-value");
     const transportLink = document.getElementById("transport-link");
-    const viewControlIds = ["orbit-span", "orbit-response", "orbit-distance", "dolly-gain", "inspect-fov", "head-height", "orbit-elevation"];
-    // v9 delegates robot-specific settings to the active module.
-    const viewSettingsVersion = 9;
+    const advancedSetup = document.getElementById("advanced-setup");
+    const siteSettingsStatus = document.getElementById("site-settings-status");
+    const viewControlIds = [
+      "orbit-span", "orbit-response", "orbit-distance", "dolly-gain", "inspect-fov",
+      "head-height", "orbit-elevation", "workspace-surface-offset", "workspace-surface-size",
+      "workspace-surface-opacity",
+    ];
+    // v10 adds installation-wide defaults, workspace guides, and an RGB view.
+    const viewSettingsVersion = 10;
 
     let peer = null;
     let trackingDataChannel = null;
@@ -42,6 +50,8 @@
     const rgbdLatencySamples = [];
     let lastRgbdLatencySampleMs = 0;
     let userStarted = false;
+    let startupNavigation = null;
+    let startupNavigationPending = false;
     const hybridMode = !window.location.pathname.startsWith("/frame-stream");
     const quickTunnel = window.location.hostname.endsWith(".trycloudflare.com");
     if (!hybridMode && quickTunnel) {
@@ -74,6 +84,13 @@
         white_background_enabled: document.getElementById("white-background-enabled").checked,
         persistent_temporal_reference_enabled: document.getElementById("persistent-temporal-reference-enabled").checked,
         full_rgb_frame_updates_enabled: document.getElementById("full-rgb-frame-updates-enabled").checked,
+        head_tracking_enabled: document.getElementById("head-tracking-enabled").checked,
+        workspace_surface_enabled: document.getElementById("workspace-surface-enabled").checked,
+        workspace_boundary_enabled: document.getElementById("workspace-boundary-enabled").checked,
+        workspace_surface_offset: Number(document.getElementById("workspace-surface-offset").value),
+        workspace_surface_size: Number(document.getElementById("workspace-surface-size").value),
+        workspace_surface_opacity: Number(document.getElementById("workspace-surface-opacity").value),
+        display_mode: displayModeSelect.value,
         settings_version: viewSettingsVersion,
         ...extra,
       };
@@ -88,6 +105,9 @@
       document.getElementById("inspect-fov-value").textContent = `${document.getElementById("inspect-fov").value} deg`;
       document.getElementById("head-height-value").textContent = `${Number(document.getElementById("head-height").value).toFixed(2)} m`;
       document.getElementById("orbit-elevation-value").textContent = `${Number(document.getElementById("orbit-elevation").value).toFixed(0)} deg`;
+      document.getElementById("workspace-surface-offset-value").textContent = `${Math.round(Number(document.getElementById("workspace-surface-offset").value) * 1000)} mm`;
+      document.getElementById("workspace-surface-size-value").textContent = `${Number(document.getElementById("workspace-surface-size").value).toFixed(2)} m`;
+      document.getElementById("workspace-surface-opacity-value").textContent = `${Math.round(Number(document.getElementById("workspace-surface-opacity").value) * 100)}%`;
     }
 
     function sendViewSettings(extra = {}) {
@@ -98,12 +118,17 @@
       return window.sendGodotViewSettings && window.sendGodotViewSettings(payload);
     }
 
-    function restoreViewSettings() {
-      let saved = null;
+    function localSavedViewSettings() {
       try {
-        saved = JSON.parse(localStorage.getItem("robotTeleopViewSettings") || localStorage.getItem("digitalWindowViewSettings") || "null");
-      } catch (_) {}
-      if (!saved || ![6, 7, 8, viewSettingsVersion].includes(saved.settings_version)) return updateViewLabels();
+        return JSON.parse(localStorage.getItem("robotTeleopViewSettings") || localStorage.getItem("digitalWindowViewSettings") || "null");
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function restoreViewSettings(savedInput = null) {
+      const saved = savedInput && Object.keys(savedInput).length ? savedInput : localSavedViewSettings();
+      if (!saved || ![6, 7, 8, 9, viewSettingsVersion].includes(saved.settings_version)) return updateViewLabels();
       document.getElementById("inspect-enabled").checked = saved.inspect_enabled === true;
       document.getElementById("orbit-span").value = String(Math.max(30, Math.min(360, (saved.max_yaw || 80) * 2)));
       document.getElementById("orbit-response").value = String(saved.yaw_gain || 2.5);
@@ -116,8 +141,64 @@
       document.getElementById("orbit-elevation").value = String(saved.orbit_pitch_offset ?? 0);
       document.getElementById("persistent-temporal-reference-enabled").checked = saved.persistent_temporal_reference_enabled !== false;
       document.getElementById("full-rgb-frame-updates-enabled").checked = saved.full_rgb_frame_updates_enabled === true;
+      document.getElementById("head-tracking-enabled").checked = saved.head_tracking_enabled !== false;
+      document.getElementById("workspace-surface-enabled").checked = saved.workspace_surface_enabled !== false;
+      document.getElementById("workspace-boundary-enabled").checked = saved.workspace_boundary_enabled !== false;
+      document.getElementById("workspace-surface-offset").value = String(saved.workspace_surface_offset ?? 0);
+      document.getElementById("workspace-surface-size").value = String(saved.workspace_surface_size ?? 1.2);
+      document.getElementById("workspace-surface-opacity").value = String(saved.workspace_surface_opacity ?? 0.18);
+      displayModeSelect.value = saved.display_mode === "rgb_camera" ? "rgb_camera" : "point_cloud";
+      startupNavigation = saved.default_navigation || null;
+      startupNavigationPending = startupNavigation !== null;
       robotModule.restoreViewSettings?.(saved);
       updateViewLabels();
+    }
+
+    async function fetchSiteSettings() {
+      const response = await fetch("/api/v1/site-settings", { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    }
+
+    async function loadSiteSettings({ apply = false } = {}) {
+      try {
+        const saved = await fetchSiteSettings();
+        if (apply) {
+          restoreViewSettings(saved);
+          sendViewSettings();
+          if (startupNavigationPending && window.setGodotHybridNavigationState) {
+            window.setGodotHybridNavigationState(startupNavigation);
+            startupNavigationPending = false;
+          }
+          applyDisplayMode();
+        }
+        siteSettingsStatus.textContent = Object.keys(saved).length
+          ? "Saved installation defaults loaded."
+          : "No installation defaults saved yet; using this browser's settings.";
+        return saved;
+      } catch (error) {
+        siteSettingsStatus.textContent = `Could not load defaults: ${error && error.message ? error.message : error}`;
+        return {};
+      }
+    }
+
+    async function saveSiteSettings() {
+      siteSettingsStatus.textContent = "Saving...";
+      const payload = {
+        ...viewSettingsPayload(),
+        default_navigation: window.getGodotHybridNavigationState?.() || startupNavigation || undefined,
+      };
+      try {
+        const response = await fetch("/api/v1/site-settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
+        siteSettingsStatus.textContent = "Saved. New browsers will start with this setup.";
+      } catch (error) {
+        siteSettingsStatus.textContent = `Save failed: ${error && error.message ? error.message : error}`;
+      }
     }
 
     function normalizedStreamClick(event, element) {
@@ -240,20 +321,31 @@
 
     function showVideo() {
       hybridCanvas.hidden = true;
+      rgbCameraCanvas.hidden = true;
       viewportImage.hidden = true;
       viewportVideo.hidden = false;
     }
 
     function showImage() {
       hybridCanvas.hidden = true;
+      rgbCameraCanvas.hidden = true;
       viewportVideo.hidden = true;
       viewportImage.hidden = false;
+    }
+
+    function applyDisplayMode() {
+      if (activeViewportMode !== "hybrid") return;
+      const showRgb = displayModeSelect.value === "rgb_camera";
+      hybridCanvas.hidden = showRgb;
+      rgbCameraCanvas.hidden = !showRgb;
+      viewportVideo.hidden = true;
+      viewportImage.hidden = true;
     }
 
     function showHybrid() {
       viewportVideo.hidden = true;
       viewportImage.hidden = true;
-      hybridCanvas.hidden = false;
+      applyDisplayMode();
     }
 
     function stopViewport() {
@@ -297,6 +389,7 @@
       }
       viewportImage.removeAttribute("src");
       hybridCanvas.hidden = true;
+      rgbCameraCanvas.hidden = true;
       previousStats = null;
       stats = { fps: 0, bitrateKbps: 0, framesDecoded: 0, framesDropped: 0, packetsLost: 0, lossPercent: 0, jitterMs: 0, rttMs: 0, connection: "--" };
     }
@@ -502,6 +595,7 @@
       await Promise.all([
         window.startGodotHybridRenderer({
           canvas: hybridCanvas,
+          rgbDisplayCanvas: rgbCameraCanvas,
           ...hybridPreset,
           dataChannel: forceRelayedRgbd || persistentReference ? null : rgbdDataChannel,
           // Prefer direct unordered WebRTC when peer connectivity is possible.
@@ -513,6 +607,11 @@
         }),
         peerPromise,
       ]);
+      if (startupNavigationPending && startupNavigation && window.setGodotHybridNavigationState) {
+        window.setGodotHybridNavigationState(startupNavigation);
+        startupNavigationPending = false;
+      }
+      applyDisplayMode();
       streamState = "RGB-D rendering";
       updateStatus();
     }
@@ -640,6 +739,14 @@
     }
 
     async function startTracking() {
+      const enabled = document.getElementById("head-tracking-enabled").checked;
+      if (!enabled) {
+        startupRecenterGeneration += 1;
+        window.stopGodotWebcamTracker && window.stopGodotWebcamTracker();
+        trackingState = "off · mouse navigation enabled";
+        updateStatus();
+        return true;
+      }
       trackingState = "starting";
       updateStatus();
       if (!await waitForBridge()) throw new Error("tracker bridge did not load");
@@ -856,8 +963,10 @@
       const hybrid = window.getGodotHybridRendererStatus ? window.getGodotHybridRendererStatus() : {};
       const connected = activeViewportMode === "hybrid" ? hybrid.connected === true : (peer && peer.connectionState === "connected") || av1Connected;
       const hybridStalled = activeViewportMode === "hybrid" && hybrid.stalled === true;
-      statusDot.className = "dot " + (hybridStalled ? "bad" : connected && active ? "ok" : connected ? "" : "bad");
-      statusTitle.textContent = hybridStalled ? "Stream stalled" : connected && active ? "Connected" : connected ? "Stream connected" : "Connecting";
+      const headTrackingEnabled = document.getElementById("head-tracking-enabled").checked;
+      const navigationReady = active || !headTrackingEnabled;
+      statusDot.className = "dot " + (hybridStalled ? "bad" : connected && navigationReady ? "ok" : connected ? "" : "bad");
+      statusTitle.textContent = hybridStalled ? "Stream stalled" : connected && navigationReady ? "Connected" : connected ? "Stream connected" : "Connecting";
       const size = activeViewportMode === "hybrid"
         ? (hybrid.width > 0 ? `${hybrid.width}x${hybrid.height}` : "--")
         : (viewportVideo.videoWidth > 0 ? `${viewportVideo.videoWidth}x${viewportVideo.videoHeight}` : "--");
@@ -881,7 +990,9 @@
       ].join("\n");
       statusLines.textContent = [
         `Stream ${streamMode} | ${size} | ${fps} | ${bitrate}`,
-        `Tracking ${latest.status || trackingState} | ${remote.connected ? "bridge on" : "bridge ..."}`,
+        headTrackingEnabled
+          ? `Tracking ${latest.status || trackingState} | ${remote.connected ? "bridge on" : "bridge ..."}`
+          : "Tracking off | mouse orbit/pan/zoom enabled",
         robotModule.statusSummary?.(),
       ].filter(Boolean).join("\n");
       robotModule.renderStatus?.();
@@ -891,6 +1002,11 @@
     streamPresetSelect.addEventListener("change", () => {
       if (userStarted) startSelectedViewport();
       updateStatus();
+    });
+    displayModeSelect.addEventListener("change", () => {
+      applyDisplayMode();
+      sendViewSettings();
+      displayModeSelect.blur();
     });
     document.getElementById("persistent-temporal-reference-enabled").addEventListener("change", (event) => {
       sendViewSettings();
@@ -912,13 +1028,50 @@
       control.addEventListener("input", () => sendViewSettings());
       control.addEventListener("change", () => control.blur());
     }
-    for (const id of ["inspect-enabled", "dolly-enabled", "white-background-enabled"]) {
+    for (const id of [
+      "inspect-enabled", "dolly-enabled", "white-background-enabled",
+      "workspace-surface-enabled", "workspace-boundary-enabled",
+    ]) {
       const control = document.getElementById(id);
       control.addEventListener("change", () => {
         sendViewSettings();
         control.blur();
       });
     }
+    document.getElementById("head-tracking-enabled").addEventListener("change", async (event) => {
+      const control = event.currentTarget;
+      sendViewSettings();
+      if (userStarted) {
+        try {
+          await startTracking();
+        } catch (error) {
+          trackingState = `needs start: ${error && error.message ? error.message : error}`;
+          startMessage.textContent = "Camera permission needs a tap.";
+          startOverlay.hidden = false;
+        }
+      }
+      control.blur();
+      updateStatus();
+    });
+    document.getElementById("open-advanced").addEventListener("click", () => {
+      advancedSetup.hidden = false;
+      document.getElementById("close-advanced").focus();
+    });
+    document.getElementById("close-advanced").addEventListener("click", () => {
+      advancedSetup.hidden = true;
+      document.getElementById("open-advanced").focus();
+    });
+    advancedSetup.addEventListener("click", (event) => {
+      if (event.target === advancedSetup) advancedSetup.hidden = true;
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !advancedSetup.hidden) advancedSetup.hidden = true;
+    });
+    document.getElementById("save-site-defaults").addEventListener("click", saveSiteSettings);
+    document.getElementById("reload-site-defaults").addEventListener("click", async () => {
+      await loadSiteSettings({ apply: true });
+      if (userStarted) await startSelectedViewport();
+    });
     document.getElementById("inspect-recenter").addEventListener("click", () => sendViewSettings({ recenter: true }));
     viewportVideo.addEventListener("click", focusInspectAtStreamClick);
     viewportImage.addEventListener("click", focusInspectAtStreamClick);
@@ -934,7 +1087,8 @@
       updateStatus();
     }, 500);
 
-    restoreViewSettings();
+    const installationSettings = await loadSiteSettings();
+    restoreViewSettings(installationSettings);
     robotModule.bind?.({ sendViewSettings, updateStatus });
     robotModule.start?.({ sendViewSettings, updateStatus });
     startController();

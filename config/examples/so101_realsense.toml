@@ -4,9 +4,9 @@ https_port = 8765
 stream_port = 8780
 tracking_port = 4247
 calibration_status_port = 4251
-# "quick" creates a free temporary trycloudflare.com URL. Use only with a
-# strong GODOT_REMOTE_PASSWORD; named production tunnels belong in deployment.
-public_mode = "off"
+# "quick" creates a free, temporary trycloudflare.com URL. The init command
+# replaces the password sentinel below with a strong local password.
+public_mode = "quick"
 password_env = "GODOT_REMOTE_PASSWORD"
 password_default = "change-me"
 
