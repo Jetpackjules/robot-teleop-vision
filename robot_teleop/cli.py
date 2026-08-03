@@ -15,6 +15,7 @@ import robot_teleop.robots  # noqa: F401
 import robot_teleop.tracking  # noqa: F401
 from robot_teleop.config import DEFAULT_CONFIG, load_config
 from robot_teleop.doctor import format_report, run_checks
+from robot_teleop.modules import load_robot_modules
 from robot_teleop.registry import create
 from robot_teleop.state import migrate_project_state
 from robot_teleop.supervisor import Supervisor, read_state, stop_running_supervisor
@@ -35,16 +36,23 @@ def _initialize(destination: Path, example: str, force: bool) -> int:
     return 0
 
 
+def _example_names() -> tuple[str, ...]:
+    root = Path(__file__).resolve().parents[1] / "config" / "examples"
+    return tuple(path.stem for path in sorted(root.glob("*.toml")))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="robot-teleop")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     sub = parser.add_subparsers(dest="command", required=True)
     initialize = sub.add_parser("init", help="create an ignored local configuration")
-    initialize.add_argument("--example", choices=("so101_realsense", "vision_only"), default="so101_realsense")
+    initialize.add_argument("--example", choices=_example_names(), default="vision_only")
     initialize.add_argument("--force", action="store_true")
     sub.add_parser("doctor", help="check dependencies and discover hardware")
     devices = sub.add_parser("devices", help="list discovered camera devices")
     devices.add_argument("--json", action="store_true")
+    modules = sub.add_parser("modules", help="list installed robot modules")
+    modules.add_argument("--json", action="store_true")
     sub.add_parser("start", help="start and supervise the local runtime")
     sub.add_parser("stop", help="safely stop the supervised runtime")
     sub.add_parser("status", help="show launcher state")
@@ -82,11 +90,28 @@ def main(argv: list[str] | None = None) -> int:
         print(url)
         return 0
     if args.command == "migrate-state":
-        copied = migrate_project_state(args.from_project, force=args.force)
+        module_state_files = tuple(
+            name
+            for manifest in load_robot_modules()
+            for name in manifest.state_files
+        )
+        copied = migrate_project_state(
+            args.from_project,
+            force=args.force,
+            extra_state_files=module_state_files,
+        )
         if copied:
             print("Copied durable state:\n" + "\n".join(f"  - {path.name}" for path in copied))
         else:
             print("No state copied; target files already exist or the source has no durable state.")
+        return 0
+    if args.command == "modules":
+        modules = [manifest.public_dict() for manifest in load_robot_modules()]
+        modules.insert(0, create("robot", "disabled").public_manifest())
+        if args.json:
+            print(json.dumps(modules, indent=2))
+        else:
+            print("\n".join(f"{item['id']}: {item['label']}" for item in modules))
         return 0
     config = load_config(config_path)
     if args.command == "doctor":

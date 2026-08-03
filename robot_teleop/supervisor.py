@@ -16,6 +16,7 @@ from pathlib import Path
 from robot_teleop.config import AppConfig, REPO_ROOT
 from robot_teleop.doctor import find_cloudflared, find_godot
 from robot_teleop.interfaces import LaunchSpec
+from robot_teleop.modules import public_robot_module
 from robot_teleop.registry import create
 
 
@@ -56,6 +57,10 @@ class Supervisor:
         self.public_url = ""
         self.local_url = f"https://127.0.0.1:{config.stack.https_port}/controller.html"
         self.robot = create("robot", config.robot.adapter, config=config.robot)
+        self.robot_manifest = public_robot_module(
+            config.robot.adapter,
+            config.robot.module_paths,
+        )
 
     def _spawn(self, spec: LaunchSpec) -> subprocess.Popen:
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
@@ -67,6 +72,7 @@ class Supervisor:
             text=True,
             bufsize=1,
             creationflags=creationflags,
+            env={**os.environ, **spec.environment},
         )
         self.processes.append((spec.name, process))
         threading.Thread(target=self._relay_output, args=(spec.name, process), daemon=True).start()
@@ -91,6 +97,7 @@ class Supervisor:
                 "supervisor_pid": os.getpid(),
                 "local_url": self.local_url,
                 "public_url": self.public_url,
+                "robot_module": self.robot_manifest,
                 "processes": {name: process.pid for name, process in self.processes},
                 "updated_unix_ms": int(time.time() * 1000),
             }
@@ -146,6 +153,7 @@ class Supervisor:
                 LaunchSpec(
                     "Godot runtime",
                     tuple(godot_command),
+                    {"ROBOT_TELEOP_MODULE": self.config.robot.adapter},
                 )
             )
         password = os.environ.get(
@@ -166,8 +174,25 @@ class Supervisor:
         if self.config.stack.public_mode == "quick":
             if not password or password == "change-me":
                 raise RuntimeError("quick public mode requires a strong GODOT_REMOTE_PASSWORD")
-            server.append("--allow-quick-tunnel-arm")
-        self._spawn(LaunchSpec("operator server", tuple(server)))
+            server.append("--allow-quick-tunnel-robot")
+        operator_environment = getattr(
+            self.robot,
+            "operator_environment",
+            lambda: {},
+        )()
+        module_paths = os.pathsep.join(self.config.robot.module_paths)
+        self._spawn(
+            LaunchSpec(
+                "operator server",
+                tuple(server),
+                {
+                    "ROBOT_TELEOP_MODULE": self.config.robot.adapter,
+                    "ROBOT_TELEOP_MODULE_MANIFEST": json.dumps(self.robot_manifest),
+                    "ROBOT_TELEOP_MODULE_PATH": module_paths,
+                    **operator_environment,
+                },
+            )
+        )
         self._verify_local_url()
         if self.config.stack.public_mode == "quick":
             cloudflared = find_cloudflared()

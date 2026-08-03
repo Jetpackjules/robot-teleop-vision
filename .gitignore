@@ -17,6 +17,5 @@ build/
 native/realsense_shared_memory/godot-cpp/
 
 # Physical-device identity and calibration are deliberately local-only.
-tools/so101_arm_pair.json
-tools/so101_rest_pose.json
+robot_modules/*/local/
 user_data/

@@ -7,7 +7,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
+TOOLS = Path(__file__).resolve().parents[1] / "robot_modules" / "so101" / "tools"
 sys.path.insert(0, str(TOOLS))
 
 from solve_so101_claw_visual import correction_displacement_at_points, solve  # noqa: E402

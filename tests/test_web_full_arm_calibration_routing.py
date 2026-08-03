@@ -6,12 +6,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_web_full_arm_button_uses_progressive_automated_pipeline() -> None:
     source = (
-        ROOT / "godot" / "runtime" / "remote_control_gateway.gd"
+        ROOT / "robot_modules" / "so101" / "godot" / "so101_module.gd"
     ).read_text(encoding="utf-8")
-    marker = 'if bool(payload.get("calibrate_robot_position", false)):'
-    block = source.split(marker, 1)[1].split(
-        'if bool(payload.get("refine_robot_joint_alignment", false)):', 1
-    )[0]
+    marker = "func start_full_calibration(from_editor: bool = false) -> void:"
+    block = source.split(marker, 1)[1].split("func refine_calibration", 1)[0]
 
     assert '"start_automated_arm_calibration"' in block
     assert '"start_arm_position_calibration"' not in block
@@ -19,7 +17,7 @@ def test_web_full_arm_button_uses_progressive_automated_pipeline() -> None:
 
 def test_distal_disagreement_triggers_alternate_d455_recapture() -> None:
     source = (
-        ROOT / "godot/runtime/point_cloud/so101_motion_calibrator.gd"
+        ROOT / "robot_modules/so101/godot/so101_motion_calibrator.gd"
     ).read_text(encoding="utf-8")
 
     assert 'and _automation_solver_through_joint == 3' in source
@@ -30,7 +28,7 @@ def test_distal_disagreement_triggers_alternate_d455_recapture() -> None:
 
 def test_claw_stage_uses_measured_gripper_tolerance_and_bounded_retry() -> None:
     source = (
-        ROOT / "godot/runtime/point_cloud/so101_motion_calibrator.gd"
+        ROOT / "robot_modules/so101/godot/so101_motion_calibrator.gd"
     ).read_text(encoding="utf-8")
 
     assert 'if _capture_mode == "claw" and maximum_tracking_joint == 5:' in source

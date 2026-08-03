@@ -467,8 +467,8 @@ def render_candidate(
     closed_basis = np.asarray(geometry["closed_basis_parent"])
     scale = np.diag([geometry["radial_scale"], geometry["radial_scale"], 1.0])
     translation = np.array([0.0, 0.0, geometry["axial_translation_local"]])
-    fixed_scene = trimesh.load(ROOT.parent / "assets/robots/so101/gripper_link.glb", force="scene")
-    moving_scene = trimesh.load(ROOT.parent / "assets/robots/so101/moving_jaw_so101_v1_link.glb", force="scene")
+    fixed_scene = trimesh.load(ROOT.parent / "assets/gripper_link.glb", force="scene")
+    moving_scene = trimesh.load(ROOT.parent / "assets/moving_jaw_so101_v1_link.glb", force="scene")
     fixed = fixed_scene.to_geometry()
     moving = moving_scene.to_geometry()
     for view_index, group in enumerate(groups):

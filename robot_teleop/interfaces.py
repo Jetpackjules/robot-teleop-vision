@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
@@ -16,6 +16,7 @@ class DeviceInfo:
 class LaunchSpec:
     name: str
     command: tuple[str, ...]
+    environment: dict[str, str] = field(default_factory=dict)
 
 
 class CameraAdapter(Protocol):
@@ -30,6 +31,10 @@ class RobotAdapter(Protocol):
     def launch_spec(self) -> LaunchSpec | None: ...
 
     def hold(self) -> None: ...
+
+    def public_manifest(self) -> dict[str, Any]: ...
+
+    def operator_environment(self) -> dict[str, str]: ...
 
 
 class TrackingAdapter(Protocol):

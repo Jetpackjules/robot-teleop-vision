@@ -9,7 +9,11 @@ def test_state_migration_copies_only_durable_files(tmp_path: Path):
     (source / "so101_robot_registration.json").write_text('{"trusted": true}')
     (source / "so101_automated_joint_capture.json").write_text("private capture")
 
-    copied = migrate_project_state("Legacy", root=tmp_path)
+    copied = migrate_project_state(
+        "Legacy",
+        root=tmp_path,
+        extra_state_files=("so101_robot_registration.json",),
+    )
 
     assert [path.name for path in copied] == ["so101_robot_registration.json"]
     assert (tmp_path / "Robot Teleop Vision" / "so101_robot_registration.json").is_file()

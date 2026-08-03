@@ -1,7 +1,7 @@
 @tool
 extends Node
 
-const OVERLAY_PATH := "../WorldLevelAnchor/SO101RobotOverlay"
+const OVERLAY_PATH := "../WorldLevelAnchor/RobotOverlay"
 const CAMERA_ROOT_PATH := "../WorldLevelAnchor/CameraClouds"
 const REALSENSE_ARUCO_GROUND_TRUTH_PATH := "user://realsense_alignment_ground_truth.json"
 const STATUS_TYPE := "robot_calibration_status"
@@ -41,10 +41,10 @@ const AUTOMATED_CANDIDATE_REGISTRATION_PATH := "user://so101_automated_candidate
 const WRIST_CAPTURE_PATH := "user://so101_wrist_roll_capture.json"
 const WRIST_RESULT_PATH := "user://so101_wrist_roll_fit.json"
 const SAVED_REGISTRATION_PATH := "user://so101_robot_registration.json"
-const BASE_AXIS_SOLVER_PATH := "res://tools/solve_so101_base_axis.py"
-const STAGED_JOINT_SOLVER_PATH := "res://tools/solve_so101_staged_joints.py"
-const CLAW_VISUAL_SOLVER_PATH := "res://tools/solve_so101_claw_visual.py"
-const CLAW_RGB_TIP_SOLVER_PATH := "res://tools/solve_so101_claw_rgb_tips.py"
+const BASE_AXIS_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_base_axis.py"
+const STAGED_JOINT_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_staged_joints.py"
+const CLAW_VISUAL_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_claw_visual.py"
+const CLAW_RGB_TIP_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_claw_rgb_tips.py"
 
 @export_group("Capture")
 @export_range(4.0, 24.0, 0.5, "suffix:s") var capture_seconds: float = 15.0
@@ -178,7 +178,7 @@ const PENDING_CLAW_RESUME_MAXIMUM_AGE_MSEC := 60.0 * 60.0 * 1000.0
 
 
 func _ready() -> void:
-	add_to_group("so101_arm_calibrator")
+	add_to_group("robot_calibrator")
 	_status_udp.connect_to_host("127.0.0.1", calibration_status_port)
 	_connect_arm_command_peer()
 	set_process(true)

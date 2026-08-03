@@ -27,7 +27,7 @@ test = ["pytest>=8", "ruff>=0.6"]
 robot-teleop = "robot_teleop.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["robot_teleop"]
+packages = ["robot_teleop", "robot_modules"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

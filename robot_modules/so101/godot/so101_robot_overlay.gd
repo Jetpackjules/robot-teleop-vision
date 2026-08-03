@@ -20,13 +20,13 @@ const ROS_TO_GODOT := Basis(
 	Vector3(0.0, 1.0, 0.0)
 )
 const LINK_MODELS := {
-	"base_link": "res://assets/robots/so101/base_link.glb",
-	"shoulder_link": "res://assets/robots/so101/shoulder_link.glb",
-	"upper_arm_link": "res://assets/robots/so101/upper_arm_link.glb",
-	"lower_arm_link": "res://assets/robots/so101/lower_arm_link.glb",
-	"wrist_link": "res://assets/robots/so101/wrist_link.glb",
-	"gripper_link": "res://assets/robots/so101/gripper_link.glb",
-	"moving_jaw_so101_v1_link": "res://assets/robots/so101/moving_jaw_so101_v1_link.glb",
+	"base_link": "res://robot_modules/so101/assets/base_link.glb",
+	"shoulder_link": "res://robot_modules/so101/assets/shoulder_link.glb",
+	"upper_arm_link": "res://robot_modules/so101/assets/upper_arm_link.glb",
+	"lower_arm_link": "res://robot_modules/so101/assets/lower_arm_link.glb",
+	"wrist_link": "res://robot_modules/so101/assets/wrist_link.glb",
+	"gripper_link": "res://robot_modules/so101/assets/gripper_link.glb",
+	"moving_jaw_so101_v1_link": "res://robot_modules/so101/assets/moving_jaw_so101_v1_link.glb",
 }
 const GRIPPER_ANGLE_OFFSET_DEFAULT_DEGREES := -16.17708418
 const GRIPPER_ANGLE_SCALE_DEFAULT_DEGREES := 1.14931457
@@ -237,7 +237,7 @@ var _d455_distal_correction_confidence := 0.0
 var _d455_distal_correction_msec := 0
 
 func _ready() -> void:
-	add_to_group("so101_robot_overlay")
+	add_to_group("robot_overlay")
 	_capture_scene_fallback()
 	_build_model()
 	_build_target_ghost()

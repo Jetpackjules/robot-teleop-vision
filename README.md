@@ -1,8 +1,8 @@
 # Robot Teleop Vision
 
-A reusable RealSense-to-browser teleoperation stack with a Godot 3D runtime. It provides a live RGB-D point cloud, multiple dynamically discovered RealSense cameras, optional browser head tracking, robot overlays, and guarded SO-101 control/calibration.
+A reusable RealSense-to-browser teleoperation stack with a Godot 3D runtime. The shared application discovers one or more RealSense cameras, streams an optimized RGB-D point cloud, arbitrates a single operator, and loads an optional robot module. Robot geometry, controls, hardware transport, calibration, and extra camera views live outside the core.
 
-The browser is the single operator interface. The Godot dock is intentionally limited to setup, diagnostics, launch, and safe shutdown.
+The browser is the single operator interface. The Godot dock is intentionally limited to setup, diagnostics, launch, and safe shutdown. A clean clone starts in vision-only mode, with physical motion disabled.
 
 ## First run
 
@@ -22,6 +22,7 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[realsense,calibration,test]"
 robot-teleop init --example vision_only
 robot-teleop doctor
+robot-teleop modules
 robot-teleop start
 ```
 
@@ -31,33 +32,39 @@ In another terminal:
 robot-teleop open
 ```
 
-You can instead open this repository directly in Godot and use the **Teleop Setup** dock. It invokes the same commands and does not create a second operator UI.
+You can instead import this repository's `project.godot` in Godot and use the **Teleop Setup** dock. The project should appear as **Robot Teleop Vision** with the cyan-and-gold icon. If Godot says **2.5D window V3**, that is the old research workspace.
 
-### Opening the correct Godot project
+`start` remains in the foreground and supervises every child process. Stop it with `Ctrl+C` or `robot-teleop stop`; the selected robot module's idempotent Hold action runs before shutdown.
 
-The repository root is the Godot project root. From Godot's Project Manager, choose **Import**, select this repository's `project.godot`, then choose **Import & Edit**. From a terminal:
+## Robot modules
 
-```bash
-godot --editor --path /path/to/robot-teleop-vision
+The base application contains no SO-101 commands, meshes, calibration solvers, or UI. Each integration is a self-contained directory:
+
+```text
+robot_modules/<robot>/
+├── robot.json          capability manifest
+├── python/             launcher adapter and protocol operator
+├── godot/              optional overlay and calibration scene
+├── web/                optional capability-specific browser controls
+├── assets/             optional meshes and licenses
+└── tools/              hardware service and robot-specific solvers
 ```
 
-The project should appear as **Robot Teleop Vision** with the cyan-and-gold claw icon. If Godot still says **2.5D window V3**, that is the original research workspace, not this repository. The standalone project does not load the legacy views or old Windows experiments.
+The versioned `robot-teleop/v1` envelope carries semantic commands. Keyboard, gamepad, a leader robot, or another controller can all produce the same negotiated joint, Cartesian, gripper, or mobile-base command spaces. A module translates those semantics into its hardware protocol and owns watchdogs and limits.
 
-`start` stays in the foreground and supervises all child processes. Stop with `Ctrl+C` or `robot-teleop stop`; the launcher sends Robot Hold before terminating processes.
+The included SO-101 module is a complete working example, not a core dependency. See [Robot modules](docs/ROBOT_MODULES.md) to add a different robot without editing shared runtime files.
 
-## Add an SO-101
+## Enable the SO-101 example
 
-Start with the robot powered off or physically supported. Create the local configuration:
+Start with the robot powered off or physically supported:
 
 ```bash
 robot-teleop init --example so101_realsense --force
 ```
 
-Place the arm's own LeRobot-generated pair profile at `tools/so101_arm_pair.json`, set `robot.enabled = true` in `config/local.toml`, and point `robot.python` at a compatible LeRobot environment if it is not the active Python. Both files and all Godot calibration state are local-only and ignored by Git.
+Place that arm's local LeRobot pair profile at `robot_modules/so101/local/arm_pair.json`, then set `robot.enabled = true` in ignored `config/local.toml`. Run `robot-teleop doctor` before enabling motion. The SO-101 browser module supplies its leader/keyboard controls, wrist view, safety feedback, overlay, and transactional full-arm calibration workflow.
 
-Run `robot-teleop doctor` before enabling motion. The browser's **Calibrate Full Arm** button performs fresh movement-derived base registration and then works outward through the joints. It commits only a complete validated result; a failed stage holds the arm and retains the last known-good registration.
-
-## Public access without a paid service
+## Free temporary public access
 
 Set `stack.public_mode = "quick"` in `config/local.toml`, install `cloudflared`, and provide a strong password:
 
@@ -66,50 +73,48 @@ export GODOT_REMOTE_PASSWORD='use-a-long-unique-password'
 robot-teleop start
 ```
 
-The verified `trycloudflare.com/controller.html` URL appears in `robot-teleop status`. Quick tunnels are transient and free. Do not expose arm control with the example password.
+The supervisor verifies the transient `trycloudflare.com/controller.html` URL before publishing it in `robot-teleop status`. Only the newest browser owns streaming and control; a newer page immediately Holds and supersedes the old controller.
 
-Only the newest browser page owns both streaming and control. Opening a newer page immediately Holds and disconnects an older controller, even if older tabs remain open.
+## Streaming features
 
-## What is preserved from the research prototype
-
-- Dynamic per-serial RealSense discovery; no apartment camera serials are embedded.
-- Multiple RealSense renderers and serial-keyed local alignment state.
-- Independent meshes by default; the poorer shader-merge mode is not the default.
-- Recoverable temporal depth and RGB tile updates, persistent still-scene references, latest-only capture, parallel RGB/depth encoding, and a full-RGB-frame fallback toggle.
-- Mouse orbit, pan, zoom, optional MediaPipe head tracking, white background, overlay style/occlusion controls, latency graphing, wrist feed, and full-arm calibration progress.
-- Measured servo feedback, target ghosting, following-error/contact Hold, stale-telemetry freezing, and optional wrist visual correction.
-- The incorrect custom wrist-camera attachment model is deliberately omitted from visualization and stock-mesh calibration.
+- Dynamic, serial-keyed discovery for zero, one, or multiple RealSense cameras.
+- Independent meshes by default, with optional multi-camera alignment and color matching.
+- Latest-only capture and cancellable latest-frame delivery; slow clients do not build a stale queue.
+- Parallel RGB/depth encoding, persistent references, absolute temporal tile updates, plane-aware depth stabilization, and recoverable keyframes.
+- Full-frame RGB fallback, temporal-update toggles, white background, orbit/pan/zoom, optional browser head tracking, and latency graphing.
+- Dynamically loaded robot overlay, occlusion, auxiliary views, controls, telemetry, and calibration UI.
 
 ## Repository map
 
 | Path | Purpose |
 | --- | --- |
-| `robot_teleop/` | Launcher, configuration, discovery, adapters, health checks |
-| `godot/` | Runtime scene, point-cloud rendering, overlay, calibration gateway |
-| `web/` | Canonical browser operator UI and RGB-D renderer |
-| `native/realsense_shared_memory/` | Cross-platform GDExtension source and runtime binaries |
-| `tools/` | Local server, guarded SO-101 follower, calibration solvers |
+| `robot_teleop/` | Robot-neutral launcher, configuration, module discovery, contracts, and health checks |
+| `robot_modules/` | Optional self-contained robot integrations; SO-101 is the reference example |
+| `godot/` | Shared camera, point-cloud, streaming, tracking, and module-host runtime |
+| `web/` | Shared browser shell, module host, and descriptor-driven RGB-D renderer |
+| `native/realsense_shared_memory/` | Cross-platform RealSense GDExtension source and runtime binaries |
+| `tools/` | Robot-neutral local operator/stream server and camera utilities |
 | `config/examples/` | Safe hardware-disabled starting configurations |
-| `tests/` | Hardware-free protocol, safety, calibration, and codec regression tests |
+| `tests/` | Hardware-free protocol, module-boundary, safety, calibration, and codec tests |
 
-Read [Architecture](docs/ARCHITECTURE.md), [Safety](docs/SAFETY.md), [Calibration](docs/CALIBRATION.md), and [Adapters](docs/ADAPTERS.md) before deploying a new robot/site.
+Read [Architecture](docs/ARCHITECTURE.md), [Robot modules](docs/ROBOT_MODULES.md), [Safety](docs/SAFETY.md), [Calibration](docs/CALIBRATION.md), and [Adapters](docs/ADAPTERS.md) before deploying a new robot or site.
 
 ## Verify a change
 
 ```bash
-python -m compileall -q robot_teleop tools tests
+python -m compileall -q robot_teleop robot_modules tools tests
 python -m pytest -q
 godot --headless --editor --path . --quit
 ```
 
-Linux has the local hardware verification gate. GitHub Actions runs hardware-free Python tests and a Godot script/import scan on every pull request, plus a Windows test job and Windows packaged-runtime artifact. Windows hardware is supported by the included GDExtension path but is not claimed as a CI hardware gate.
+GitHub Actions runs the hardware-free Python suite and a Godot import/script scan on every pull request, plus a Windows test/package job. RealSense and robot hardware remain a local verification gate.
 
-## Migrating this laptop's existing calibration
+## Migrate this laptop's existing calibration
 
-This is needed only for the original large Godot workspace:
+Only the original large Godot workspace needs this:
 
 ```bash
 robot-teleop migrate-state --from-project "2.5D window V3"
 ```
 
-It copies only durable current registration/alignment files into Robot Teleop Vision's Godot user-data directory. Captures, debug RGB, logs, backups, and physical profiles are never copied into the repository.
+Shared camera/world state and the installed module manifests' declared durable files are copied into Robot Teleop Vision's Godot user-data directory. Captures, logs, physical profiles, and debug images are never copied into the repository.

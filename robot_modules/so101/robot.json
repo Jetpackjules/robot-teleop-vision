@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "so101",
+  "label": "SO-101 arm",
+  "version": "1.0.0",
+  "description": "Example six-motor arm with leader, keyboard, Cartesian target, overlay, and visual calibration support.",
+  "capabilities": {
+    "control_spaces": [
+      "cartesian_tool_velocity",
+      "joint_velocity",
+      "tool_velocity",
+      "gripper_velocity",
+      "leader_raw_position"
+    ],
+    "inputs": ["keyboard", "leader"],
+    "actions": ["enable", "hold", "restart", "return_rest"],
+    "views": ["virtual_camera", "wrist_rgb"],
+    "features": ["overlay", "occlusion", "automatic_calibration", "measured_feedback"]
+  },
+  "entrypoints": {
+    "python": "robot_modules.so101.python.adapter:So101RobotAdapter",
+    "operator": "robot_modules.so101.python.operator:So101Operator",
+    "godot": "res://robot_modules/so101/godot/RobotModule.tscn",
+    "web": "/robot-modules/so101/web/module.js"
+  },
+  "state_files": [
+    "so101_robot_registration.depth_validated_anchor.json",
+    "so101_robot_registration.json"
+  ]
+}

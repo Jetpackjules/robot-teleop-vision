@@ -2,37 +2,40 @@
 
 The stack has four local trust boundaries:
 
-1. **Camera adapters** discover hardware. Godot's native extension owns capture and publishes the newest RGB-D packet.
-2. **Godot runtime** reconstructs cameras, maintains local alignments, renders robot geometry, and runs calibration capture/validation.
-3. **Operator server** authenticates browsers, compresses RGB-D, relays tracking/view commands, and arbitrates one newest-page owner.
-4. **Robot adapter** runs in a separate follower process. Browser messages cannot write motors directly; the follower applies watchdogs, workspace limits, measured-feedback checks, and Hold.
+1. **Camera adapters and native capture** discover hardware, own the RealSense pipelines, and publish only the newest RGB-D packet.
+2. **Godot runtime** reconstructs camera surfaces, maintains serial-keyed site alignment, renders the selected module's optional geometry, and relays module settings.
+3. **Operator server** authenticates browsers, compresses RGB-D, serves the selected module, relays semantic commands/views, and grants ownership to only the newest page.
+4. **Robot module process** translates negotiated semantics into hardware writes and independently applies watchdogs, limits, feedback checks, and Hold.
 
-The browser is the only operational UI. The Godot editor plugin calls the same repository CLI for first-run setup and diagnostics.
+The browser is the only operational UI. The Godot editor plugin calls the same repository CLI for setup, diagnostics, launch, and safe shutdown.
 
 ## Data flow
 
 ```text
-RealSense(s) -> native Godot capture -> latest-only RGB-D socket
-                                      -> temporal RGB/depth encoder
-                                      -> authenticated newest browser
+camera(s) -> native Godot capture -> latest-only RGB-D source
+                                  -> temporal RGB/depth encoder
+                                  -> authenticated newest browser
 
-newest browser -> authenticated arm socket -> local UDP follower -> servos
-newest browser -> view settings/tracking -> Godot runtime
-follower telemetry -> Godot overlay + browser health panel
+newest browser -> robot-teleop/v1 command -> selected module operator -> hardware process
+newest browser -> shared view/tracking settings -> Godot runtime + selected Godot module
+hardware status -> selected module operator -> browser health + Godot overlay
+auxiliary camera -> selected module view route -> browser module
 ```
 
-RGB-D capture and encoding are decoupled so a slow frame encoder cannot block the camera drain. Temporal RGB and depth work in parallel. Persistent-reference mode sends an initial complete frame followed by reliable ordered absolute tile updates; turning it off restores periodic independently recoverable keyframes. The **Full RGB frame updates** toggle disables temporal RGB while retaining the depth path.
+Capture, encoding, requests, and client rendering are decoupled. A slow encoder or superseded HTTP request cannot block the camera drain or build a stale FIFO. Temporal RGB and depth encode in parallel; absolute ordered tiles update a persistent reference, while full keyframes make the stream recoverable.
+
+## Module boundary
+
+Core knows only the manifest, `RobotAdapter`, `GenericRobotOperator`, `robot-teleop/v1`, browser hooks, a renderer descriptor, and the Godot `robot_module` group. It does not know motor count, link names, hardware packets, calibration stages, or UI labels.
+
+The manifest is both negotiation and composition: it names supported command spaces, inputs, safety actions, views, and features, then points each runtime at module-owned code. Private Python entrypoints and state filenames are never exposed to the browser.
+
+The SO-101 folder exercises the complete boundary. Removing it leaves a valid vision-only application.
 
 ## Local-only state
 
-Device serials are discovery keys, not source constants. Camera alignments and robot registration use Godot `user://`; motor ports, identities, and calibration tables belong in ignored `config/local.toml` and `tools/so101_arm_pair.json`. A clean clone therefore starts with motion disabled.
+Camera serials are discovery keys, not source constants. Shared camera transforms and world level live in Godot `user://`. A module declares only its durable state filenames; physical identities, motor ports, profiles, and calibration tables remain in ignored local configuration. A clean clone therefore cannot move hardware.
 
-## Extension points
+## Safety ownership
 
-The Python registry supports built-in and Python entry-point adapters in these groups:
-
-- `robot_teleop.cameras`
-- `robot_teleop.robots`
-- `robot_teleop.trackings`
-
-Godot robot geometry/calibration remains a robot-specific module under `godot/robots/<robot>/`. The shared stream and browser layers do not assume SO-101 geometry.
+The server validates protocol shape, negotiated capability, page ownership, and transport freshness. The robot process remains the final authority: browser authorization is not permission to bypass a module's deadman, watchdog, limits, feedback checks, or physical emergency stop.

@@ -1,4 +1,6 @@
+    import { robotModuleReady } from "./robot_module_host.js";
 
+    const robotModule = await robotModuleReady;
     const viewportVideo = document.getElementById("viewport-video");
     const viewportImage = document.getElementById("viewport-image");
     const hybridCanvas = document.getElementById("hybrid-canvas");
@@ -9,66 +11,13 @@
     const startOverlay = document.getElementById("start-overlay");
     const startMessage = document.getElementById("start-message");
     const startButton = document.getElementById("start-button");
-    const armConnectButton = document.getElementById("arm-connect");
-    const armKeyboardButton = document.getElementById("arm-keyboard");
-    const armEnableButton = document.getElementById("arm-enable");
-    const armHoldButton = document.getElementById("arm-hold");
-    const armReturnRestButton = document.getElementById("arm-return-rest");
-    const armIdleReturnEnabled = document.getElementById("arm-idle-return-enabled");
-    const armRestartButton = document.getElementById("arm-restart");
-    const keyboardControlsGuide = document.getElementById("keyboard-controls-guide");
-    const armHealth = document.getElementById("arm-health");
     const networkStats = document.getElementById("network-stats");
-    const armPositionButton = document.getElementById("arm-position-calibrate");
-    const armJointsButton = document.getElementById("arm-joints-refine");
-    const armPositionStatus = document.getElementById("arm-position-status");
-    const armCalibrationProgress = document.getElementById("arm-calibration-progress");
-    const armCalibrationProgressValue = document.getElementById("arm-calibration-progress-value");
     const rgbdLatencyGraph = document.getElementById("rgbd-latency-graph");
     const rgbdLatencyValue = document.getElementById("rgbd-latency-value");
     const transportLink = document.getElementById("transport-link");
-    const manualWorkspace = document.getElementById("manual-calibration-workspace");
-    const manualInputs = Array.from(document.querySelectorAll("[data-manual-key]"));
-    const manualWristDirection = document.getElementById("manual-wrist-direction");
     const viewControlIds = ["orbit-span", "orbit-response", "orbit-distance", "dolly-gain", "inspect-fov", "head-height", "orbit-elevation"];
-    const armFeedbackControlIds = [
-      "arm-measured-feedback-enabled",
-      "arm-target-ghost-enabled",
-      "arm-following-error-safety-enabled",
-      "arm-freeze-overlay-on-stale-enabled",
-      "arm-d455-visual-correction-enabled",
-    ];
-    // v8 adds a renderer-only background choice. Restore v6/v7 settings so a
-    // viewer update does not discard established FOV and inspect controls.
-    const viewSettingsVersion = 8;
-
-    function manualCalibrationPayload() {
-      const payload = { manual_wrist_roll_direction: Number(manualWristDirection.value) };
-      for (const input of manualInputs) payload[input.dataset.manualKey] = Number(input.value);
-      return payload;
-    }
-
-    function updateManualCalibrationLabels() {
-      for (const input of manualInputs) {
-        const key = input.dataset.manualKey;
-        const output = document.querySelector(`[data-manual-value="${key}"]`);
-        if (!output) continue;
-        const value = Number(input.value);
-        output.textContent = key === "manual_overlay_opacity" ? `${Math.round(value * 100)}%`
-          : key === "manual_opening_scale" ? `${value.toFixed(3)}×`
-          : key.startsWith("manual_tool_") && ["manual_tool_x", "manual_tool_y", "manual_tool_z"].includes(key) ? `${(value * 1000).toFixed(1)} mm`
-          : `${value.toFixed(1)}°`;
-      }
-    }
-
-    function resetManualCalibrationControls() {
-      for (const input of manualInputs) {
-        input.value = input.dataset.manualKey === "manual_opening_scale" ? "1"
-          : input.dataset.manualKey === "manual_overlay_opacity" ? "0.3" : "0";
-      }
-      manualWristDirection.value = "0";
-      updateManualCalibrationLabels();
-    }
+    // v9 delegates robot-specific settings to the active module.
+    const viewSettingsVersion = 9;
 
     let peer = null;
     let trackingDataChannel = null;
@@ -103,22 +52,11 @@
     transportLink.href = quickTunnel ? "/controller.html" : (hybridMode ? "/frame-stream" : "/");
     transportLink.textContent = quickTunnel ? "Reload Point Cloud" : (hybridMode ? "Frame Stream Fallback" : "Hybrid RGB-D View");
 
-    function packedArmFeedbackMask() {
-      const enabled = (id) => document.getElementById(id).checked ? 1 : 0;
-      return (
-        enabled("arm-measured-feedback-enabled")
-        | (enabled("arm-target-ghost-enabled") << 1)
-        | (enabled("arm-following-error-safety-enabled") << 2)
-        | (enabled("arm-freeze-overlay-on-stale-enabled") << 3)
-        | (enabled("arm-d455-visual-correction-enabled") << 4)
-      );
-    }
-
     function viewSettingsPayload(extra = {}) {
       const span = Number(document.getElementById("orbit-span").value);
       const response = Number(document.getElementById("orbit-response").value);
       const orbitDistance = Number(document.getElementById("orbit-distance").value);
-      return {
+      const payload = {
         inspect_enabled: document.getElementById("inspect-enabled").checked,
         yaw_gain: response,
         pitch_gain: response * 0.73,
@@ -132,25 +70,14 @@
         dolly_gain: Number(document.getElementById("dolly-gain").value),
         min_distance: 0.2,
         max_distance: 3.0,
-        // The fractional marker keeps these switches functional through an
-        // already-running pre-feature bridge without restarting its quick
-        // Cloudflare tunnel. New bridges also receive the named booleans below.
-        fov: Number(document.getElementById("inspect-fov").value) + (32 + packedArmFeedbackMask()) / 1000,
+        fov: Number(document.getElementById("inspect-fov").value),
         white_background_enabled: document.getElementById("white-background-enabled").checked,
-        robot_overlay_enabled: document.getElementById("robot-overlay-enabled").checked,
-        robot_overlay_style: document.getElementById("robot-overlay-style").value,
-        robot_overlay_mask_scanned_arm: document.getElementById("robot-overlay-occlusion-enabled").checked,
-        arm_measured_feedback_enabled: document.getElementById("arm-measured-feedback-enabled").checked,
-        arm_target_ghost_enabled: document.getElementById("arm-target-ghost-enabled").checked,
-        arm_following_error_safety_enabled: document.getElementById("arm-following-error-safety-enabled").checked,
-        arm_freeze_overlay_on_stale_enabled: document.getElementById("arm-freeze-overlay-on-stale-enabled").checked,
-        arm_d455_visual_correction_enabled: document.getElementById("arm-d455-visual-correction-enabled").checked,
-        arm_idle_return_enabled: armIdleReturnEnabled.checked,
         persistent_temporal_reference_enabled: document.getElementById("persistent-temporal-reference-enabled").checked,
         full_rgb_frame_updates_enabled: document.getElementById("full-rgb-frame-updates-enabled").checked,
         settings_version: viewSettingsVersion,
         ...extra,
       };
+      return robotModule.extendViewSettings?.(payload) || payload;
     }
 
     function updateViewLabels() {
@@ -166,15 +93,17 @@
     function sendViewSettings(extra = {}) {
       updateViewLabels();
       const payload = viewSettingsPayload(extra);
-      localStorage.setItem("digitalWindowViewSettings", JSON.stringify(payload));
+      localStorage.setItem("robotTeleopViewSettings", JSON.stringify(payload));
       window.setGodotHybridViewSettings && window.setGodotHybridViewSettings(payload);
       return window.sendGodotViewSettings && window.sendGodotViewSettings(payload);
     }
 
     function restoreViewSettings() {
       let saved = null;
-      try { saved = JSON.parse(localStorage.getItem("digitalWindowViewSettings") || "null"); } catch (_) {}
-      if (!saved || ![6, 7, viewSettingsVersion].includes(saved.settings_version)) return updateViewLabels();
+      try {
+        saved = JSON.parse(localStorage.getItem("robotTeleopViewSettings") || localStorage.getItem("digitalWindowViewSettings") || "null");
+      } catch (_) {}
+      if (!saved || ![6, 7, 8, viewSettingsVersion].includes(saved.settings_version)) return updateViewLabels();
       document.getElementById("inspect-enabled").checked = saved.inspect_enabled === true;
       document.getElementById("orbit-span").value = String(Math.max(30, Math.min(360, (saved.max_yaw || 80) * 2)));
       document.getElementById("orbit-response").value = String(saved.yaw_gain || 2.5);
@@ -185,29 +114,10 @@
       document.getElementById("white-background-enabled").checked = saved.white_background_enabled === true;
       document.getElementById("head-height").value = String(saved.focus_vertical_offset ?? 0.35);
       document.getElementById("orbit-elevation").value = String(saved.orbit_pitch_offset ?? 0);
-      document.getElementById("robot-overlay-enabled").checked = saved.robot_overlay_enabled !== false;
-      document.getElementById("robot-overlay-style").value = saved.robot_overlay_style === "solid" ? "solid" : "alignment";
-      document.getElementById("robot-overlay-occlusion-enabled").checked = saved.robot_overlay_mask_scanned_arm !== false;
-      document.getElementById("arm-measured-feedback-enabled").checked = saved.arm_measured_feedback_enabled !== false;
-      document.getElementById("arm-target-ghost-enabled").checked = saved.arm_target_ghost_enabled !== false;
-      document.getElementById("arm-following-error-safety-enabled").checked = saved.arm_following_error_safety_enabled !== false;
-      document.getElementById("arm-freeze-overlay-on-stale-enabled").checked = saved.arm_freeze_overlay_on_stale_enabled !== false;
-      document.getElementById("arm-d455-visual-correction-enabled").checked = saved.arm_d455_visual_correction_enabled === true;
-      armIdleReturnEnabled.checked = saved.arm_idle_return_enabled === true;
       document.getElementById("persistent-temporal-reference-enabled").checked = saved.persistent_temporal_reference_enabled !== false;
       document.getElementById("full-rgb-frame-updates-enabled").checked = saved.full_rgb_frame_updates_enabled === true;
+      robotModule.restoreViewSettings?.(saved);
       updateViewLabels();
-    }
-
-    function sendArmFeedbackSettings() {
-      const settings = viewSettingsPayload();
-      return window.so101ArmController && window.so101ArmController.setFeedbackSettings({
-        measured_feedback_enabled: settings.arm_measured_feedback_enabled,
-        target_ghost_enabled: settings.arm_target_ghost_enabled,
-        following_error_safety_enabled: settings.arm_following_error_safety_enabled,
-        freeze_overlay_on_stale_enabled: settings.arm_freeze_overlay_on_stale_enabled,
-        d455_visual_correction_enabled: settings.arm_d455_visual_correction_enabled,
-      });
     }
 
     function normalizedStreamClick(event, element) {
@@ -592,8 +502,6 @@
       await Promise.all([
         window.startGodotHybridRenderer({
           canvas: hybridCanvas,
-          manualRgbCanvas: document.getElementById("manual-rgb-canvas"),
-          manualCropCanvas: document.getElementById("manual-crop-canvas"),
           ...hybridPreset,
           dataChannel: forceRelayedRgbd || persistentReference ? null : rgbdDataChannel,
           // Prefer direct unordered WebRTC when peer connectivity is possible.
@@ -943,8 +851,6 @@
     function updateStatus() {
       const latest = window.godotWebcamTrackerLatest || {};
       const remote = window.getGodotRemoteHeadTrackingStatus ? window.getGodotRemoteHeadTrackingStatus() : {};
-      const arm = window.getSo101ArmStatus ? window.getSo101ArmStatus() : {};
-      const calibration = (arm.status && arm.status.robot_calibration) || {};
       const active = latest.active === true;
       const av1Connected = av1Socket && av1Socket.readyState === WebSocket.OPEN && viewportVideo.currentTime > 0;
       const hybrid = window.getGodotHybridRendererStatus ? window.getGodotHybridRendererStatus() : {};
@@ -976,55 +882,10 @@
       statusLines.textContent = [
         `Stream ${streamMode} | ${size} | ${fps} | ${bitrate}`,
         `Tracking ${latest.status || trackingState} | ${remote.connected ? "bridge on" : "bridge ..."}`,
-        `Arm ${arm.state || "loading"} | ${arm.keyboardConnected ? "keyboard on" : arm.leaderConnected ? `leader ${arm.leaderHz || 0} Hz` : "controller off"} | follower ${arm.followerConnected ? "on" : "off"}`,
-      ].join("\n");
-      armConnectButton.textContent = arm.leaderConnected ? "Leader Connected" : "Connect Leader";
-      armKeyboardButton.textContent = arm.keyboardConnected ? "Keyboard Enabled" : "Keyboard Control";
-      armKeyboardButton.classList.toggle("primary", arm.keyboardConnected === true);
-      keyboardControlsGuide.hidden = arm.keyboardConnected !== true;
-      keyboardControlsGuide.style.display = arm.keyboardConnected === true ? "block" : "none";
-      const followerBlocksEnable = ["fault", "restarting", "calibrating", "unresponsive"].includes(arm.state);
-      armEnableButton.disabled = !((arm.leaderConnected || arm.keyboardConnected) && arm.serverConnected && arm.followerConnected) || arm.armed || followerBlocksEnable;
-      armEnableButton.textContent = arm.armed ? "Arm Enabled" : "Enable Arm";
-      armRestartButton.disabled = !arm.serverConnected || arm.restartRequested;
-      armRestartButton.textContent = arm.restartRequested ? "Restarting Arm..." : "Restart Arm Connection";
-      const followerStatus = arm.status || {};
-      const returningRest = followerStatus.rest_return_active === true;
-      armReturnRestButton.disabled = !arm.serverConnected
-        || !arm.followerConnected
-        || returningRest
-        || ["fault", "restarting", "calibrating"].includes(arm.state);
-      armReturnRestButton.textContent = returningRest
-        ? `Returning to Rest ${Math.round(Number(followerStatus.rest_return_progress || 0) * 100)}%`
-        : "Return Arm to Rest Pose";
-      const followerWriting = followerStatus.state === "armed" || followerStatus.state === "calibrating";
-      const lastWrite = followerWriting
-        ? (followerStatus.last_write_age_ms == null ? "--" : `${Math.round(followerStatus.last_write_age_ms)}ms ago`)
-        : `${followerStatus.state || "idle"} (motion writes paused)`;
-      armHealth.textContent = [
-        `Follower ${followerStatus.follower_responsive === false ? "UNRESPONSIVE" : followerStatus.follower_connected ? "connected" : "offline"} | ${followerStatus.state || arm.state || "--"}`,
-        `Commands ${followerStatus.command_rate_hz || 0}/s | writes ${followerStatus.write_rate_hz || 0}/s | status age ${followerStatus.status_age_ms == null ? "--" : `${Math.round(followerStatus.status_age_ms)}ms`}`,
-        `Measured ${followerStatus.measured_feedback_fresh ? "fresh" : "STALE"} | reads ${followerStatus.read_rate_hz || 0}/s | age ${followerStatus.last_read_age_ms == null ? "--" : `${Math.round(followerStatus.last_read_age_ms)}ms`}`,
-        `Last write ${lastWrite} | safety stops ${followerStatus.following_error_trip_count || 0} | restart #${followerStatus.restart_count || 0}`,
-        `Status ${followerStatus.message || "--"}`,
-        `Fault ${arm.fault || "none"}`,
-      ].join("\n");
+        robotModule.statusSummary?.(),
+      ].filter(Boolean).join("\n");
+      robotModule.renderStatus?.();
       if (activeViewportMode === "hybrid") updateRgbdLatencyGraph(hybrid);
-      const calibrationCapturing = calibration.state === "capturing";
-      const calibrationSolving = calibration.state === "solving";
-      const calibrationOffline = calibration.state === "offline";
-      const calibrationMode = calibration.calibration_mode || "base";
-      const calibrationProgress = Math.max(0, Math.min(1, Number(calibration.progress || 0)));
-      armCalibrationProgress.value = calibrationProgress;
-      armCalibrationProgressValue.textContent = `${Math.round(calibrationProgress * 100)}%`;
-      armPositionButton.textContent = calibrationCapturing && calibrationMode === "base" ? "Cancel Full Arm Calibration" : calibrationSolving && calibrationMode === "base" ? "Fitting Full Arm" : calibrationOffline ? "Godot Calibration Offline" : "Calibrate Full Arm";
-      armPositionButton.disabled = calibrationSolving || calibrationOffline || (calibrationCapturing && calibrationMode !== "base");
-      armJointsButton.textContent = calibrationCapturing && calibrationMode === "joints" ? "Cancel Servo Refinement" : calibrationSolving && calibrationMode === "joints" ? "Fitting Arm Servos" : calibrationOffline ? "Godot Calibration Offline" : "Refine Arm Servos";
-      armJointsButton.disabled = calibrationSolving || calibrationOffline || (calibrationCapturing && calibrationMode !== "joints");
-      armPositionStatus.textContent = [
-        calibration.message || "Arm position calibration idle",
-        `Frames ${calibration.frames || 0} | confidence ${Math.round((calibration.confidence || 0) * 100)}%`,
-      ].join("\n");
     }
 
     streamPresetSelect.addEventListener("change", () => {
@@ -1046,113 +907,15 @@
       window.recenterGodotWebcamTracker && window.recenterGodotWebcamTracker();
       window.recenterGodotHybridRenderer && window.recenterGodotHybridRenderer();
     });
-    armConnectButton.addEventListener("click", async () => {
-      try {
-        await window.so101ArmController.connectLeader();
-      } catch (err) {
-        window.so101ArmController.latest.fault = String(err && err.message ? err.message : err);
-        window.so101ArmController.emitStatus();
-      }
-    });
-    armKeyboardButton.addEventListener("click", async () => {
-      if (window.so101ArmController.latest.keyboardConnected) {
-        window.so101ArmController.disconnectKeyboard(true);
-      } else {
-        await window.so101ArmController.connectKeyboard();
-      }
-      updateStatus();
-    });
-    window.addEventListener("so101-arm-status", updateStatus);
-    armEnableButton.addEventListener("click", () => {
-      try {
-        window.so101ArmController.enableArm();
-      } catch (err) {
-        window.so101ArmController.latest.fault = String(err && err.message ? err.message : err);
-        window.so101ArmController.emitStatus();
-      }
-    });
-    armHoldButton.addEventListener("click", () => window.so101ArmController && window.so101ArmController.hold());
-    armReturnRestButton.addEventListener("click", () => {
-      if (!window.confirm(
-        "Return the physical arm to its saved rest pose now?\n\nClear the workspace and stay ready to press Hold Arm or remove power. The path checker knows the robot and base, but cannot detect people or loose objects."
-      )) return;
-      try {
-        window.so101ArmController.returnToRest();
-      } catch (err) {
-        window.so101ArmController.latest.fault = String(err && err.message ? err.message : err);
-        window.so101ArmController.emitStatus();
-      }
-    });
-    armIdleReturnEnabled.addEventListener("change", () => {
-      if (armIdleReturnEnabled.checked && !window.confirm(
-        "Enable unattended return after 10 minutes without meaningful control input?\n\nThis is opt-in because the modeled path checker cannot detect a person or loose object that enters the workspace."
-      )) {
-        armIdleReturnEnabled.checked = false;
-      }
-      sendViewSettings();
-      window.so101ArmController && window.so101ArmController.setIdleReturn(armIdleReturnEnabled.checked, 600);
-      armIdleReturnEnabled.blur();
-    });
-    armRestartButton.addEventListener("click", () => {
-      try {
-        window.so101ArmController.restartFollower();
-      } catch (err) {
-        window.so101ArmController.latest.fault = String(err && err.message ? err.message : err);
-        window.so101ArmController.emitStatus();
-      }
-    });
     for (const id of viewControlIds) {
       const control = document.getElementById(id);
       control.addEventListener("input", () => sendViewSettings());
       control.addEventListener("change", () => control.blur());
     }
-    for (const id of ["inspect-enabled", "dolly-enabled", "white-background-enabled", "robot-overlay-enabled", "robot-overlay-occlusion-enabled"]) {
+    for (const id of ["inspect-enabled", "dolly-enabled", "white-background-enabled"]) {
       const control = document.getElementById(id);
       control.addEventListener("change", () => {
         sendViewSettings();
-        control.blur();
-        // Hybrid RGB-D reconstructs camera geometry in the browser and does
-        // not receive Godot's SO-101 model. Switch to the Godot frame route
-        // when the crisp model is requested so the toggle has a visible effect.
-      });
-    }
-    document.getElementById("robot-overlay-style").addEventListener("change", (event) => {
-      sendViewSettings();
-      event.currentTarget.blur();
-    });
-    document.getElementById("manual-claw-calibration-open").addEventListener("click", () => {
-      resetManualCalibrationControls();
-      manualWorkspace.hidden = false;
-      sendViewSettings({ manual_claw_calibration_begin: true, ...manualCalibrationPayload() });
-    });
-    for (const input of manualInputs) {
-      input.addEventListener("input", () => {
-        updateManualCalibrationLabels();
-        sendViewSettings(manualCalibrationPayload());
-      });
-    }
-    manualWristDirection.addEventListener("change", () => sendViewSettings(manualCalibrationPayload()));
-    document.getElementById("manual-calibration-reset").addEventListener("click", () => {
-      resetManualCalibrationControls();
-      sendViewSettings({ manual_claw_calibration_reset: true, ...manualCalibrationPayload() });
-    });
-    document.getElementById("manual-calibration-cancel").addEventListener("click", () => {
-      sendViewSettings({ manual_claw_calibration_cancel: true });
-      manualWorkspace.hidden = true;
-    });
-    document.getElementById("manual-calibration-save").addEventListener("click", () => {
-      if (!window.confirm("Save this wrist/claw preview into the robot registration?")) return;
-      sendViewSettings({ ...manualCalibrationPayload(), manual_claw_calibration_save: true });
-      manualWorkspace.hidden = true;
-    });
-    window.addEventListener("pagehide", () => {
-      if (!manualWorkspace.hidden) sendViewSettings({ manual_claw_calibration_cancel: true });
-    });
-    for (const id of armFeedbackControlIds) {
-      const control = document.getElementById(id);
-      control.addEventListener("change", () => {
-        sendViewSettings();
-        sendArmFeedbackSettings();
         control.blur();
       });
     }
@@ -1164,34 +927,6 @@
       document.getElementById("inspect-enabled").checked = true;
       sendViewSettings({ inspect_enabled: true });
     });
-    armPositionButton.addEventListener("click", () => {
-      const arm = window.getSo101ArmStatus ? window.getSo101ArmStatus() : {};
-      const calibration = (arm.status && arm.status.robot_calibration) || {};
-      const capturing = calibration.state === "capturing";
-      if (!capturing && calibration.state === "offline") {
-        armPositionStatus.textContent = "Godot arm calibrator is offline. Start the Godot runtime, then try again.";
-        return;
-      }
-      if (!capturing && !window.confirm(
-        "The follower robot will automatically locate its base, calibrate shoulder, elbow, and wrist progressively outward, then sample five claw openings.\n\nClear its workspace, stay ready to remove physical power, then press OK to continue."
-      )) return;
-      const sent = sendViewSettings(capturing ? { cancel_robot_position_calibration: true } : { calibrate_robot_position: true });
-      if (!sent) armPositionStatus.textContent = "Start the controller so the Godot bridge can receive calibration commands.";
-    });
-    armJointsButton.addEventListener("click", () => {
-      const arm = window.getSo101ArmStatus ? window.getSo101ArmStatus() : {};
-      const calibration = (arm.status && arm.status.robot_calibration) || {};
-      const capturing = calibration.state === "capturing" && calibration.calibration_mode === "joints";
-      if (!capturing && calibration.state === "offline") {
-        armPositionStatus.textContent = "Godot arm calibrator is offline. Start the Godot runtime, then try again.";
-        return;
-      }
-      if (!capturing && !window.confirm(
-        "Run this only after Locate Robot Arm succeeds.\n\nThe follower will raise, then sweep shoulder, elbow, and wrist flex one at a time. Clear its workspace and stay ready to remove physical power."
-      )) return;
-      const sent = sendViewSettings(capturing ? { cancel_robot_position_calibration: true } : { refine_robot_joint_alignment: true });
-      if (!sent) armPositionStatus.textContent = "Start the controller so the Godot bridge can receive calibration commands.";
-    });
     startButton.addEventListener("click", startController);
 
     setInterval(() => {
@@ -1200,6 +935,6 @@
     }, 500);
 
     restoreViewSettings();
-    sendArmFeedbackSettings();
-    window.so101ArmController && window.so101ArmController.setIdleReturn(armIdleReturnEnabled.checked, 600);
+    robotModule.bind?.({ sendViewSettings, updateStatus });
+    robotModule.start?.({ sendViewSettings, updateStatus });
     startController();

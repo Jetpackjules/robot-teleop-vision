@@ -15,9 +15,8 @@ const CALIBRATION_PAIRS_NODE := "WorldLevelAnchor/CalibrationPairs"
 const CALIBRATION_REFERENCE_NODE := "Reference"
 const CALIBRATION_TARGET_NODE := "Target"
 const DEBUG_PANEL_ANCHOR_NODE := "DebugPanelAnchor"
-const SO101_ROBOT_OVERLAY_NAME := "SO101RobotOverlay"
-const SO101_ROBOT_OVERLAY_NODE := "WorldLevelAnchor/SO101RobotOverlay"
-const SO101_MOTION_CALIBRATOR_NODE := "SO101MotionCalibrator"
+const ROBOT_OVERLAY_NAME := "RobotOverlay"
+const ROBOT_OVERLAY_NODE := "WorldLevelAnchor/RobotOverlay"
 const REALSENSE_VIEWER_MESH_DEPTH_DELTA := 0.05
 const REALSENSE_VIEWER_MESH_EDGE_M := 0.08
 const RUNTIME_STREAM_OWNER_PATH := "user://godot_realsense_runtime_owner.json"
@@ -167,8 +166,8 @@ const LEGACY_CALIBRATION_PROPERTIES := [
 @export_tool_button("Clear RealSense Color Matching") var clear_realsense_color_matching_action: Callable = _clear_realsense_color_matching
 @export_multiline var realsense_color_match_status: String = "RealSense color matching has not been run."
 
-@export_group("SO-101 Robot Overlay")
-## Replaces the scanned robot with the telemetry-driven high-detail SO-101 model. Move the SO101RobotOverlay child once to register the physical base pose.
+@export_group("Robot Module")
+## Shows the selected module's telemetry-driven overlay when that capability is available.
 @export var robot_overlay_enabled: bool = true:
 	set(value):
 		robot_overlay_enabled = value
@@ -180,40 +179,26 @@ const LEGACY_CALIBRATION_PROPERTIES := [
 		robot_overlay_transparency = clampf(value, 0.0, 0.95)
 		_update_robot_overlay_settings()
 ## Hides point-cloud samples inside the animated robot links when the native renderer supports masks.
-@export var robot_overlay_mask_scanned_arm: bool = true:
+@export var robot_overlay_mask_scanned_robot: bool = true:
 	set(value):
-		robot_overlay_mask_scanned_arm = value
+		robot_overlay_mask_scanned_robot = value
 		_update_robot_overlay_settings()
-## Visual-only editor trim. Rotate this until the complete rigid claw matches
-## the scan, then use Save Wrist Rotation Alignment below. It never moves the
-## physical arm and is deliberately excluded from calibration captures.
-@export_range(0.0, 360.0, 0.5, "suffix:deg") var wrist_rotation_alignment_preview_degrees: float = 0.0:
-	set(value):
-		wrist_rotation_alignment_preview_degrees = clampf(value, 0.0, 360.0)
-		_update_robot_overlay_settings()
-@export_tool_button("Save Wrist Rotation Alignment") var save_wrist_rotation_alignment_action: Callable = _save_wrist_rotation_alignment
-@export_tool_button("Reset Wrist Rotation Preview") var reset_wrist_rotation_preview_action: Callable = _reset_wrist_rotation_preview
-## Runs the automated base-locked, outward-from-base arm calibration workflow.
-@export_tool_button("Calibrate Robot Position") var calibrate_robot_position_action: Callable = _start_robot_position_calibration
-## Holds the calibrated base fixed and sweeps one stock arm segment at a time. The customized gripper/camera assembly is excluded.
-@export_tool_button("Refine Shoulder/Elbow/Wrist Servos") var refine_robot_joint_alignment_action: Callable = _start_robot_joint_refinement
-## Keeps the current lowered arm pose and calibrates only wrist roll from five angles in each RealSense view.
-@export_tool_button("Calibrate Wrist Roll (Lowered)") var calibrate_wrist_roll_action: Callable = _start_wrist_roll_calibration
-## Preserves the validated base-through-wrist chain and opening curve while
-## rechecking only the physical fingertips in three native-D455 RGB views.
-@export_tool_button("Calibrate Claw Tips Only") var calibrate_claw_tips_action: Callable = _start_distal_claw_tip_calibration
-## Sends the encoder-defined guarded rest-return request. This does not use or modify visual robot calibration.
-@export_tool_button("Return Arm to Rest Pose") var return_arm_to_rest_action: Callable = _return_arm_to_rest_pose
+## Runs the selected module's full calibration workflow, when supported.
+@export_tool_button("Calibrate Robot") var calibrate_robot_position_action: Callable = _start_robot_position_calibration
+## Runs the selected module's optional refinement workflow.
+@export_tool_button("Refine Robot Calibration") var refine_robot_joint_alignment_action: Callable = _start_robot_joint_refinement
+## Sends the selected module's guarded rest request, when supported.
+@export_tool_button("Return Robot to Rest Pose") var return_robot_to_rest_action: Callable = _return_robot_to_rest_pose
 ## Saves the current calibrated position as an explicit user checkpoint. This checkpoint never constrains a new calibration.
 @export_tool_button("Save Robot Position Calibration") var save_robot_position_action: Callable = _save_robot_position_checkpoint
 ## Replaces the current robot position with the checkpoint most recently saved above.
 @export_tool_button("Restore Saved Robot Position") var restore_robot_anchor_action: Callable = _restore_saved_robot_position
 ## Removes the saved automatic base registration so the scene transform can be used again.
 @export_tool_button("Clear Robot Position Calibration") var clear_robot_position_calibration_action: Callable = _clear_robot_position_calibration
-@export_multiline var robot_position_calibration_status: String = "Arm position calibration is idle."
+@export_multiline var robot_position_calibration_status: String = "Robot position calibration is idle."
 
 @export_group("World Level")
-## Uses the registered SO-101 base as gravity-up. Keep this off unless the physical base is known to be level.
+## Uses the registered robot base as gravity-up. Keep this off unless the physical base is known to be level.
 @export var auto_level_from_robot_base: bool = false:
 	set(value):
 		auto_level_from_robot_base = value
@@ -877,7 +862,7 @@ func _process(_delta: float) -> void:
 func _update_robot_overlay_settings() -> void:
 	if not is_inside_tree():
 		return
-	var overlay := get_node_or_null(SO101_ROBOT_OVERLAY_NODE)
+	var overlay := get_node_or_null(ROBOT_OVERLAY_NODE)
 	if overlay == null:
 		return
 	if overlay.has_method("set_overlay_enabled"):
@@ -888,115 +873,69 @@ func _update_robot_overlay_settings() -> void:
 			robot_overlay_transparency,
 		)
 	if overlay.has_method("set_mask_scanned_robot"):
-		overlay.call("set_mask_scanned_robot", robot_overlay_mask_scanned_arm)
-	if overlay.has_method("set_wrist_roll_alignment_preview"):
-		overlay.call(
-			"set_wrist_roll_alignment_preview",
-			wrist_rotation_alignment_preview_degrees,
-		)
+		overlay.call("set_mask_scanned_robot", robot_overlay_mask_scanned_robot)
 
 
-func _save_wrist_rotation_alignment() -> void:
-	var overlay := get_node_or_null(SO101_ROBOT_OVERLAY_NODE)
-	if overlay == null or not overlay.has_method("commit_wrist_roll_alignment_preview"):
-		robot_position_calibration_status = "SO-101 wrist alignment control is unavailable."
-	elif bool(overlay.call("commit_wrist_roll_alignment_preview")):
-		wrist_rotation_alignment_preview_degrees = 0.0
-		robot_position_calibration_status = "Saved manual wrist rotation alignment."
-	else:
-		robot_position_calibration_status = "Could not save manual wrist rotation alignment."
-	if Engine.is_editor_hint():
-		notify_property_list_changed()
-
-
-func _reset_wrist_rotation_preview() -> void:
-	wrist_rotation_alignment_preview_degrees = 0.0
-	robot_position_calibration_status = "Reset wrist rotation preview without changing calibration."
-	if Engine.is_editor_hint():
-		notify_property_list_changed()
+func _active_robot_module() -> Node:
+	if not is_inside_tree():
+		return null
+	var modules := get_tree().get_nodes_in_group("robot_module")
+	return modules[0] if not modules.is_empty() else null
 
 func _start_robot_position_calibration() -> void:
-	var calibrator := get_node_or_null(SO101_MOTION_CALIBRATOR_NODE)
-	if calibrator == null or not calibrator.has_method("start_automated_arm_calibration"):
-		robot_position_calibration_status = "SO-101 motion calibrator is unavailable."
+	var module := _active_robot_module()
+	if module == null or not module.has_method("start_full_calibration"):
+		robot_position_calibration_status = "The selected robot has no full calibration capability."
 		if Engine.is_editor_hint():
 			notify_property_list_changed()
 		return
-	calibrator.call("start_automated_arm_calibration", Engine.is_editor_hint())
+	module.call("start_full_calibration", Engine.is_editor_hint())
 	_update_robot_position_calibration_status()
 
 
 func _start_robot_joint_refinement() -> void:
-	var calibrator := get_node_or_null(SO101_MOTION_CALIBRATOR_NODE)
-	if calibrator == null or not calibrator.has_method("start_joint_alignment_calibration"):
-		robot_position_calibration_status = "SO-101 staged joint refinement is unavailable."
+	var module := _active_robot_module()
+	if module == null or not module.has_method("refine_calibration"):
+		robot_position_calibration_status = "The selected robot has no refinement capability."
 		if Engine.is_editor_hint():
 			notify_property_list_changed()
 		return
-	calibrator.call("start_joint_alignment_calibration", Engine.is_editor_hint())
+	module.call("refine_calibration", Engine.is_editor_hint())
 	_update_robot_position_calibration_status()
 
 
-func _start_wrist_roll_calibration() -> void:
-	var calibrator := get_node_or_null(SO101_MOTION_CALIBRATOR_NODE)
-	if calibrator == null or not calibrator.has_method("start_wrist_roll_calibration"):
-		robot_position_calibration_status = "SO-101 lowered wrist calibration is unavailable."
+func _return_robot_to_rest_pose() -> void:
+	var module := _active_robot_module()
+	if module == null or not module.has_method("return_to_rest"):
+		robot_position_calibration_status = "The selected robot has no rest-pose action."
 		if Engine.is_editor_hint():
 			notify_property_list_changed()
 		return
-	calibrator.call("start_wrist_roll_calibration", Engine.is_editor_hint())
-	_update_robot_position_calibration_status()
-
-
-func _start_distal_claw_tip_calibration() -> void:
-	var calibrator := get_node_or_null(SO101_MOTION_CALIBRATOR_NODE)
-	if calibrator == null or not calibrator.has_method("start_distal_claw_tip_calibration"):
-		robot_position_calibration_status = "SO-101 native-RGB claw-tip calibration is unavailable."
-		if Engine.is_editor_hint():
-			notify_property_list_changed()
-		return
-	calibrator.call("start_distal_claw_tip_calibration", Engine.is_editor_hint())
-	_update_robot_position_calibration_status()
-
-
-func _return_arm_to_rest_pose() -> void:
-	var calibrator := get_node_or_null(SO101_MOTION_CALIBRATOR_NODE)
-	if calibrator == null or not calibrator.has_method("return_arm_to_rest_pose"):
-		robot_position_calibration_status = "SO-101 rest return command is unavailable."
-		if Engine.is_editor_hint():
-			notify_property_list_changed()
-		return
-	if not bool(calibrator.call("return_arm_to_rest_pose")):
+	if not bool(module.call("return_to_rest")):
 		robot_position_calibration_status = "Could not send the return-to-rest request."
 	else:
-		robot_position_calibration_status = "Return-to-rest requested; Hold Arm can interrupt it."
+		robot_position_calibration_status = "Return-to-rest requested; Hold can interrupt it."
 	if Engine.is_editor_hint():
 		notify_property_list_changed()
 
 
 func _clear_robot_position_calibration() -> void:
-	var calibrator := get_node_or_null(SO101_MOTION_CALIBRATOR_NODE)
-	if calibrator != null and calibrator.has_method("clear_arm_position_calibration"):
-		calibrator.call("clear_arm_position_calibration")
+	var module := _active_robot_module()
+	if module != null and module.has_method("clear_calibration"):
+		module.call("clear_calibration")
 		_clear_world_level(true)
 		_update_robot_position_calibration_status()
 		return
-	var overlay := get_node_or_null(SO101_ROBOT_OVERLAY_NODE)
-	if overlay != null and overlay.has_method("clear_saved_registration"):
-		overlay.call("clear_saved_registration")
 	_clear_world_level(true)
-	robot_position_calibration_status = "Saved arm position calibration cleared."
+	robot_position_calibration_status = "The selected robot has no clear-calibration action."
 
 func _save_robot_position_checkpoint() -> void:
-	var overlay := get_node_or_null(SO101_ROBOT_OVERLAY_NODE)
-	if overlay == null or not overlay.has_method("save_robot_position_checkpoint"):
-		robot_position_calibration_status = "SO-101 robot position checkpoint save is unavailable."
+	var module := _active_robot_module()
+	if module == null or not module.has_method("save_calibration_checkpoint"):
+		robot_position_calibration_status = "The selected robot cannot save a calibration checkpoint."
 		return
-	if not bool(overlay.call("save_robot_position_checkpoint")):
-		var registration: Dictionary = overlay.call("get_registration_status")
-		robot_position_calibration_status = "Could not save robot position: %s" % str(
-			registration.get("fault", "unknown error")
-		)
+	if not bool(module.call("save_calibration_checkpoint")):
+		robot_position_calibration_status = "Could not save the robot calibration checkpoint."
 		return
 	robot_position_calibration_status = "Current calibrated robot position saved as checkpoint."
 	if Engine.is_editor_hint():
@@ -1004,33 +943,23 @@ func _save_robot_position_checkpoint() -> void:
 
 
 func _restore_saved_robot_position() -> void:
-	var overlay := get_node_or_null(SO101_ROBOT_OVERLAY_NODE)
-	if overlay == null or not overlay.has_method("restore_saved_robot_position"):
-		robot_position_calibration_status = "SO-101 saved robot position restore is unavailable."
+	var module := _active_robot_module()
+	if module == null or not module.has_method("restore_calibration_checkpoint"):
+		robot_position_calibration_status = "The selected robot cannot restore a calibration checkpoint."
 		return
-	if not bool(overlay.call("restore_saved_robot_position")):
-		var registration: Dictionary = overlay.call("get_registration_status")
-		robot_position_calibration_status = "Could not restore robot position: %s" % str(
-			registration.get("fault", "unknown error")
-		)
+	if not bool(module.call("restore_calibration_checkpoint")):
+		robot_position_calibration_status = "Could not restore the robot calibration checkpoint."
 		return
-	var calibrator := get_node_or_null(SO101_MOTION_CALIBRATOR_NODE)
-	if calibrator != null and calibrator.has_method("report_external_registration"):
-		calibrator.call(
-			"report_external_registration",
-			"Saved robot position checkpoint restored.",
-			1.0
-		)
 	robot_position_calibration_status = "Saved robot position checkpoint restored."
 	_maybe_auto_level_from_robot_registration()
 
 func _update_robot_position_calibration_status() -> void:
-	var calibrator := get_node_or_null(SO101_MOTION_CALIBRATOR_NODE)
-	if calibrator == null or not calibrator.has_method("get_calibration_status"):
+	var module := _active_robot_module()
+	if module == null or not module.has_method("get_calibration_status"):
 		return
-	var status: Dictionary = calibrator.call("get_calibration_status")
+	var status: Dictionary = module.call("get_calibration_status")
 	var next_status := "%s | frames=%d | confidence=%.0f%%" % [
-		str(status.get("message", "Arm position calibration is idle.")),
+		str(status.get("message", "Robot position calibration is idle.")),
 		int(status.get("frames", 0)),
 		float(status.get("confidence", 0.0)) * 100.0,
 	]
@@ -1046,15 +975,15 @@ func level_world_from_robot_base(persist: bool = true) -> bool:
 		world_level_status = "World leveling is waiting for the unified scene to load."
 		return false
 	var anchor := _world_level_anchor(false)
-	var overlay := get_node_or_null(SO101_ROBOT_OVERLAY_NODE) as Node3D
+	var overlay := get_node_or_null(ROBOT_OVERLAY_NODE) as Node3D
 	if anchor == null or overlay == null:
-		world_level_status = "World leveling needs WorldLevelAnchor and a registered SO-101 overlay."
+		world_level_status = "World leveling needs WorldLevelAnchor and a registered robot overlay."
 		return false
 	var registration: Dictionary = {}
 	if overlay.has_method("get_registration_status"):
 		registration = overlay.call("get_registration_status")
 	if not bool(registration.get("registered", false)):
-		world_level_status = "Calibrate the SO-101 position before leveling the merged point cloud."
+		world_level_status = "Calibrate the robot position before leveling the merged point cloud."
 		return false
 	var current_up := (overlay.global_transform.basis.orthonormalized() * Vector3.UP).normalized()
 	if not current_up.is_finite() or current_up.length_squared() < 0.99:
@@ -1087,7 +1016,7 @@ func level_world_from_robot_base(persist: bool = true) -> bool:
 func _maybe_auto_level_from_robot_registration() -> void:
 	if not auto_level_from_robot_base or not is_inside_tree():
 		return
-	var overlay := get_node_or_null(SO101_ROBOT_OVERLAY_NODE)
+	var overlay := get_node_or_null(ROBOT_OVERLAY_NODE)
 	if overlay == null or not overlay.has_method("get_registration_status"):
 		return
 	var registration: Dictionary = overlay.call("get_registration_status")
@@ -1105,7 +1034,7 @@ func _save_world_level(value: Transform3D, correction_degrees: float) -> bool:
 		_world_level_path = ProjectSettings.globalize_path(WORLD_LEVEL_PATH)
 	var payload := _world_level_transform_to_dictionary(value)
 	payload["type"] = "unified_world_level"
-	payload["source"] = "so101_base_up"
+	payload["source"] = "robot_base_up"
 	payload["correction_degrees"] = correction_degrees
 	payload["registration_saved_unix_ms"] = _last_world_level_registration_token
 	payload["saved_unix_ms"] = Time.get_unix_time_from_system() * 1000.0
@@ -1138,7 +1067,7 @@ func _load_world_level() -> bool:
 	anchor.transform = Transform3D(loaded.basis.orthonormalized(), loaded.origin)
 	var registration_token := float((parsed as Dictionary).get("registration_saved_unix_ms", 0.0))
 	_last_world_level_registration_token = registration_token if registration_token > 0.0 else -1.0
-	world_level_status = "Saved SO-101 world level loaded | correction %.2f deg" % float(
+	world_level_status = "Saved robot world level loaded | correction %.2f deg" % float(
 		(parsed as Dictionary).get("correction_degrees", 0.0)
 	)
 	return true
@@ -2667,7 +2596,7 @@ func _world_level_anchor(create: bool) -> Node3D:
 		return null
 	# Migrate scenes saved before the shared anchor existed without changing their
 	# visible transforms. The motion calibrator remains a root sibling by design.
-	for child_name in [CAMERA_CLOUDS_NAME, CALIBRATION_PAIRS_NAME, SO101_ROBOT_OVERLAY_NAME]:
+	for child_name in [CAMERA_CLOUDS_NAME, CALIBRATION_PAIRS_NAME, ROBOT_OVERLAY_NAME]:
 		var direct_child := get_node_or_null(child_name) as Node3D
 		if direct_child == null or direct_child.get_parent() != self:
 			continue
@@ -2886,7 +2815,7 @@ func _fusion_camera_rank(camera_id: String) -> int:
 	return 10
 
 func _update_robot_renderer_masks() -> void:
-	var overlay := get_node_or_null(SO101_ROBOT_OVERLAY_NODE)
+	var overlay := get_node_or_null(ROBOT_OVERLAY_NODE)
 	var world_capsules := PackedVector4Array()
 	if overlay != null and overlay.has_method("get_mask_capsules_world"):
 		world_capsules = overlay.call("get_mask_capsules_world")
@@ -2902,7 +2831,7 @@ func _update_robot_renderer_masks() -> void:
 			local_capsules.append(Vector4(local_point.x, local_point.y, local_point.z, capsule.w))
 		renderer.call("set_robot_mask_capsules", local_capsules)
 		# The overlay node is the live authority after scene initialization. An
-		# empty capsule set means either the model or scanned-arm masking is off.
+		# empty capsule set means either the model or scanned-robot masking is off.
 		renderer.call("set_robot_mask_enabled", not local_capsules.is_empty())
 
 func pick_point_from_world_ray(ray_origin: Vector3, ray_direction: Vector3) -> Dictionary:

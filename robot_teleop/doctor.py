@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from robot_teleop.config import AppConfig, REPO_ROOT
+from robot_teleop.modules import public_robot_module
 from robot_teleop.registry import create
 
 
@@ -86,9 +87,16 @@ def run_checks(config: AppConfig) -> tuple[list[Check], list[dict]]:
     try:
         robot = create("robot", config.robot.adapter, config=config.robot)
         spec = robot.launch_spec()
-        checks.append(Check("robot adapter", True, spec.name if spec else "disabled"))
+        manifest = public_robot_module(config.robot.adapter, config.robot.module_paths)
+        checks.append(
+            Check(
+                "robot module",
+                True,
+                f"{manifest['label']} ({spec.name if spec else 'motion disabled'})",
+            )
+        )
     except Exception as exc:
-        checks.append(Check("robot adapter", False, str(exc)))
+        checks.append(Check("robot module", False, str(exc)))
     return checks, devices
 
 

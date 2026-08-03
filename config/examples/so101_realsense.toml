@@ -24,14 +24,18 @@ adapters = ["realsense"]
 
 [robot]
 # Start with hardware disabled. After calibrating your own arm, copy its local
-# profile to tools/so101_arm_pair.json and switch these two values.
+# profile to robot_modules/so101/local/arm_pair.json and enable motion.
 adapter = "so101"
 enabled = false
-profile = "tools/so101_arm_pair.json"
+
+[robot.options]
+profile = "robot_modules/so101/local/arm_pair.json"
 python = ""
 dry_run = false
 hold_on_connect = true
 ignore_motor_6 = false
+# Optional V4L2 path. Blank auto-discovers the example arm's wrist camera.
+wrist_camera_device = ""
 
 [tracking]
 adapter = "browser_mediapipe"
