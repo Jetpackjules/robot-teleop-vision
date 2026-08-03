@@ -177,7 +177,7 @@ The public `web` entrypoint exports one factory:
 export async function createRobotModule(manifest) {
   return {
     renderer: null,
-    async mount({ settingsRoot, viewRoot, statusRoot, floatingRoot }) {},
+    async mount({ settingsRoot, setupRoot, viewRoot, statusRoot, floatingRoot }) {},
     bind({ sendViewSettings, updateStatus }) {},
     extendViewSettings(payload) { return payload; },
     restoreViewSettings(saved) {},
@@ -189,9 +189,24 @@ export async function createRobotModule(manifest) {
 }
 ```
 
-Mount only capability-specific controls into the supplied regions; do not create another settings sidebar. Shared stream quality, mouse navigation, head tracking, RGB behavior, background, and latency diagnostics remain in the common UI.
+Mount only capability-specific controls into the supplied regions; do not create another settings sidebar. `settingsRoot` is for routine operator controls. Put infrequent connection/safety setup in `setupRoot` and calibration/manual registration in `viewRoot`; both are shown only in **Advanced Setup**. Shared stream quality, mouse navigation, head tracking, RGB behavior, background, and latency diagnostics remain in the common UI.
 
-For an overlay, expose a renderer descriptor with `modelUrls`, colors, base/accent/calibration links, and optional mask-chain metadata. The common renderer loads the named links without knowing the robot model.
+For an overlay, expose a renderer descriptor with `modelUrls`, colors, base/accent/calibration links, and optional mask-chain metadata. The common renderer loads the named links without knowing the robot model. A module may also declare a visual workspace envelope:
+
+```javascript
+workspaceBoundary: {
+  shape: "cylinder",
+  anchorLink: "base_link",
+  innerRadius: 0.08,
+  outerRadius: 0.5,
+  minimumHeight: 0.02,
+  maximumHeight: 0.6,
+}
+```
+
+The common renderer can draw this descriptor beside its robot-neutral flat support surface. It is orientation feedback only. Deadman, joint/workspace limits, collision/contact policy, and actual stopping stay inside the robot module's hardware process. Robots may omit the descriptor or use a future module-specific renderer when a cylinder is inappropriate.
+
+The operator may expose `persistent_view_settings()` for module-owned booleans/enums that are safe to save as site defaults. Never include momentary actions such as enable, restart, calibrate, save, clear, or return-to-rest: loading a browser setup must be non-mutating.
 
 Auxiliary views are declared in `capabilities.views`, described by the operator, and served as `/robot-view/<view-id>`. Device discovery stays private and local.
 

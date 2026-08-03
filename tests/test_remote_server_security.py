@@ -391,6 +391,13 @@ def test_remote_view_settings_are_typed_and_clamped():
             "arm_freeze_overlay_on_stale_enabled": True,
             "arm_d455_visual_correction_enabled": False,
             "white_background_enabled": True,
+            "head_tracking_enabled": False,
+            "workspace_surface_enabled": True,
+            "workspace_boundary_enabled": False,
+            "workspace_surface_offset": -99,
+            "workspace_surface_size": 99,
+            "workspace_surface_opacity": 0.001,
+            "display_mode": "rgb_camera",
             "calibrate_robot_position": True,
             "focus_pick_uv": [1.5, -0.25],
             "focus_pick_sent_unix_ms": 123456,
@@ -404,6 +411,13 @@ def test_remote_view_settings_are_typed_and_clamped():
     assert result["arm_measured_feedback_enabled"] is True
     assert result["arm_target_ghost_enabled"] is False
     assert result["white_background_enabled"] is True
+    assert result["head_tracking_enabled"] is False
+    assert result["workspace_surface_enabled"] is True
+    assert result["workspace_boundary_enabled"] is False
+    assert result["workspace_surface_offset"] == -1.0
+    assert result["workspace_surface_size"] == 10.0
+    assert result["workspace_surface_opacity"] == 0.01
+    assert result["display_mode"] == "rgb_camera"
     assert result["focus_pick_uv"] == [1.0, 0.0]
     assert result["focus_pick_sent_unix_ms"] == 123456
     with pytest.raises(ValueError, match="boolean"):
@@ -412,3 +426,81 @@ def test_remote_view_settings_are_typed_and_clamped():
         handler.validate_view_settings({"robot_overlay_style": "wireframe"})
     with pytest.raises(ValueError, match="two coordinates"):
         handler.validate_view_settings({"focus_pick_uv": [0.5]})
+
+
+def test_site_settings_persist_only_stable_setup_and_clamp_navigation():
+    handler = bare_handler()
+    result = handler.validate_site_settings(
+        {
+            "type": "view_settings",
+            "settings_version": 10,
+            "display_mode": "point_cloud",
+            "head_tracking_enabled": False,
+            "workspace_surface_offset": 0.025,
+            "arm_idle_return_enabled": True,
+            "calibrate_robot_position": True,
+            "manual_claw_calibration_save": True,
+            "default_navigation": {
+                "orbit_yaw": 900,
+                "orbit_pitch": -900,
+                "dolly": 99,
+                "pan": [99, -99, 1.5],
+            },
+        }
+    )
+    assert result["settings_version"] == 10
+    assert result["display_mode"] == "point_cloud"
+    assert result["head_tracking_enabled"] is False
+    assert result["workspace_surface_offset"] == 0.025
+    assert result["arm_idle_return_enabled"] is True
+    assert "calibrate_robot_position" not in result
+    assert "manual_claw_calibration_save" not in result
+    assert result["default_navigation"] == {
+        "orbit_yaw": 180.0,
+        "orbit_pitch": -80.0,
+        "dolly": 8.0,
+        "pan": [20.0, -20.0, 1.5],
+    }
+    with pytest.raises(ValueError, match="settings_version"):
+        handler.validate_site_settings({"settings_version": "ten"})
+
+
+def test_site_settings_file_round_trip_uses_explicit_site_path(tmp_path):
+    settings_path = tmp_path / "site" / "operator.json"
+    server = LanRemoteServer(
+        ("127.0.0.1", 0),
+        LanRemoteHandler,
+        tmp_path,
+        "127.0.0.1",
+        4247,
+        "127.0.0.1",
+        8780,
+        "window",
+        robot_module="so101",
+        robot_status_port=0,
+        robot_calibration_status_port=0,
+        site_settings_path=settings_path,
+    )
+    try:
+        assert server.load_site_settings() == {}
+        server.save_site_settings({"settings_version": 10, "fov": 86.0})
+        assert server.load_site_settings() == {
+            "settings_version": 10,
+            "fov": 86.0,
+        }
+        assert settings_path.is_file()
+    finally:
+        server.server_close()
+
+
+def test_controller_keeps_daily_controls_separate_from_advanced_setup():
+    root = Path(__file__).resolve().parents[1]
+    page = (root / "web" / "controller.html").read_text(encoding="utf-8")
+    assert 'id="display-mode"' in page
+    assert '<option value="rgb_camera">RGB camera</option>' in page
+    assert 'id="open-advanced"' in page
+    assert 'id="advanced-setup"' in page
+    assert 'id="robot-settings-root"' in page
+    assert 'id="robot-setup-root"' in page
+    assert page.index('id="robot-settings-root"') < page.index('id="advanced-setup"')
+    assert page.index('id="robot-setup-root"') > page.index('id="advanced-setup"')

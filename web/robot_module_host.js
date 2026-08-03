@@ -35,6 +35,7 @@ function validateManifest(value) {
 function mountPoints() {
   return {
     settingsRoot: document.getElementById("robot-settings-root"),
+    setupRoot: document.getElementById("robot-setup-root"),
     viewRoot: document.getElementById("robot-view-root"),
     statusRoot: document.getElementById("robot-status-root"),
     floatingRoot: document.getElementById("robot-floating-root"),

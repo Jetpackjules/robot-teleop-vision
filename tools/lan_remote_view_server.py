@@ -38,6 +38,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from robot_teleop.modules import public_robot_module
 from robot_teleop.operator import RobotCommandError, load_robot_operator
+from robot_teleop.state import godot_app_userdata_root
 
 
 h264.MAX_BITRATE = 24_000_000
@@ -55,6 +56,38 @@ MAX_REMEMBERED_RGBD_CLIENTS = 1024
 MAX_ROBOT_TRANSPORT_AGE_MS = 250
 ROBOT_CLOCK_REBASE_SAMPLE_COUNT = 4
 ROBOT_CLOCK_REBASE_RANGE_MS = 40
+MAX_SITE_SETTINGS_BYTES = 64 * 1024
+CORE_PERSISTENT_VIEW_SETTINGS = frozenset(
+    {
+        "inspect_enabled",
+        "head_tracking_enabled",
+        "dolly_enabled",
+        "yaw_gain",
+        "pitch_gain",
+        "max_yaw",
+        "max_pitch",
+        "focus_distance",
+        "orbit_distance",
+        "focus_vertical_offset",
+        "orbit_pitch_offset",
+        "dolly_gain",
+        "min_distance",
+        "max_distance",
+        "fov",
+        "white_background_enabled",
+        "persistent_temporal_reference_enabled",
+        "full_rgb_frame_updates_enabled",
+        "workspace_surface_enabled",
+        "workspace_boundary_enabled",
+        "workspace_surface_offset",
+        "workspace_surface_size",
+        "workspace_surface_opacity",
+        "robot_overlay_enabled",
+        "robot_overlay_mask_scanned_robot",
+        "robot_overlay_style",
+        "display_mode",
+    }
+)
 
 TEMPORAL_DEPTH_MAGIC = b"DTL1"
 TEMPORAL_DEPTH_HEADER = struct.Struct("<4sIHHHI")
@@ -1714,6 +1747,7 @@ class LanRemoteServer(ThreadingHTTPServer):
         robot_calibration_status_port: int = 4251,
         robot_view_devices: dict[str, str] | None = None,
         robot_module: str = "",
+        site_settings_path: Path | None = None,
     ):
         super().__init__(address, handler)
         self.root = root
@@ -1730,6 +1764,12 @@ class LanRemoteServer(ThreadingHTTPServer):
         )
         self.robot_operator = load_robot_operator(self.robot_module, module_paths)
         self.robot_manifest = public_robot_module(self.robot_module, module_paths)
+        self.site_settings_path = site_settings_path or (
+            godot_app_userdata_root()
+            / "Robot Teleop Vision"
+            / "operator_site_settings.json"
+        )
+        self.site_settings_lock = threading.Lock()
         self.robot_command_port = int(
             robot_command_port
             if robot_command_port is not None
@@ -1835,6 +1875,22 @@ class LanRemoteServer(ThreadingHTTPServer):
         self.async_loop = asyncio.new_event_loop()
         self.async_thread = threading.Thread(target=self._run_async_loop, daemon=True)
         self.async_thread.start()
+
+    def load_site_settings(self) -> dict:
+        with self.site_settings_lock:
+            try:
+                value = json.loads(self.site_settings_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, OSError, json.JSONDecodeError):
+                return {}
+        return value if isinstance(value, dict) else {}
+
+    def save_site_settings(self, value: dict) -> None:
+        encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
+        with self.site_settings_lock:
+            self.site_settings_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.site_settings_path.with_suffix(".tmp")
+            temporary.write_text(encoded, encoding="utf-8")
+            temporary.replace(self.site_settings_path)
 
     def _run_async_loop(self) -> None:
         asyncio.set_event_loop(self.async_loop)
@@ -2223,6 +2279,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/v1/robot-module":
             self.serve_json(self.server.robot_manifest)
             return
+        if parsed.path == "/api/v1/site-settings":
+            self.serve_json(self.server.load_site_settings())
+            return
         if parsed.path.startswith("/robot-view/"):
             self.stream_robot_view(parsed.path.removeprefix("/robot-view/"), parsed.query)
             return
@@ -2358,7 +2417,31 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path in ("/webrtc-offer", "/frame-stream/webrtc-offer", "/api/v1/webrtc-offer"):
             self.handle_webrtc_offer()
             return
+        if parsed.path == "/api/v1/site-settings":
+            self.handle_site_settings_save()
+            return
         self.send_error(404, "Not found")
+
+    def handle_site_settings_save(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_error(400, "Invalid site settings length")
+            return
+        if length <= 0 or length > MAX_SITE_SETTINGS_BYTES:
+            self.send_error(413, "Site settings payload is empty or too large")
+            return
+        if not self.headers.get("Content-Type", "").startswith("application/json"):
+            self.send_error(415, "Site settings must use application/json")
+            return
+        try:
+            raw = json.loads(self.rfile.read(length).decode("utf-8"))
+            settings = self.validate_site_settings(raw)
+            self.server.save_site_settings(settings)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, OSError) as exc:
+            self.send_error(400, str(exc)[:180])
+            return
+        self.serve_json(settings)
 
     def auth_required(self) -> bool:
         return bool(getattr(self.server, "password", ""))
@@ -3694,6 +3777,10 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             "min_distance": (0.1, 8.0),
             "max_distance": (0.2, 20.0),
             "fov": (25.0, 110.0),
+            "orbit_pitch_offset": (-80.0, 80.0),
+            "workspace_surface_offset": (-1.0, 1.0),
+            "workspace_surface_size": (0.2, 10.0),
+            "workspace_surface_opacity": (0.01, 0.8),
         }
         for key, value in self.server.robot_operator.numeric_view_settings().items():
             bounds.setdefault(key, value)
@@ -3712,6 +3799,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             "robot_overlay_mask_scanned_robot",
             "recenter",
             "white_background_enabled",
+            "head_tracking_enabled",
+            "persistent_temporal_reference_enabled",
+            "full_rgb_frame_updates_enabled",
+            "workspace_surface_enabled",
+            "workspace_boundary_enabled",
         }
         boolean_settings.update(self.server.robot_operator.boolean_view_settings())
         for key in boolean_settings:
@@ -3724,6 +3816,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if not isinstance(style, str) or style not in ("alignment", "solid"):
                 raise ValueError("robot_overlay_style must be alignment or solid")
             packet["robot_overlay_style"] = style
+        if "display_mode" in data:
+            display_mode = data["display_mode"]
+            if not isinstance(display_mode, str) or display_mode not in ("point_cloud", "rgb_camera"):
+                raise ValueError("display_mode must be point_cloud or rgb_camera")
+            packet["display_mode"] = display_mode
         for key, allowed in self.server.robot_operator.enum_view_settings().items():
             if key not in data:
                 continue
@@ -3746,6 +3843,53 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if isinstance(sent_unix_ms, bool) or not isinstance(sent_unix_ms, (int, float)) or not np.isfinite(sent_unix_ms):
                 raise ValueError("focus_pick_sent_unix_ms must be finite")
             packet["focus_pick_sent_unix_ms"] = int(sent_unix_ms)
+        return packet
+
+    def validate_site_settings(self, data: object) -> dict:
+        if not isinstance(data, dict):
+            raise ValueError("site settings must be an object")
+        validated = self.validate_view_settings(data)
+        allowed = CORE_PERSISTENT_VIEW_SETTINGS | frozenset(
+            self.server.robot_operator.persistent_view_settings()
+        )
+        packet = {
+            key: value
+            for key, value in validated.items()
+            if key in allowed
+        }
+        settings_version = data.get("settings_version", 1)
+        if (
+            isinstance(settings_version, bool)
+            or not isinstance(settings_version, (int, float))
+            or not np.isfinite(settings_version)
+        ):
+            raise ValueError("settings_version must be finite")
+        packet["settings_version"] = max(1, min(1000, int(settings_version)))
+        navigation = data.get("default_navigation")
+        if navigation is not None:
+            if not isinstance(navigation, dict):
+                raise ValueError("default_navigation must be an object")
+
+            def finite_navigation(key: str, minimum: float, maximum: float) -> float:
+                value = navigation.get(key, 0)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value):
+                    raise ValueError(f"default_navigation {key} must be finite")
+                return max(minimum, min(maximum, float(value)))
+
+            pan = navigation.get("pan", [0, 0, 0])
+            if not isinstance(pan, list) or len(pan) != 3:
+                raise ValueError("default_navigation pan must contain three coordinates")
+            safe_pan = []
+            for coordinate in pan:
+                if isinstance(coordinate, bool) or not isinstance(coordinate, (int, float)) or not np.isfinite(coordinate):
+                    raise ValueError("default_navigation pan must be finite")
+                safe_pan.append(max(-20.0, min(20.0, float(coordinate))))
+            packet["default_navigation"] = {
+                "orbit_yaw": finite_navigation("orbit_yaw", -180.0, 180.0),
+                "orbit_pitch": finite_navigation("orbit_pitch", -80.0, 80.0),
+                "dolly": finite_navigation("dolly", -8.0, 8.0),
+                "pan": safe_pan,
+            }
         return packet
 
     def read_exact(self, size: int) -> bytes | None:

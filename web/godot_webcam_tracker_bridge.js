@@ -904,6 +904,31 @@ window.startGodotWebcamTracker = async function startGodotWebcamTracker(options 
   return true;
 };
 
+window.stopGodotWebcamTracker = function stopGodotWebcamTracker() {
+  state.running = false;
+  if (state.trackingTask && typeof state.trackingTask.stop === "function") {
+    state.trackingTask.stop();
+  }
+  state.trackingTask = null;
+  if (state.trackingRaf) {
+    window.cancelAnimationFrame(state.trackingRaf);
+    state.trackingRaf = 0;
+  }
+  if (state.video?.srcObject) {
+    for (const track of state.video.srcObject.getTracks()) track.stop();
+    state.video.srcObject = null;
+    state.video.pause();
+  }
+  disconnectRemoteHeadTracking();
+  state.lastPose = null;
+  state.lastPoseMs = 0;
+  state.neutral = null;
+  emit(false, null, "head tracking disabled");
+  updatePreview();
+  updateFaceOverlay();
+  return true;
+};
+
 window.listGodotWebcamTrackerDevices = listVideoDevices;
 
 window.connectGodotRemoteHeadTracking = connectRemoteHeadTracking;

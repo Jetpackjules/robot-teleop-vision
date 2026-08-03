@@ -2,7 +2,7 @@
 
 A reusable RealSense-to-browser teleoperation stack with a Godot 3D runtime. The shared application discovers one or more RealSense cameras, streams an optimized RGB-D point cloud, arbitrates a single operator, and loads an optional robot module. Robot geometry, controls, hardware transport, calibration, and extra camera views live outside the core.
 
-The browser is the single operator interface. The Godot dock is intentionally limited to setup, diagnostics, launch, and safe shutdown. A clean clone starts in vision-only mode, with physical motion disabled.
+The browser is the single operator interface. Its compact **Controller** panel contains the selected view and daily robot controls; **Advanced Setup** contains installation defaults, calibration, diagnostics, and tuning. The Godot dock is intentionally limited to setup, diagnostics, launch, and safe shutdown. A clean clone starts in vision-only mode, with physical motion disabled.
 
 ## First run
 
@@ -11,7 +11,7 @@ Requirements:
 - Python 3.10–3.12
 - Godot 4.6 or newer
 - Intel RealSense SDK/runtime for local RealSense capture
-- `cloudflared` only when a free temporary public URL is wanted
+- `cloudflared` for the default free temporary public URL (or explicitly select local-only mode)
 
 ```bash
 git clone https://github.com/Jetpackjules/robot-teleop-vision.git
@@ -83,7 +83,11 @@ For an explicitly local-only deployment, set `stack.public_mode = "off"`.
 - Independent meshes by default, with optional multi-camera alignment and color matching.
 - Latest-only capture and cancellable latest-frame delivery; slow clients do not build a stale queue.
 - Parallel RGB/depth encoding, persistent references, absolute temporal tile updates, plane-aware depth stabilization, and recoverable keyframes.
-- Full-frame RGB fallback, temporal-update toggles, white background, orbit/pan/zoom, optional browser head tracking, and latency graphing.
+- A selectable live 3D point cloud or regular 2D RGB camera view, with full-frame RGB compatibility fallback.
+- Mouse orbit/pan/zoom that works independently of optional browser head tracking; disabling tracking releases the webcam.
+- Installation-wide camera-start defaults and stable view settings shared by new browsers, without persisting mutating actions.
+- A flat support-surface guide plus an optional module-declared workspace envelope. Motor stopping remains robot-specific and hardware-authoritative.
+- Temporal-update toggles, white background, and latency graphing.
 - Dynamically loaded robot overlay, occlusion, auxiliary views, controls, telemetry, and calibration UI.
 
 ## Repository map
@@ -99,7 +103,7 @@ For an explicitly local-only deployment, set `stack.public_mode = "off"`.
 | `config/examples/` | Safe hardware-disabled starting configurations |
 | `tests/` | Hardware-free protocol, module-boundary, safety, calibration, and codec tests |
 
-Read [Architecture](docs/ARCHITECTURE.md), [Robot modules](docs/ROBOT_MODULES.md), [Safety](docs/SAFETY.md), [Calibration](docs/CALIBRATION.md), and [Adapters](docs/ADAPTERS.md) before deploying a new robot or site.
+Read [Windows first-run](docs/WINDOWS.md), [Architecture](docs/ARCHITECTURE.md), [Robot modules](docs/ROBOT_MODULES.md), [Safety](docs/SAFETY.md), [Calibration](docs/CALIBRATION.md), and [Adapters](docs/ADAPTERS.md) before deploying a new robot or site.
 
 ## Verify a change
 

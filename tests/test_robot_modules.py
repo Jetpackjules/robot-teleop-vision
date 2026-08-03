@@ -12,7 +12,7 @@ from robot_teleop.modules import (
     public_robot_module,
     robot_module_entrypoint,
 )
-from robot_teleop.operator import GenericRobotOperator, RobotCommandError
+from robot_teleop.operator import GenericRobotOperator, RobotCommandError, load_robot_operator
 from robot_teleop.protocol import PROTOCOL, TeleopCommand, TeleopProtocolError
 
 
@@ -199,3 +199,12 @@ def test_shared_runtime_contains_no_so101_wire_protocol_tokens():
                 if token in text:
                     violations.append(f"{path.relative_to(root)}: {token}")
     assert violations == []
+
+
+def test_so101_installation_defaults_never_include_mutating_actions():
+    operator = load_robot_operator("so101")
+    persistent = set(operator.persistent_view_settings())
+    assert "arm_idle_return_enabled" in persistent
+    assert "arm_following_error_safety_enabled" in persistent
+    assert "calibrate_robot_position" not in persistent
+    assert "manual_claw_calibration_save" not in persistent
