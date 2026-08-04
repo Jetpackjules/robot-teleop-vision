@@ -11,19 +11,19 @@ import sys
 import threading
 import time
 import urllib.request
-from pathlib import Path
 from urllib.parse import urlparse
 
-from robot_teleop.config import AppConfig, REPO_ROOT
+from robot_teleop.config import REPO_ROOT, AppConfig
 from robot_teleop.doctor import find_cloudflared, find_godot
 from robot_teleop.interfaces import LaunchSpec
+from robot_teleop.journal import JournalSink
 from robot_teleop.modules import public_robot_module
 from robot_teleop.registry import create
 
 
 RUN_DIR = REPO_ROOT / ".teleop"
 STATE_PATH = RUN_DIR / "run.json"
-QUICK_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.I)
+QUICK_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.IGNORECASE)
 
 
 def operator_ui_response_ready(response_url: str, status: int, body: bytes) -> bool:
@@ -77,6 +77,12 @@ class Supervisor:
             config.robot.adapter,
             config.robot.module_paths,
         )
+        self.journal = JournalSink()
+
+    def _log(self, message: str, *, component: str = "supervisor", priority: int = 6) -> None:
+        rendered = f"[{component}] {message}" if component != "supervisor" else message
+        print(rendered, flush=True, file=sys.stderr if priority <= 3 else sys.stdout)
+        self.journal.emit(rendered, priority=priority, component=component)
 
     def _spawn(self, spec: LaunchSpec) -> subprocess.Popen:
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
@@ -97,7 +103,7 @@ class Supervisor:
     def _relay_output(self, name: str, process: subprocess.Popen) -> None:
         assert process.stdout is not None
         for line in process.stdout:
-            print(f"[{name}] {line}", end="", flush=True)
+            self._log(line.rstrip("\r\n"), component=name)
             match = QUICK_URL_PATTERN.search(line)
             if match and not self.public_url and not self._pending_public_url:
                 self._pending_public_url = f"{match.group(0)}/controller.html"
@@ -148,12 +154,15 @@ class Supervisor:
                         self.public_url = candidate_url
                         self._pending_public_url = ""
                         self._publish_state("running")
-                        print(f"Verified public operator URL: {candidate_url}", flush=True)
+                        self._log(f"Verified public operator URL: {candidate_url}")
                         return
             except Exception:
                 time.sleep(0.5)
         self._pending_public_url = ""
-        print(f"WARNING: public URL did not pass its health check: {candidate_url}", flush=True)
+        self._log(
+            f"WARNING: public URL did not pass its health check: {candidate_url}",
+            priority=4,
+        )
 
     def start(self) -> None:
         for port, label in (
@@ -234,7 +243,7 @@ class Supervisor:
                 )
             )
         self._publish_state("running")
-        print(f"Operator UI verified: {self.local_url}", flush=True)
+        self._log(f"Operator UI verified: {self.local_url}")
 
     def run(self) -> int:
         def stop_handler(_signum, _frame):
@@ -253,7 +262,7 @@ class Supervisor:
             return 0
         except Exception as exc:
             self._publish_state("failed", str(exc))
-            print(f"robot-teleop: {exc}", file=sys.stderr)
+            self._log(f"robot-teleop: {exc}", priority=3)
             return 1
         finally:
             self.stop()
@@ -264,7 +273,7 @@ class Supervisor:
             self.robot.hold()
             time.sleep(0.1)
         except Exception as exc:
-            print(f"WARNING: robot Hold before shutdown failed: {exc}", file=sys.stderr)
+            self._log(f"WARNING: robot Hold before shutdown failed: {exc}", priority=4)
         for _name, process in reversed(self.processes):
             if process.poll() is None:
                 process.terminate()
@@ -277,6 +286,7 @@ class Supervisor:
             except subprocess.TimeoutExpired:
                 process.kill()
         self._publish_state("stopped")
+        self.journal.close()
 
 
 def stop_running_supervisor() -> bool:

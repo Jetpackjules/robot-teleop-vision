@@ -10,9 +10,10 @@ import webbrowser
 from dataclasses import asdict
 from pathlib import Path
 
-import robot_teleop.cameras  # noqa: F401
-import robot_teleop.robots  # noqa: F401
+import robot_teleop.cameras
+import robot_teleop.robots
 from robot_teleop.config import DEFAULT_CONFIG, load_config
+from robot_teleop.diagnostics import create_support_bundle
 from robot_teleop.doctor import format_report, run_checks
 from robot_teleop.modules import load_robot_modules
 from robot_teleop.registry import create
@@ -61,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("stop", help="safely stop the supervised runtime")
     sub.add_parser("status", help="show launcher state")
     sub.add_parser("open", help="open the active operator UI")
+    support = sub.add_parser(
+        "support-bundle",
+        help="create a sanitized diagnostic zip that is safe to share",
+    )
+    support.add_argument("--output", type=Path, help="destination zip path")
+    support.add_argument("--journal-lines", type=int, default=1000)
     migrate = sub.add_parser("migrate-state", help="copy durable calibration from an older Godot project")
     migrate.add_argument("--from-project", required=True)
     migrate.add_argument("--force", action="store_true")
@@ -132,6 +139,15 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(f"{item['adapter']}: {item['label']}" for item in discovered))
         else:
             print("No configured camera devices detected.")
+        return 0
+    if args.command == "support-bundle":
+        bundle = create_support_bundle(
+            config,
+            args.output,
+            journal_lines=args.journal_lines,
+        )
+        print(f"Created sanitized support bundle: {bundle}")
+        print("Review it before sharing; no raw config, profiles, calibration, or imagery are included.")
         return 0
     if args.command == "start":
         return Supervisor(config).run()

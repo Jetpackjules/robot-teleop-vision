@@ -36,6 +36,8 @@ You can instead import this repository's `project.godot` in Godot and use the **
 
 `start` remains in the foreground and supervises every child process. Stop it with `Ctrl+C` or `robot-teleop stop`; the selected robot module's idempotent Hold action runs before shutdown.
 
+For an unattended Linux host reached over SSH, follow [Headless Linux and remote debugging](docs/HEADLESS_LINUX.md). On systemd-based Linux, supervisor and child output is automatically mirrored to `journald`. After reproducing a problem, `robot-teleop support-bundle` creates a redacted diagnostic zip without local credentials, profiles, calibration payloads, or camera imagery.
+
 ## Robot modules
 
 The base application contains no SO-101 commands, meshes, calibration solvers, or UI. Each integration is a self-contained directory:
@@ -105,7 +107,7 @@ For camera setup, select an auto-discovered RealSense camera node in Godot. Rout
 | `config/examples/` | Safe hardware-disabled starting configurations |
 | `tests/` | Hardware-free protocol, module-boundary, safety, calibration, and codec tests |
 
-Read [Windows first-run](docs/WINDOWS.md), [Architecture](docs/ARCHITECTURE.md), [Robot modules](docs/ROBOT_MODULES.md), [Safety](docs/SAFETY.md), [Calibration](docs/CALIBRATION.md), and [Adapters](docs/ADAPTERS.md) before deploying a new robot or site.
+Read [Windows first-run](docs/WINDOWS.md), [Headless Linux](docs/HEADLESS_LINUX.md), [Architecture](docs/ARCHITECTURE.md), [Robot modules](docs/ROBOT_MODULES.md), [Safety](docs/SAFETY.md), [Calibration](docs/CALIBRATION.md), and [Adapters](docs/ADAPTERS.md) before deploying a new robot or site.
 
 ## Verify a change
 
