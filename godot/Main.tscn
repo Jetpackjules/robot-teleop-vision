@@ -16,7 +16,6 @@ show_debug_panel = false
 max_depth_m = 1.5
 render_mode = "independent_mesh"
 point_pixel_size = 1.5
-oakd_enabled = false
 lock_realsense_to_saved_alignment = false
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
@@ -36,12 +35,6 @@ fov = 60.0
 [node name="WorldLevelAnchor" type="Node3D" parent="."]
 
 [node name="CameraClouds" type="Node3D" parent="WorldLevelAnchor"]
-
-[node name="CalibrationPairs" type="Node3D" parent="WorldLevelAnchor"]
-
-[node name="Reference" type="Node3D" parent="WorldLevelAnchor/CalibrationPairs"]
-
-[node name="Target" type="Node3D" parent="WorldLevelAnchor/CalibrationPairs"]
 
 [node name="RobotModuleHost" type="Node" parent="."]
 script = ExtResource("2_modules")

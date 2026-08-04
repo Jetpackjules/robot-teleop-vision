@@ -108,7 +108,7 @@ const DORMANT_OAKD_PROPERTIES := [
 @export_group("Workflow")
 ## UDP control port used by launch_web_stack.py. Performance impact: none unless changed to the wrong port.
 @export var tracker_control_port: int = 4244
-## Starts or stops both point-cloud streams for this editor view. Performance impact: high when enabled because both cameras publish live SHM frames.
+## Starts or stops all configured camera streams for this editor view. Performance impact: high when enabled because each camera publishes live frames.
 @export var editor_stream_enabled: bool = false:
 	set(value):
 		if editor_stream_enabled == value:
@@ -455,7 +455,7 @@ const DORMANT_OAKD_PROPERTIES := [
 @export_subgroup("")
 
 ## Enables the OAK-D camera in this view. Performance impact: high when on, especially with FastFoundation depth.
-@export var oakd_enabled: bool = true:
+@export_storage var oakd_enabled: bool = false:
 	set(value):
 		oakd_enabled = value
 		_send_camera_stream_command(CAMERA_OAKD, _streams_enabled() and value)
@@ -1633,10 +1633,11 @@ func _read_runtime_stream_owner_active() -> bool:
 	var file := FileAccess.open(_runtime_stream_owner_path, FileAccess.READ)
 	if file == null:
 		return false
-	var parsed = JSON.parse_string(file.get_as_text())
-	if not (parsed is Dictionary):
-		return false
-	var owner := parsed as Dictionary
+	var owner := _parse_json_dictionary_quietly(file.get_as_text())
+	if owner.is_empty():
+		# The runtime refreshes this heartbeat frequently. Preserve the last known
+		# state if a reader ever catches an interrupted or externally edited file.
+		return _runtime_stream_owner_blocks_editor_cached
 	if str(owner.get("owner", "")) != "runtime":
 		return false
 	var timestamp_msec := int(owner.get("timestamp_msec", 0))
@@ -1652,7 +1653,8 @@ func _write_runtime_stream_owner(force: bool) -> void:
 	_last_runtime_owner_write_msec = now_msec
 	if _runtime_stream_owner_path.is_empty():
 		_runtime_stream_owner_path = ProjectSettings.globalize_path(RUNTIME_STREAM_OWNER_PATH)
-	var file := FileAccess.open(_runtime_stream_owner_path, FileAccess.WRITE)
+	var temporary_path := "%s.%d.tmp" % [_runtime_stream_owner_path, OS.get_process_id()]
+	var file := FileAccess.open(temporary_path, FileAccess.WRITE)
 	if file == null:
 		return
 	file.store_string(JSON.stringify({
@@ -1661,6 +1663,17 @@ func _write_runtime_stream_owner(force: bool) -> void:
 		"timestamp_msec": int(Time.get_unix_time_from_system() * 1000.0),
 		"scene": scene_file_path,
 	}))
+	file.flush()
+	file.close()
+	var rename_error := DirAccess.rename_absolute(temporary_path, _runtime_stream_owner_path)
+	if rename_error == OK:
+		return
+	# Windows cannot always replace an existing file with rename. The complete
+	# temporary file still keeps the non-atomic fallback window extremely small.
+	if FileAccess.file_exists(_runtime_stream_owner_path):
+		DirAccess.remove_absolute(_runtime_stream_owner_path)
+	if DirAccess.rename_absolute(temporary_path, _runtime_stream_owner_path) != OK:
+		DirAccess.remove_absolute(temporary_path)
 
 func _clear_runtime_stream_owner() -> void:
 	if _runtime_stream_owner_path.is_empty():
@@ -1668,11 +1681,20 @@ func _clear_runtime_stream_owner() -> void:
 	if _runtime_stream_owner_path.is_empty() or not FileAccess.file_exists(_runtime_stream_owner_path):
 		return
 	var file := FileAccess.open(_runtime_stream_owner_path, FileAccess.READ)
-	if file != null:
-		var parsed = JSON.parse_string(file.get_as_text())
-		if parsed is Dictionary and int((parsed as Dictionary).get("pid", -1)) != OS.get_process_id():
-			return
+	if file == null:
+		return
+	var owner := _parse_json_dictionary_quietly(file.get_as_text())
+	if owner.is_empty() or int(owner.get("pid", -1)) != OS.get_process_id():
+		return
 	DirAccess.remove_absolute(_runtime_stream_owner_path)
+
+func _parse_json_dictionary_quietly(text: String) -> Dictionary:
+	if text.strip_edges().is_empty():
+		return {}
+	var parser := JSON.new()
+	if parser.parse(text) != OK or not (parser.data is Dictionary):
+		return {}
+	return parser.data as Dictionary
 
 func _camera_stride(camera_id: String) -> int:
 	if _is_realsense_camera(camera_id):
@@ -2613,7 +2635,6 @@ func _ensure_scene_anchors() -> void:
 	_remove_empty_dormant_oakd_anchor()
 	for camera_id in _known_camera_ids():
 		_camera_anchor(camera_id, true)
-	_calibration_pairs_node(true)
 	_debug_panel_anchor(true)
 
 func _remove_empty_dormant_oakd_anchor() -> void:

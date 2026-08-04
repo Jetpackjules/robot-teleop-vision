@@ -17,7 +17,10 @@ extends Node3D
 	set(value):
 		stream_profile = value if value in ["viewer30", "fast60", "highres30"] else "fast60"
 		_notify_settings_changed()
-@export_enum("sdk_depth", "fast_foundation_native") var depth_source: String = "sdk_depth":
+# Retained for saved-scene compatibility. The repository does not distribute
+# the third-party model/runtime required by the experimental backend, so the
+# normal setup surface offers the fully bundled Intel SDK depth path only.
+@export_storage var depth_source: String = "sdk_depth":
 	set(value):
 		depth_source = value if value in ["sdk_depth", "fast_foundation_native"] else "sdk_depth"
 		_notify_settings_changed()
@@ -180,21 +183,19 @@ extends Node3D
 		hole_filling = clampi(value, 0, 2)
 		_notify_settings_changed()
 
-@export_subgroup("FastFoundation Depth")
-## These settings apply only when Capture > Depth Source is fast_foundation_native.
-@export_enum("onnx_cuda", "onnx_trt", "pytorch", "trt_engine") var fast_backend: String = "onnx_cuda":
+@export_storage var fast_backend: String = "onnx_cuda":
 	set(value):
 		fast_backend = value if value in ["onnx_cuda", "onnx_trt", "pytorch", "trt_engine"] else "onnx_cuda"
 		_notify_settings_changed()
-@export_enum("fast_192x384_i2", "rt_256x512_i2", "full_320x736_i4") var fast_profile: String = "fast_192x384_i2":
+@export_storage var fast_profile: String = "fast_192x384_i2":
 	set(value):
 		fast_profile = value if value in ["fast_192x384_i2", "rt_256x512_i2", "full_320x736_i4"] else "fast_192x384_i2"
 		_notify_settings_changed()
-@export_range(1, 32, 1) var fast_iters: int = 4:
+@export_storage var fast_iters: int = 4:
 	set(value):
 		fast_iters = clampi(value, 1, 32)
 		_notify_settings_changed()
-@export_range(0.25, 1.0, 0.05) var fast_scale: float = 0.5:
+@export_storage var fast_scale: float = 0.5:
 	set(value):
 		fast_scale = clampf(value, 0.25, 1.0)
 		_notify_settings_changed()
