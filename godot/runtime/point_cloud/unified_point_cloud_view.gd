@@ -1419,7 +1419,9 @@ func _known_camera_ids() -> Array[String]:
 	for camera_id in _camera_nodes.keys():
 		if camera_id is String and camera_id not in ids:
 			ids.append(camera_id)
-	if CAMERA_OAKD not in ids:
+	# OAK-D support is dormant. Do not manufacture an editor placeholder for
+	# hardware that is neither configured nor running.
+	if oakd_enabled and CAMERA_OAKD not in ids:
 		ids.append(CAMERA_OAKD)
 	return ids
 
@@ -2608,10 +2610,21 @@ func _update_realsense_cloud_alignment_process() -> void:
 func _ensure_scene_anchors() -> void:
 	_world_level_anchor(true)
 	_camera_clouds_node(true)
+	_remove_empty_dormant_oakd_anchor()
 	for camera_id in _known_camera_ids():
 		_camera_anchor(camera_id, true)
 	_calibration_pairs_node(true)
 	_debug_panel_anchor(true)
+
+func _remove_empty_dormant_oakd_anchor() -> void:
+	if oakd_enabled:
+		return
+	var clouds := _camera_clouds_node(false)
+	if clouds == null:
+		return
+	var anchor := clouds.get_node_or_null(_camera_anchor_name(CAMERA_OAKD)) as Node3D
+	if anchor != null and anchor.get_child_count() == 0:
+		anchor.queue_free()
 
 func _world_level_anchor(create: bool) -> Node3D:
 	var anchor := get_node_or_null(WORLD_LEVEL_ANCHOR_NAME) as Node3D

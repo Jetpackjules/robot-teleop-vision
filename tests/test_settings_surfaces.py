@@ -18,6 +18,8 @@ def test_dormant_oakd_and_launcher_wiring_are_not_inspector_controls():
     assert '"tracker_control_port"' in view
     assert '"sync_fps_to_slowest"' in view
     assert '"camera_diagnostic_view"' in view
+    assert "if oakd_enabled and CAMERA_OAKD not in ids:" in view
+    assert "_remove_empty_dormant_oakd_anchor()" in view
 
 
 def test_realsense_camera_exposes_only_wired_expert_depth_controls():
