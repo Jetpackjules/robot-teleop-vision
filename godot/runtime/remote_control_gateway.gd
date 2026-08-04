@@ -3,7 +3,7 @@ extends Node
 ## Narrow bridge between the authenticated local web server and Godot. Camera
 ## navigation and rendering stay client-side; robot-owned settings are passed
 ## opaquely to the selected module.
-@export_range(1024, 65535, 1) var listen_port: int = 4247
+@export_storage var listen_port: int = 4247
 
 var _udp := PacketPeerUDP.new()
 var _last_tracking_sent_unix_ms := 0.0

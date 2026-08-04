@@ -711,14 +711,7 @@ String RealSenseDirectFrameSource::resolve_fast_foundation_model_path() const {
     if (env_path && env_path[0]) {
         return String(env_path);
     }
-    const String base = "experiments/oakd_head_tracker_demo/external/Fast-FoundationStereo/weights/onnx/20_30_48/";
-    if (fast_foundation_profile == "full_320x736_i4") {
-        return base + String("320x736/20_30_48_iters_4_res_320x736.onnx");
-    }
-    if (fast_foundation_profile == "rt_256x512_i2") {
-        return base + String("256x512/20_30_48_iters_2_res_256x512.onnx");
-    }
-    return base + String("192x384/20_30_48_iters_2_res_192x384.onnx");
+    return String();
 }
 
 void RealSenseDirectFrameSource::set_post_processing_enabled(bool p_enabled) { post_processing_enabled = p_enabled; }

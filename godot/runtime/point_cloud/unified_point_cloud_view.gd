@@ -69,11 +69,46 @@ const LEGACY_CALIBRATION_PROPERTIES := [
 	"big_aruco_marker_ids",
 	"big_aruco_auto_depth_refine",
 ]
+const CORE_DEVELOPER_PROPERTIES := [
+	# Launcher-owned wiring and a legacy one-off OAK-D alignment poller. These
+	# remain serialized for compatibility but are not setup controls.
+	"tracker_control_port",
+	"auto_apply_alignment_file",
+	# Direct, serial-keyed capture owns timing independently. This setting only
+	# reaches the retired publisher command path.
+	"sync_fps_to_slowest",
+	# Per-camera Enabled controls are model-neutral and replace this old
+	# D455/D435-only isolation shortcut.
+	"camera_diagnostic_view",
+]
+const DORMANT_OAKD_PROPERTIES := [
+	# OAK-D runtime support is intentionally dormant, not deleted. Keeping its
+	# serialized values private makes the normal RealSense setup surface clear
+	# while leaving a low-risk path to a future camera-module implementation.
+	"oakd_enabled",
+	"restart_oakd_now",
+	"oakd_status",
+	"oakd_stride",
+	"oakd_capture_preset",
+	"oakd_depth_source",
+	"oakd_color_enabled",
+	"oakd_color_mode",
+	"oakd_render_depth_bias_m",
+	"oakd_geometry_edge_guard_m",
+	"oakd_border_crop_px",
+	"oakd_stabilization_enabled",
+	"oakd_stabilization_deadband_m",
+	"oakd_stabilization_hold_frames",
+	"oakd_fast_backend",
+	"oakd_fast_profile",
+	"oakd_fast_iters",
+	"oakd_fast_scale",
+]
 
 @export_group("Workflow")
 ## UDP control port used by launch_web_stack.py. Performance impact: none unless changed to the wrong port.
 @export var tracker_control_port: int = 4244
-## Starts or stops both point-cloud streams for this editor view. Performance impact: high when enabled because both cameras publish live SHM frames.
+## Starts or stops all configured camera streams for this editor view. Performance impact: high when enabled because each camera publishes live frames.
 @export var editor_stream_enabled: bool = false:
 	set(value):
 		if editor_stream_enabled == value:
@@ -93,11 +128,7 @@ const LEGACY_CALIBRATION_PROPERTIES := [
 		if value:
 			_poll_alignment_result(true)
 ## Restores the intended simple defaults for this new view. Performance impact: applies settings that favor clarity and stable FPS over maximum mesh detail.
-@export var apply_clean_defaults_now: bool = false:
-	set(value):
-		apply_clean_defaults_now = false
-		if value:
-			_apply_clean_defaults()
+@export_tool_button("Apply Clean Defaults") var apply_clean_defaults_action: Callable = _apply_clean_defaults
 
 @export_group("Universal Point Cloud")
 ## Rejects points closer than this distance. Performance impact: low; changing it updates the renderer and stream clipping.
@@ -251,11 +282,7 @@ const LEGACY_CALIBRATION_PROPERTIES := [
 		_refresh_realsense_devices(true)
 		_update_camera_renderers()
 ## Closes and reopens the native RealSense capture pipelines without restarting the editor.
-@export var restart_realsense_now: bool = false:
-	set(value):
-		restart_realsense_now = false
-		if value:
-			_restart_realsense_direct_renderers()
+@export_tool_button("Reconnect RealSense Cameras") var restart_realsense_action: Callable = _restart_realsense_direct_renderers
 ## Applies the recommended 30-40 cm two-camera robot rig: D435 detail, D455 context, one active projector, and color-valid crops.
 @export_tool_button("Apply Close Robot Rig Defaults") var apply_close_robot_rig_defaults_action: Callable = _apply_close_robot_rig_defaults
 ## Serial-keyed RealSense settings. Hidden backing store; edit each RealSense camera node instead.
@@ -427,9 +454,8 @@ const LEGACY_CALIBRATION_PROPERTIES := [
 		_send_camera_stream_command(CAMERA_REALSENSE, _streams_enabled() and realsense_enabled)
 @export_subgroup("")
 
-@export_group("OAK-D Camera")
 ## Enables the OAK-D camera in this view. Performance impact: high when on, especially with FastFoundation depth.
-@export var oakd_enabled: bool = true:
+@export_storage var oakd_enabled: bool = false:
 	set(value):
 		oakd_enabled = value
 		_send_camera_stream_command(CAMERA_OAKD, _streams_enabled() and value)
@@ -833,7 +859,9 @@ func _ready() -> void:
 
 func _validate_property(property: Dictionary) -> void:
 	var property_name := str(property.get("name", ""))
-	if property_name in LEGACY_CALIBRATION_PROPERTIES:
+	if property_name in LEGACY_CALIBRATION_PROPERTIES \
+		or property_name in CORE_DEVELOPER_PROPERTIES \
+		or property_name in DORMANT_OAKD_PROPERTIES:
 		property["usage"] = PROPERTY_USAGE_STORAGE
 
 func _exit_tree() -> void:
@@ -1391,7 +1419,9 @@ func _known_camera_ids() -> Array[String]:
 	for camera_id in _camera_nodes.keys():
 		if camera_id is String and camera_id not in ids:
 			ids.append(camera_id)
-	if CAMERA_OAKD not in ids:
+	# OAK-D support is dormant. Do not manufacture an editor placeholder for
+	# hardware that is neither configured nor running.
+	if oakd_enabled and CAMERA_OAKD not in ids:
 		ids.append(CAMERA_OAKD)
 	return ids
 
@@ -1603,10 +1633,11 @@ func _read_runtime_stream_owner_active() -> bool:
 	var file := FileAccess.open(_runtime_stream_owner_path, FileAccess.READ)
 	if file == null:
 		return false
-	var parsed = JSON.parse_string(file.get_as_text())
-	if not (parsed is Dictionary):
-		return false
-	var owner := parsed as Dictionary
+	var owner := _parse_json_dictionary_quietly(file.get_as_text())
+	if owner.is_empty():
+		# The runtime refreshes this heartbeat frequently. Preserve the last known
+		# state if a reader ever catches an interrupted or externally edited file.
+		return _runtime_stream_owner_blocks_editor_cached
 	if str(owner.get("owner", "")) != "runtime":
 		return false
 	var timestamp_msec := int(owner.get("timestamp_msec", 0))
@@ -1622,7 +1653,8 @@ func _write_runtime_stream_owner(force: bool) -> void:
 	_last_runtime_owner_write_msec = now_msec
 	if _runtime_stream_owner_path.is_empty():
 		_runtime_stream_owner_path = ProjectSettings.globalize_path(RUNTIME_STREAM_OWNER_PATH)
-	var file := FileAccess.open(_runtime_stream_owner_path, FileAccess.WRITE)
+	var temporary_path := "%s.%d.tmp" % [_runtime_stream_owner_path, OS.get_process_id()]
+	var file := FileAccess.open(temporary_path, FileAccess.WRITE)
 	if file == null:
 		return
 	file.store_string(JSON.stringify({
@@ -1631,6 +1663,17 @@ func _write_runtime_stream_owner(force: bool) -> void:
 		"timestamp_msec": int(Time.get_unix_time_from_system() * 1000.0),
 		"scene": scene_file_path,
 	}))
+	file.flush()
+	file.close()
+	var rename_error := DirAccess.rename_absolute(temporary_path, _runtime_stream_owner_path)
+	if rename_error == OK:
+		return
+	# Windows cannot always replace an existing file with rename. The complete
+	# temporary file still keeps the non-atomic fallback window extremely small.
+	if FileAccess.file_exists(_runtime_stream_owner_path):
+		DirAccess.remove_absolute(_runtime_stream_owner_path)
+	if DirAccess.rename_absolute(temporary_path, _runtime_stream_owner_path) != OK:
+		DirAccess.remove_absolute(temporary_path)
 
 func _clear_runtime_stream_owner() -> void:
 	if _runtime_stream_owner_path.is_empty():
@@ -1638,11 +1681,20 @@ func _clear_runtime_stream_owner() -> void:
 	if _runtime_stream_owner_path.is_empty() or not FileAccess.file_exists(_runtime_stream_owner_path):
 		return
 	var file := FileAccess.open(_runtime_stream_owner_path, FileAccess.READ)
-	if file != null:
-		var parsed = JSON.parse_string(file.get_as_text())
-		if parsed is Dictionary and int((parsed as Dictionary).get("pid", -1)) != OS.get_process_id():
-			return
+	if file == null:
+		return
+	var owner := _parse_json_dictionary_quietly(file.get_as_text())
+	if owner.is_empty() or int(owner.get("pid", -1)) != OS.get_process_id():
+		return
 	DirAccess.remove_absolute(_runtime_stream_owner_path)
+
+func _parse_json_dictionary_quietly(text: String) -> Dictionary:
+	if text.strip_edges().is_empty():
+		return {}
+	var parser := JSON.new()
+	if parser.parse(text) != OK or not (parser.data is Dictionary):
+		return {}
+	return parser.data as Dictionary
 
 func _camera_stride(camera_id: String) -> int:
 	if _is_realsense_camera(camera_id):
@@ -2580,10 +2632,20 @@ func _update_realsense_cloud_alignment_process() -> void:
 func _ensure_scene_anchors() -> void:
 	_world_level_anchor(true)
 	_camera_clouds_node(true)
+	_remove_empty_dormant_oakd_anchor()
 	for camera_id in _known_camera_ids():
 		_camera_anchor(camera_id, true)
-	_calibration_pairs_node(true)
 	_debug_panel_anchor(true)
+
+func _remove_empty_dormant_oakd_anchor() -> void:
+	if oakd_enabled:
+		return
+	var clouds := _camera_clouds_node(false)
+	if clouds == null:
+		return
+	var anchor := clouds.get_node_or_null(_camera_anchor_name(CAMERA_OAKD)) as Node3D
+	if anchor != null and anchor.get_child_count() == 0:
+		anchor.queue_free()
 
 func _world_level_anchor(create: bool) -> Node3D:
 	var anchor := get_node_or_null(WORLD_LEVEL_ANCHOR_NAME) as Node3D

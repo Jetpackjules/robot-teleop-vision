@@ -86,6 +86,7 @@ CORE_PERSISTENT_VIEW_SETTINGS = frozenset(
         "robot_overlay_mask_scanned_robot",
         "robot_overlay_style",
         "display_mode",
+        "stream_preset",
     }
 )
 
@@ -3821,6 +3822,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if not isinstance(display_mode, str) or display_mode not in ("point_cloud", "rgb_camera"):
                 raise ValueError("display_mode must be point_cloud or rgb_camera")
             packet["display_mode"] = display_mode
+        if "stream_preset" in data:
+            stream_preset = data["stream_preset"]
+            if not isinstance(stream_preset, str) or stream_preset not in ("quality", "latency"):
+                raise ValueError("stream_preset must be quality or latency")
+            packet["stream_preset"] = stream_preset
         for key, allowed in self.server.robot_operator.enum_view_settings().items():
             if key not in data:
                 continue

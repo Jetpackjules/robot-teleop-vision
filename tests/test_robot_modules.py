@@ -206,5 +206,7 @@ def test_so101_installation_defaults_never_include_mutating_actions():
     persistent = set(operator.persistent_view_settings())
     assert "arm_idle_return_enabled" in persistent
     assert "arm_following_error_safety_enabled" in persistent
+    assert "arm_measured_feedback_enabled" not in persistent
+    assert "arm_freeze_overlay_on_stale_enabled" not in persistent
     assert "calibrate_robot_position" not in persistent
     assert "manual_claw_calibration_save" not in persistent

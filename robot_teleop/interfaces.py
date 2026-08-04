@@ -35,9 +35,3 @@ class RobotAdapter(Protocol):
     def public_manifest(self) -> dict[str, Any]: ...
 
     def operator_environment(self) -> dict[str, str]: ...
-
-
-class TrackingAdapter(Protocol):
-    name: str
-
-    def describe(self) -> dict[str, Any]: ...

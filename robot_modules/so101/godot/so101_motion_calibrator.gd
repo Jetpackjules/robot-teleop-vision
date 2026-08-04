@@ -45,6 +45,42 @@ const BASE_AXIS_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_base
 const STAGED_JOINT_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_staged_joints.py"
 const CLAW_VISUAL_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_claw_visual.py"
 const CLAW_RGB_TIP_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_claw_rgb_tips.py"
+const DEVELOPER_PROPERTY_NAMES := [
+	"capture_seconds",
+	"maximum_capture_seconds",
+	"sample_interval_seconds",
+	"depth_sample_step",
+	"motion_threshold_m",
+	"maximum_points_per_frame",
+	"minimum_moving_points",
+	"minimum_pose_frames",
+	"maximum_encoder_settle_error_degrees",
+	"editor_auto_move_follower",
+	"follower_command_port",
+	"editor_sweep_delay_seconds",
+	"editor_sweep_minimum_seconds",
+	"diagnostic_only",
+	"base_axis_full_points_per_camera",
+	"solver_revision",
+	"minimum_confidence",
+	"inlier_distance_m",
+	"calibration_primary_camera_match",
+	"lock_base_up_to_current",
+	"constrain_base_to_aruco_plane",
+	"aruco_base_clearance_m",
+	"minimum_base_sweep_for_heading_fit_degrees",
+	"maximum_ambiguous_heading_change_degrees",
+	"required_loss_improvement_for_heading_change",
+	"claw_tip_fit_weight",
+	"maximum_joint_offset_adjustment_degrees",
+	"joint_offset_regularization_m_per_degree",
+	"calibration_status_port",
+	"debug_capture_path",
+	"passive_d455_visual_correction_enabled",
+	"passive_d455_interval_seconds",
+	"passive_d455_pair_distance_m",
+	"passive_d455_minimum_pairs",
+]
 
 @export_group("Capture")
 @export_range(4.0, 24.0, 0.5, "suffix:s") var capture_seconds: float = 15.0
@@ -175,6 +211,11 @@ const MAXIMUM_AUTOMATED_CLAW_CAPTURE_ATTEMPTS := 5
 # on the laptop. Allow one hour to resume only its explicitly pending claw
 # stage; upright/source/transaction checks still reject unrelated registrations.
 const PENDING_CLAW_RESUME_MAXIMUM_AGE_MSEC := 60.0 * 60.0 * 1000.0
+
+
+func _validate_property(property: Dictionary) -> void:
+	if str(property.get("name", "")) in DEVELOPER_PROPERTY_NAMES:
+		property["usage"] = PROPERTY_USAGE_STORAGE
 
 
 func _ready() -> void:
@@ -419,7 +460,7 @@ func start_arm_position_calibration(
 			_fail("Editor calibration needs the follower service on telemetry UDP 4252.")
 			return
 		if str(follower_status.get("state", "")) == "fault":
-			_fail("Follower is faulted: %s. Use Restart Arm Connection first." % str(follower_status.get("fault", "unknown fault")))
+			_fail("Follower is faulted: %s. Use Reconnect Arm Hardware first." % str(follower_status.get("fault", "unknown fault")))
 			return
 	# Fresh containers are safe when this @tool script is hot-reloaded onto an
 	# existing editor node. Mutating a newly-added stale member can crash Godot.

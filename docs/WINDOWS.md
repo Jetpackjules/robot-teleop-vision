@@ -89,7 +89,7 @@ Its report should include:
 - Which numbered browser acceptance checks passed or failed.
 - Relevant supervisor output around a failure, with passwords/tokens redacted.
 
-That is enough evidence to reproduce an onboarding problem without exposing local credentials.
+It can also run `robot-teleop support-bundle` after reproducing the problem and attach the resulting sanitized zip. Windows has no `journald`, so the bundle records that journal history was unavailable while retaining the other checks. That is enough evidence to reproduce an onboarding problem without exposing local credentials.
 
 ## Packaged runtime
 

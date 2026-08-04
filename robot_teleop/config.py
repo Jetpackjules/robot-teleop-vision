@@ -58,18 +58,12 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
-class TrackingConfig:
-    adapter: str = "browser_mediapipe"
-
-
-@dataclass(frozen=True)
 class AppConfig:
     source: Path = DEFAULT_CONFIG
     stack: StackConfig = field(default_factory=StackConfig)
     godot: GodotConfig = field(default_factory=GodotConfig)
     robot: RobotConfig = field(default_factory=RobotConfig)
     cameras: CameraConfig = field(default_factory=CameraConfig)
-    tracking: TrackingConfig = field(default_factory=TrackingConfig)
 
     @property
     def project_root(self) -> Path:
@@ -118,7 +112,6 @@ def load_config(path: str | Path = DEFAULT_CONFIG, *, require: bool = True) -> A
     camera_data = dict(data.get("cameras", {}))
     camera_data["adapters"] = tuple(camera_data.get("adapters", ("realsense",)))
     cameras = CameraConfig(**camera_data)
-    tracking = TrackingConfig(**data.get("tracking", {}))
     if stack.public_mode not in {"off", "quick"}:
         raise ValueError("stack.public_mode must be 'off' or 'quick'")
-    return AppConfig(source, stack, godot, robot, cameras, tracking)
+    return AppConfig(source, stack, godot, robot, cameras)
