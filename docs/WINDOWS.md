@@ -47,7 +47,7 @@ The newest browser page becomes the sole stream/control owner. Opening another p
 
 ## Godot editor path
 
-Import this checkout's `project.godot`, not the former **2.5D window V3** workspace. The project title is **Robot Teleop Vision**. The **Teleop Setup** dock can create config, run Doctor, start the same supervised runtime, open the website, and safely stop it. Calibration, motion, and view controls intentionally remain in the website.
+Import this checkout's `project.godot`. The project title is **Robot Teleop Vision**. The **Teleop Setup** dock can create config, run Doctor, start the same supervised runtime, open the website, and safely stop it. Calibration, motion, and view controls intentionally remain in the website.
 
 Use Forward+ unless that PC cannot support it. Compatibility is supported, but Forward+ is the normal desktop renderer. The native RealSense nodes appear only when a camera and the Intel runtime are available.
 

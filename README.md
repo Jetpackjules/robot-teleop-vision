@@ -32,7 +32,7 @@ In another terminal:
 robot-teleop open
 ```
 
-You can instead import this repository's `project.godot` in Godot and use the **Teleop Setup** dock. The project should appear as **Robot Teleop Vision** with the cyan-and-gold icon. If Godot says **2.5D window V3**, that is the old research workspace.
+You can instead import this repository's `project.godot` in Godot and use the **Teleop Setup** dock.
 
 `start` remains in the foreground and supervises every child process. Stop it with `Ctrl+C` or `robot-teleop stop`; the selected robot module's idempotent Hold action runs before shutdown.
 
@@ -108,26 +108,6 @@ For camera setup, select an auto-discovered RealSense camera node in Godot. Rout
 | `tests/` | Hardware-free protocol, module-boundary, safety, calibration, and codec tests |
 
 Read [Windows first-run](docs/WINDOWS.md), [Headless Linux](docs/HEADLESS_LINUX.md), [Architecture](docs/ARCHITECTURE.md), [Robot modules](docs/ROBOT_MODULES.md), [Safety](docs/SAFETY.md), [Calibration](docs/CALIBRATION.md), and [Adapters](docs/ADAPTERS.md) before deploying a new robot or site.
-
-## Verify a change
-
-```bash
-python -m compileall -q robot_teleop robot_modules tools tests
-python -m pytest -q
-godot --headless --editor --path . --quit
-```
-
-GitHub Actions runs the hardware-free Python suite and a Godot import/script scan on every pull request, plus a Windows test/package job. RealSense and robot hardware remain a local verification gate.
-
-## Migrate this laptop's existing calibration
-
-Only the original large Godot workspace needs this:
-
-```bash
-robot-teleop migrate-state --from-project "2.5D window V3"
-```
-
-Shared camera/world state and the installed module manifests' declared durable files are copied into Robot Teleop Vision's Godot user-data directory. Captures, logs, physical profiles, and debug images are never copied into the repository.
 
 ## License
 
