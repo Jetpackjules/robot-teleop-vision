@@ -105,20 +105,23 @@ extends Node3D
 # exposes a far cutoff. The universal near cutoff remains unchanged.
 @export_storage var use_custom_depth_range: bool = false
 @export_storage var min_depth_m: float = 0.20
+# Compatibility-only publisher settings. Direct RealSense capture does not
+# provide separate geometry-filter or grid-stabilization passes, so exposing
+# these alongside the live SDK chain would imply controls that are not active.
+@export_storage var filters_for_geometry: bool = false
+@export_storage var geometry_edge_guard_m: float = 0.04
+@export_storage var stabilization_enabled: bool = false
+@export_storage var stabilization_deadband_m: float = 0.012
+@export_storage var stabilization_hold_frames: int = 1
 
-@export_group("Depth Filters")
+@export_group("Expert Depth Tuning")
+## Master switch for the ordered Intel RealSense SDK post-processing chain below. Leave this off unless the raw depth needs tuning; every enabled stage adds capture work.
 @export var depth_filters_enabled: bool = false:
 	set(value):
 		depth_filters_enabled = value
 		_notify_settings_changed()
-@export var filters_for_geometry: bool = false:
-	set(value):
-		filters_for_geometry = value
-		_notify_settings_changed()
-@export_range(0.0, 0.30, 0.005, "suffix:m") var geometry_edge_guard_m: float = 0.04:
-	set(value):
-		geometry_edge_guard_m = maxf(0.0, value)
-		_notify_settings_changed()
+@export_subgroup("RealSense SDK Filter Chain")
+## Stage 1. Reduces depth resolution before later filters. Magnitude 2 is the least aggressive option.
 @export var decimation_filter_enabled: bool = true:
 	set(value):
 		decimation_filter_enabled = value
@@ -131,58 +134,54 @@ extends Node3D
 	set(value):
 		rotation_filter_enabled = value
 		_notify_settings_changed()
+## Combines alternating HDR exposure sequences when the camera profile provides them.
 @export var hdr_merge_filter_enabled: bool = true:
 	set(value):
 		hdr_merge_filter_enabled = value
 		_notify_settings_changed()
+## Keeps a selected HDR sequence ID. Usually leave this off unless explicitly using sequenced capture.
 @export var sequence_id_filter_enabled: bool = false:
 	set(value):
 		sequence_id_filter_enabled = value
 		_notify_settings_changed()
+## Applies the SDK threshold stage. The normal viewer depth limits still apply independently.
 @export var threshold_filter_enabled: bool = false:
 	set(value):
 		threshold_filter_enabled = value
 		_notify_settings_changed()
+## Convert to disparity before spatial/temporal filtering for better stereo-depth behavior.
 @export var depth_to_disparity_filter_enabled: bool = true:
 	set(value):
 		depth_to_disparity_filter_enabled = value
 		_notify_settings_changed()
+## Smooths neighboring depth while preserving strong edges.
 @export var spatial_filter_enabled: bool = true:
 	set(value):
 		spatial_filter_enabled = value
 		_notify_settings_changed()
+## Stabilizes depth over time. This can reduce shimmer but may trail fast motion.
 @export var temporal_filter_enabled: bool = true:
 	set(value):
 		temporal_filter_enabled = value
 		_notify_settings_changed()
+## Runs the SDK hole-filling pass using Hole Filling Mode below.
 @export var hole_filling_filter_enabled: bool = false:
 	set(value):
 		hole_filling_filter_enabled = value
 		_notify_settings_changed()
+## Convert filtered disparity back to metric depth before point-cloud generation.
 @export var disparity_to_depth_filter_enabled: bool = true:
 	set(value):
 		disparity_to_depth_filter_enabled = value
 		_notify_settings_changed()
+## Intel SDK hole-filling mode: 0 fills left, 1 uses farthest-around, and 2 uses nearest-around.
 @export_range(0, 2, 1) var hole_filling: int = 1:
 	set(value):
 		hole_filling = clampi(value, 0, 2)
 		_notify_settings_changed()
 
-@export_group("Stabilization")
-@export var stabilization_enabled: bool = false:
-	set(value):
-		stabilization_enabled = value
-		_notify_settings_changed()
-@export_range(0.0, 0.06, 0.001, "suffix:m") var stabilization_deadband_m: float = 0.012:
-	set(value):
-		stabilization_deadband_m = maxf(0.0, value)
-		_notify_settings_changed()
-@export_range(0, 4, 1) var stabilization_hold_frames: int = 1:
-	set(value):
-		stabilization_hold_frames = maxi(0, value)
-		_notify_settings_changed()
-
-@export_group("FastFoundation")
+@export_subgroup("FastFoundation Depth")
+## These settings apply only when Capture > Depth Source is fast_foundation_native.
 @export_enum("onnx_cuda", "onnx_trt", "pytorch", "trt_engine") var fast_backend: String = "onnx_cuda":
 	set(value):
 		fast_backend = value if value in ["onnx_cuda", "onnx_trt", "pytorch", "trt_engine"] else "onnx_cuda"
@@ -199,8 +198,13 @@ extends Node3D
 	set(value):
 		fast_scale = clampf(value, 0.25, 1.0)
 		_notify_settings_changed()
+@export_group("")
 
 var _suppress_notifications := false
+
+func _validate_property(property: Dictionary) -> void:
+	if str(property.get("name", "")) in ["camera_id", "serial", "camera_label", "model"]:
+		property["usage"] = PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_READ_ONLY
 
 func configure(next_camera_id: String, next_serial: String, next_label: String, info: Dictionary, defaults: Dictionary, apply_defaults: bool) -> void:
 	_suppress_notifications = true

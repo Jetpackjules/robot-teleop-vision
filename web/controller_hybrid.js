@@ -24,8 +24,9 @@
       "head-height", "orbit-elevation", "workspace-surface-offset", "workspace-surface-size",
       "workspace-surface-opacity",
     ];
-    // v10 adds installation-wide defaults, workspace guides, and an RGB view.
-    const viewSettingsVersion = 10;
+    // v12 persists the selected quality/latency stream preset as an
+    // installation default while preserving older saved camera views.
+    const viewSettingsVersion = 12;
 
     let peer = null;
     let trackingDataChannel = null;
@@ -67,7 +68,9 @@
       const response = Number(document.getElementById("orbit-response").value);
       const orbitDistance = Number(document.getElementById("orbit-distance").value);
       const payload = {
-        inspect_enabled: document.getElementById("inspect-enabled").checked,
+        // Mouse navigation and click-to-focus are always available. Head
+        // tracking layers onto this orbit rather than selecting another mode.
+        inspect_enabled: true,
         yaw_gain: response,
         pitch_gain: response * 0.73,
         max_yaw: span * 0.5,
@@ -91,6 +94,7 @@
         workspace_surface_size: Number(document.getElementById("workspace-surface-size").value),
         workspace_surface_opacity: Number(document.getElementById("workspace-surface-opacity").value),
         display_mode: displayModeSelect.value,
+        stream_preset: streamPresetSelect.value,
         settings_version: viewSettingsVersion,
         ...extra,
       };
@@ -108,6 +112,13 @@
       document.getElementById("workspace-surface-offset-value").textContent = `${Math.round(Number(document.getElementById("workspace-surface-offset").value) * 1000)} mm`;
       document.getElementById("workspace-surface-size-value").textContent = `${Number(document.getElementById("workspace-surface-size").value).toFixed(2)} m`;
       document.getElementById("workspace-surface-opacity-value").textContent = `${Math.round(Number(document.getElementById("workspace-surface-opacity").value) * 100)}%`;
+    }
+
+    function updateHeadTrackingOptions() {
+      const enabled = document.getElementById("head-tracking-enabled").checked;
+      const options = document.getElementById("head-tracking-options");
+      options.hidden = !enabled;
+      for (const control of options.querySelectorAll("input")) control.disabled = !enabled;
     }
 
     function sendViewSettings(extra = {}) {
@@ -128,8 +139,10 @@
 
     function restoreViewSettings(savedInput = null) {
       const saved = savedInput && Object.keys(savedInput).length ? savedInput : localSavedViewSettings();
-      if (!saved || ![6, 7, 8, 9, viewSettingsVersion].includes(saved.settings_version)) return updateViewLabels();
-      document.getElementById("inspect-enabled").checked = saved.inspect_enabled === true;
+      if (!saved || ![6, 7, 8, 9, 10, 11, viewSettingsVersion].includes(saved.settings_version)) {
+        updateHeadTrackingOptions();
+        return updateViewLabels();
+      }
       document.getElementById("orbit-span").value = String(Math.max(30, Math.min(360, (saved.max_yaw || 80) * 2)));
       document.getElementById("orbit-response").value = String(saved.yaw_gain || 2.5);
       document.getElementById("orbit-distance").value = String(saved.orbit_distance || 0.35);
@@ -148,9 +161,11 @@
       document.getElementById("workspace-surface-size").value = String(saved.workspace_surface_size ?? 1.2);
       document.getElementById("workspace-surface-opacity").value = String(saved.workspace_surface_opacity ?? 0.18);
       displayModeSelect.value = saved.display_mode === "rgb_camera" ? "rgb_camera" : "point_cloud";
+      streamPresetSelect.value = saved.stream_preset === "latency" ? "latency" : "quality";
       startupNavigation = saved.default_navigation || null;
       startupNavigationPending = startupNavigation !== null;
       robotModule.restoreViewSettings?.(saved);
+      updateHeadTrackingOptions();
       updateViewLabels();
     }
 
@@ -220,7 +235,6 @@
     function focusInspectAtStreamClick(event) {
       const coordinates = normalizedStreamClick(event, event.currentTarget);
       if (!coordinates) return;
-      document.getElementById("inspect-enabled").checked = true;
       sendViewSettings({
         inspect_enabled: true,
         focus_pick_uv: coordinates,
@@ -1000,7 +1014,9 @@
     }
 
     streamPresetSelect.addEventListener("change", () => {
+      sendViewSettings();
       if (userStarted) startSelectedViewport();
+      streamPresetSelect.blur();
       updateStatus();
     });
     displayModeSelect.addEventListener("change", () => {
@@ -1029,7 +1045,7 @@
       control.addEventListener("change", () => control.blur());
     }
     for (const id of [
-      "inspect-enabled", "dolly-enabled", "white-background-enabled",
+      "dolly-enabled", "white-background-enabled",
       "workspace-surface-enabled", "workspace-boundary-enabled",
     ]) {
       const control = document.getElementById(id);
@@ -1040,6 +1056,7 @@
     }
     document.getElementById("head-tracking-enabled").addEventListener("change", async (event) => {
       const control = event.currentTarget;
+      updateHeadTrackingOptions();
       sendViewSettings();
       if (userStarted) {
         try {
@@ -1072,12 +1089,10 @@
       await loadSiteSettings({ apply: true });
       if (userStarted) await startSelectedViewport();
     });
-    document.getElementById("inspect-recenter").addEventListener("click", () => sendViewSettings({ recenter: true }));
     viewportVideo.addEventListener("click", focusInspectAtStreamClick);
     viewportImage.addEventListener("click", focusInspectAtStreamClick);
     hybridCanvas.addEventListener("click", (event) => {
       if (!window.focusGodotHybridRendererAt || !window.focusGodotHybridRendererAt(event.clientX, event.clientY)) return;
-      document.getElementById("inspect-enabled").checked = true;
       sendViewSettings({ inspect_enabled: true });
     });
     startButton.addEventListener("click", startController);

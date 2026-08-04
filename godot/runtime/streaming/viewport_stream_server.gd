@@ -1,6 +1,6 @@
 extends Node
 
-@export var stream_enabled: bool = true:
+@export_storage var stream_enabled: bool = true:
 	set(value):
 		stream_enabled = value
 		if is_inside_tree():
@@ -8,24 +8,23 @@ extends Node
 				_start_server()
 			else:
 				_stop_server()
-@export var bind_host: String = "0.0.0.0"
-@export_range(1024, 65535, 1) var port: int = 8780
-@export_range(1.0, 60.0, 1.0, "suffix:fps") var target_fps: float = 30.0
-@export_range(160, 3840, 16, "suffix:px") var max_width: int = 720
-@export_range(1, 100, 1) var jpeg_quality: int = 42
-@export_range(1, 16, 1) var max_clients: int = 4
-@export_group("Hybrid RGB-D")
-@export_range(1.0, 60.0, 1.0, "suffix:fps") var hybrid_target_fps: float = 60.0
-@export_range(1.0, 60.0, 1.0, "suffix:fps") var hybrid_context_fps: float = 30.0
-@export_range(1.0, 60.0, 1.0, "suffix:fps") var hybrid_detail_fps: float = 60.0
-@export_range(160, 960, 16, "suffix:px") var hybrid_max_width: int = 384
-@export_range(1, 100, 1) var hybrid_jpeg_quality: int = 78
-@export var async_high_resolution_readback: bool = true
-@export_range(640, 3840, 16, "suffix:px") var async_readback_min_width: int = 960
-@export_range(1, 4, 1) var async_readback_max_inflight: int = 2
-@export var rgbd_root_path: NodePath = NodePath("..")
-@export var tracking_source_path: NodePath = NodePath("../RemoteControlGateway")
-@export_multiline var stream_status: String = "stopped"
+@export_storage var bind_host: String = "0.0.0.0"
+@export_storage var port: int = 8780
+@export_storage var target_fps: float = 30.0
+@export_storage var max_width: int = 720
+@export_storage var jpeg_quality: int = 42
+@export_storage var max_clients: int = 4
+@export_storage var hybrid_target_fps: float = 60.0
+@export_storage var hybrid_context_fps: float = 30.0
+@export_storage var hybrid_detail_fps: float = 60.0
+@export_storage var hybrid_max_width: int = 384
+@export_storage var hybrid_jpeg_quality: int = 78
+@export_storage var async_high_resolution_readback: bool = true
+@export_storage var async_readback_min_width: int = 960
+@export_storage var async_readback_max_inflight: int = 2
+@export_storage var rgbd_root_path: NodePath = NodePath("..")
+@export_storage var tracking_source_path: NodePath = NodePath("../RemoteControlGateway")
+@export_storage var stream_status: String = "stopped"
 
 const BOUNDARY := "godotframe"
 const STREAM_SEND_CHUNK_BYTES := 524288

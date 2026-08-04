@@ -69,6 +69,41 @@ const LEGACY_CALIBRATION_PROPERTIES := [
 	"big_aruco_marker_ids",
 	"big_aruco_auto_depth_refine",
 ]
+const CORE_DEVELOPER_PROPERTIES := [
+	# Launcher-owned wiring and a legacy one-off OAK-D alignment poller. These
+	# remain serialized for compatibility but are not setup controls.
+	"tracker_control_port",
+	"auto_apply_alignment_file",
+	# Direct, serial-keyed capture owns timing independently. This setting only
+	# reaches the retired publisher command path.
+	"sync_fps_to_slowest",
+	# Per-camera Enabled controls are model-neutral and replace this old
+	# D455/D435-only isolation shortcut.
+	"camera_diagnostic_view",
+]
+const DORMANT_OAKD_PROPERTIES := [
+	# OAK-D runtime support is intentionally dormant, not deleted. Keeping its
+	# serialized values private makes the normal RealSense setup surface clear
+	# while leaving a low-risk path to a future camera-module implementation.
+	"oakd_enabled",
+	"restart_oakd_now",
+	"oakd_status",
+	"oakd_stride",
+	"oakd_capture_preset",
+	"oakd_depth_source",
+	"oakd_color_enabled",
+	"oakd_color_mode",
+	"oakd_render_depth_bias_m",
+	"oakd_geometry_edge_guard_m",
+	"oakd_border_crop_px",
+	"oakd_stabilization_enabled",
+	"oakd_stabilization_deadband_m",
+	"oakd_stabilization_hold_frames",
+	"oakd_fast_backend",
+	"oakd_fast_profile",
+	"oakd_fast_iters",
+	"oakd_fast_scale",
+]
 
 @export_group("Workflow")
 ## UDP control port used by launch_web_stack.py. Performance impact: none unless changed to the wrong port.
@@ -93,11 +128,7 @@ const LEGACY_CALIBRATION_PROPERTIES := [
 		if value:
 			_poll_alignment_result(true)
 ## Restores the intended simple defaults for this new view. Performance impact: applies settings that favor clarity and stable FPS over maximum mesh detail.
-@export var apply_clean_defaults_now: bool = false:
-	set(value):
-		apply_clean_defaults_now = false
-		if value:
-			_apply_clean_defaults()
+@export_tool_button("Apply Clean Defaults") var apply_clean_defaults_action: Callable = _apply_clean_defaults
 
 @export_group("Universal Point Cloud")
 ## Rejects points closer than this distance. Performance impact: low; changing it updates the renderer and stream clipping.
@@ -251,11 +282,7 @@ const LEGACY_CALIBRATION_PROPERTIES := [
 		_refresh_realsense_devices(true)
 		_update_camera_renderers()
 ## Closes and reopens the native RealSense capture pipelines without restarting the editor.
-@export var restart_realsense_now: bool = false:
-	set(value):
-		restart_realsense_now = false
-		if value:
-			_restart_realsense_direct_renderers()
+@export_tool_button("Reconnect RealSense Cameras") var restart_realsense_action: Callable = _restart_realsense_direct_renderers
 ## Applies the recommended 30-40 cm two-camera robot rig: D435 detail, D455 context, one active projector, and color-valid crops.
 @export_tool_button("Apply Close Robot Rig Defaults") var apply_close_robot_rig_defaults_action: Callable = _apply_close_robot_rig_defaults
 ## Serial-keyed RealSense settings. Hidden backing store; edit each RealSense camera node instead.
@@ -427,7 +454,6 @@ const LEGACY_CALIBRATION_PROPERTIES := [
 		_send_camera_stream_command(CAMERA_REALSENSE, _streams_enabled() and realsense_enabled)
 @export_subgroup("")
 
-@export_group("OAK-D Camera")
 ## Enables the OAK-D camera in this view. Performance impact: high when on, especially with FastFoundation depth.
 @export var oakd_enabled: bool = true:
 	set(value):
@@ -833,7 +859,9 @@ func _ready() -> void:
 
 func _validate_property(property: Dictionary) -> void:
 	var property_name := str(property.get("name", ""))
-	if property_name in LEGACY_CALIBRATION_PROPERTIES:
+	if property_name in LEGACY_CALIBRATION_PROPERTIES \
+		or property_name in CORE_DEVELOPER_PROPERTIES \
+		or property_name in DORMANT_OAKD_PROPERTIES:
 		property["usage"] = PROPERTY_USAGE_STORAGE
 
 func _exit_tree() -> void:

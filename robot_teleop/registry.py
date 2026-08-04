@@ -6,14 +6,13 @@ from typing import Any, Callable
 
 
 Factory = Callable[..., Any]
-_BUILTINS: dict[str, dict[str, Factory]] = {"camera": {}, "robot": {}, "tracking": {}}
+_BUILTINS: dict[str, dict[str, Factory]] = {"camera": {}, "robot": {}}
 
 
 def _load_builtins(kind: str, *, module_paths: tuple[str, ...] = ()) -> None:
     if kind not in _BUILTINS:
         raise KeyError(f"unknown adapter kind: {kind}")
-    module = "tracking" if kind == "tracking" else f"{kind}s"
-    import_module(f"robot_teleop.{module}")
+    import_module(f"robot_teleop.{kind}s")
     if kind == "robot":
         from robot_teleop.modules import load_robot_modules
 

@@ -38,6 +38,34 @@ const GRIPPER_CLOSED_ENDPOINT_TOLERANCE_DEGREES := 5.0
 const GRIPPER_MOUNT_CORRECTION_MAXIMUM_METERS := 0.015
 const GRIPPER_VISUAL_CORRECTION_MAXIMUM_METERS := 0.025
 const GRIPPER_VISUAL_CORRECTION_MAXIMUM_DEGREES := 30.0
+const DEVELOPER_PROPERTY_NAMES := [
+	"model_scale",
+	"telemetry_smoothing",
+	"telemetry_port",
+	"editor_telemetry_port",
+	"joint_angle_directions",
+	"joint_angle_offsets_degrees",
+	"clamp_visual_joint_limits",
+	"force_wrist_roll_straight",
+	"gripper_closed_normalized",
+	"gripper_angle_offset_degrees",
+	"gripper_angle_scale_degrees_per_normalized",
+	"gripper_angle_curvature_degrees",
+	"gripper_angle_samples_normalized",
+	"gripper_angle_samples_degrees",
+	"gripper_mount_correction_local",
+	"gripper_visual_correction_rpy_degrees",
+	"gripper_visual_correction_translation_local",
+	"wrist_housing_mount_flipped",
+	"moving_jaw_calibration_enabled",
+	"moving_jaw_pivot_parent",
+	"moving_jaw_axis_parent",
+	"moving_jaw_closed_basis_parent",
+	"moving_jaw_opening_samples_degrees",
+	"moving_jaw_visual_radial_scale",
+	"moving_jaw_visual_axial_translation_local",
+	"preview_pose_degrees",
+]
 # The D455/world alignment is gravity-up. A table-mounted SO-101 can change X/Z
 # placement and heading, but its base axis may never point into the table.
 const MINIMUM_REGISTRATION_WORLD_UP_DOT := 0.25
@@ -235,6 +263,11 @@ var _scene_fallback_mapping: Dictionary = {}
 var _d455_distal_correction_local := Vector3.ZERO
 var _d455_distal_correction_confidence := 0.0
 var _d455_distal_correction_msec := 0
+
+func _validate_property(property: Dictionary) -> void:
+	if str(property.get("name", "")) in DEVELOPER_PROPERTY_NAMES:
+		property["usage"] = PROPERTY_USAGE_STORAGE
+
 
 func _ready() -> void:
 	add_to_group("robot_overlay")

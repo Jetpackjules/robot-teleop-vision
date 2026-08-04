@@ -229,6 +229,21 @@
     }
     .advanced-section.wide { grid-column: 1 / -1; }
     .advanced-section h3 { margin: 0; font-size: 14px; }
+    .conditional-controls {
+      display: grid;
+      gap: 9px;
+      padding: 9px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.025);
+    }
+    details.advanced-disclosure {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.025);
+    }
+    details.advanced-disclosure > summary { padding: 9px 10px; color: var(--text); font-size: 13px; }
+    .disclosure-body { display: grid; gap: 9px; padding: 0 10px 10px; }
     #site-settings-status { min-height: 18px; color: var(--muted); font-size: 12px; }
     #start-overlay {
       position: fixed;
@@ -259,8 +274,8 @@
       .advanced-section.wide { grid-column: auto; }
     }
   </style>
-  <script type="module" src="./godot_webcam_tracker_bridge.js?v=20260803_operator_setup_v1"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=20260803_operator_setup_v1"></script>
+  <script type="module" src="./godot_webcam_tracker_bridge.js?v=20260803_settings_cleanup_v1"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=20260803_settings_cleanup_v1"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -287,7 +302,7 @@
           </label>
           <div class="button-row">
             <button id="recenter" class="primary" type="button">Recenter</button>
-            <button id="restart" type="button">Restart</button>
+            <button id="restart" type="button">Reconnect Video</button>
           </div>
           <div id="robot-settings-root"></div>
           <button id="open-advanced" type="button">Advanced Setup</button>
@@ -310,36 +325,35 @@
       <div class="advanced-body">
         <section class="advanced-section">
           <h3>Camera and streaming</h3>
-          <label class="toggle-row"><span>Persistent still-scene compression</span><input id="persistent-temporal-reference-enabled" type="checkbox" checked></label>
-          <label class="toggle-row"><span>Full RGB frame updates</span><input id="full-rgb-frame-updates-enabled" type="checkbox"></label>
           <label class="toggle-row"><span>White background</span><input id="white-background-enabled" type="checkbox"></label>
-          <p class="helper-text">Full RGB is the compatibility fallback. Partial updates normally provide lower bandwidth.</p>
+          <p class="helper-text">Stream quality and latency remain in the Controller panel so operators can switch profiles without opening setup.</p>
         </section>
 
         <section class="advanced-section">
           <h3>Head and mouse navigation</h3>
           <label class="toggle-row"><span>Head tracking</span><input id="head-tracking-enabled" type="checkbox" checked></label>
-          <label class="toggle-row"><span>3D inspect orbit</span><input id="inspect-enabled" type="checkbox" checked></label>
           <div class="navigation-guide">Left-drag orbit · right-drag or Shift-drag pan · wheel zoom · double-click focus</div>
-          <label>Orbit span <span id="orbit-span-value" class="value-label">160 deg</span><input id="orbit-span" type="range" min="30" max="360" step="5" value="160"></label>
-          <label>Orbit response <span id="orbit-response-value" class="value-label">2.5</span><input id="orbit-response" type="range" min="0.4" max="6" step="0.1" value="2.5"></label>
+          <div id="head-tracking-options" class="conditional-controls">
+            <p class="helper-text">Head tracking response</p>
+            <label>Orbit span <span id="orbit-span-value" class="value-label">160 deg</span><input id="orbit-span" type="range" min="30" max="360" step="5" value="160"></label>
+            <label>Orbit response <span id="orbit-response-value" class="value-label">2.5</span><input id="orbit-response" type="range" min="0.4" max="6" step="0.1" value="2.5"></label>
+            <label class="toggle-row"><span>Head Z zoom</span><input id="dolly-enabled" type="checkbox" checked></label>
+            <label>Zoom strength <span id="dolly-gain-value" class="value-label">0.008 m/cm</span><input id="dolly-gain" type="range" min="0" max="0.04" step="0.001" value="0.008"></label>
+          </div>
           <label>View distance <span id="orbit-distance-value" class="value-label">0.35 m</span><input id="orbit-distance" type="range" min="0.25" max="2.5" step="0.05" value="0.35"></label>
           <label>View height <span id="head-height-value" class="value-label">0.35 m</span><input id="head-height" type="range" min="0" max="1" step="0.01" value="0.35"></label>
           <label>View elevation <span id="orbit-elevation-value" class="value-label">0 deg</span><input id="orbit-elevation" type="range" min="-60" max="60" step="1" value="0"></label>
-          <label class="toggle-row"><span>Head Z zoom</span><input id="dolly-enabled" type="checkbox" checked></label>
-          <label>Zoom strength <span id="dolly-gain-value" class="value-label">0.008 m/cm</span><input id="dolly-gain" type="range" min="0" max="0.04" step="0.001" value="0.008"></label>
           <label>Field of view <span id="inspect-fov-value" class="value-label">55 deg</span><input id="inspect-fov" type="range" min="30" max="100" step="1" value="55"></label>
-          <button id="inspect-recenter" type="button">Reset Camera Position</button>
         </section>
 
         <section class="advanced-section">
           <h3>Workspace guide</h3>
           <label class="toggle-row"><span>Flat support surface</span><input id="workspace-surface-enabled" type="checkbox" checked></label>
-          <label class="toggle-row"><span>Robot stopping envelope</span><input id="workspace-boundary-enabled" type="checkbox" checked></label>
+          <label class="toggle-row"><span>Robot workspace guide</span><input id="workspace-boundary-enabled" type="checkbox" checked></label>
           <label>Surface height offset <span id="workspace-surface-offset-value" class="value-label">0 mm</span><input id="workspace-surface-offset" type="range" min="-0.25" max="0.25" step="0.001" value="0"></label>
           <label>Surface size <span id="workspace-surface-size-value" class="value-label">1.20 m</span><input id="workspace-surface-size" type="range" min="0.25" max="4" step="0.05" value="1.2"></label>
           <label>Surface opacity <span id="workspace-surface-opacity-value" class="value-label">18%</span><input id="workspace-surface-opacity" type="range" min="0.04" max="0.5" step="0.01" value="0.18"></label>
-          <p class="helper-text">The surface is robot-neutral. A stopping envelope appears only when the active robot module declares one; enforcement remains inside that module.</p>
+          <p class="helper-text">The surface is robot-neutral. A workspace guide appears only when the active robot module declares one; safety enforcement remains inside that module.</p>
         </section>
 
         <section class="advanced-section">
@@ -357,15 +371,22 @@
         </section>
 
         <section class="advanced-section wide">
+          <h3>Troubleshooting</h3>
+          <label class="toggle-row"><span>Persistent still-scene compression</span><input id="persistent-temporal-reference-enabled" type="checkbox" checked></label>
+          <label class="toggle-row"><span>Full RGB frame updates</span><input id="full-rgb-frame-updates-enabled" type="checkbox"></label>
+          <p class="helper-text">Full RGB is a compatibility fallback for partial-update artifacts. Persistent compression normally reduces bandwidth in static scenes.</p>
+          <div class="button-row">
+            <a class="button" href="./webcam_tracker_test.html">Head Tracker Diagnostics</a>
+            <a id="transport-link" class="button" href="/frame-stream">Frame Stream Fallback</a>
+          </div>
+        </section>
+
+        <section class="advanced-section wide">
           <h3>Diagnostics</h3>
           <div id="network-stats" class="network-stats">Network stats unavailable</div>
           <div class="latency-panel">
             <div class="latency-panel-header"><span>RGB-D capture latency · 120s</span><span id="rgbd-latency-value">—</span></div>
             <canvas id="rgbd-latency-graph" width="708" height="96" aria-label="RGB-D latency over the last 120 seconds"></canvas>
-          </div>
-          <div class="button-row">
-            <a class="button" href="./webcam_tracker_test.html">Head Tracker Diagnostics</a>
-            <a id="transport-link" class="button" href="/frame-stream">Frame Stream Fallback</a>
           </div>
         </section>
       </div>
@@ -381,6 +402,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20260803_operator_setup_v1"></script>
+  <script type="module" src="./controller_hybrid.js?v=20260803_settings_cleanup_v1"></script>
 </body>
 </html>

@@ -81,26 +81,36 @@ const SETTINGS_MARKUP = `
 
 const SETUP_MARKUP = `
   <label class="toggle-row" title="Opt-in: modeled checks cannot detect a person or loose object in the path."><span>Auto-return to rest after 10 min</span><input id="so101-idle-return-enabled" type="checkbox"></label>
-  <button id="so101-restart" type="button">Restart Arm Connection</button>
-  <label class="toggle-row"><span>Live measured arm feedback</span><input id="so101-measured-feedback-enabled" type="checkbox" checked></label>
-  <label class="toggle-row"><span>Show commanded target ghost</span><input id="so101-target-ghost-enabled" type="checkbox" checked></label>
-  <label class="toggle-row"><span>Stop on following error / contact</span><input id="so101-following-error-safety-enabled" type="checkbox" checked></label>
-  <label class="toggle-row"><span>Freeze overlay if telemetry is stale</span><input id="so101-freeze-overlay-on-stale-enabled" type="checkbox" checked></label>
-  <label class="toggle-row"><span>D455 wrist / claw visual correction</span><input id="so101-d455-visual-correction-enabled" type="checkbox"></label>
+  <button id="so101-restart" type="button">Reconnect Arm Hardware</button>
+  <details class="advanced-disclosure">
+    <summary>Experimental safeguards</summary>
+    <div class="disclosure-body">
+      <label class="toggle-row"><span>Stop on following error / contact</span><input id="so101-following-error-safety-enabled" type="checkbox" checked></label>
+      <p class="helper-text">This modeled safeguard can false-trigger on gravity sag or backlash. The hardware watchdog and joint limits remain authoritative.</p>
+    </div>
+  </details>
   <div id="so101-health" class="network-stats">Follower status unavailable</div>
 `;
 
 const VIEW_MARKUP = `
-  <label class="toggle-row"><span>Crisp robot overlay</span><input id="so101-overlay-enabled" type="checkbox" checked></label>
+  <label class="toggle-row"><span>Robot overlay</span><input id="so101-overlay-enabled" type="checkbox" checked></label>
   <label>Robot overlay style
     <select id="so101-overlay-style"><option value="alignment" selected>Alignment (transparent + outlines)</option><option value="solid">Solid yellow</option></select>
   </label>
   <label class="toggle-row"><span>Overlay occludes scanned arm</span><input id="so101-overlay-occlusion-enabled" type="checkbox" checked></label>
+  <label class="toggle-row"><span>Show commanded target ghost</span><input id="so101-target-ghost-enabled" type="checkbox" checked></label>
   <button id="so101-calibrate" class="primary" type="button">Calibrate Full Arm</button>
   <div class="calibration-progress"><progress id="so101-calibration-progress" max="1" value="0"></progress><span id="so101-calibration-progress-value" class="value-label">0%</span></div>
-  <button id="so101-refine" type="button">Refine Arm Servos</button>
-  <button id="so101-manual-open" type="button">Manual Wrist / Claw Calibration</button>
   <div id="so101-calibration-status" class="network-stats">Arm position calibration idle</div>
+  <details class="advanced-disclosure">
+    <summary>Recovery tools</summary>
+    <div class="disclosure-body">
+      <button id="so101-refine" type="button">Refine Arm Servos</button>
+      <button id="so101-manual-open" type="button">Manual Wrist / Claw Calibration</button>
+      <label class="toggle-row"><span>D455 wrist / claw visual correction</span><input id="so101-d455-visual-correction-enabled" type="checkbox"></label>
+      <p class="helper-text">Use these only when full calibration leaves a known distal-link mismatch.</p>
+    </div>
+  </details>
 `;
 
 const STATUS_MARKUP = `
@@ -165,26 +175,16 @@ class So101WebModule {
     await import("./wrist_camera_view.js");
   }
 
-  feedbackMask() {
-    const enabled = (id) => element(id)?.checked ? 1 : 0;
-    return enabled("so101-measured-feedback-enabled")
-      | (enabled("so101-target-ghost-enabled") << 1)
-      | (enabled("so101-following-error-safety-enabled") << 2)
-      | (enabled("so101-freeze-overlay-on-stale-enabled") << 3)
-      | (enabled("so101-d455-visual-correction-enabled") << 4);
-  }
-
   extendViewSettings(payload) {
     return {
       ...payload,
-      fov: Number(payload.fov) + (32 + this.feedbackMask()) / 1000,
       robot_overlay_enabled: element("so101-overlay-enabled")?.checked !== false,
       robot_overlay_style: element("so101-overlay-style")?.value || "alignment",
       robot_overlay_mask_scanned_robot: element("so101-overlay-occlusion-enabled")?.checked !== false,
-      arm_measured_feedback_enabled: element("so101-measured-feedback-enabled")?.checked !== false,
+      arm_measured_feedback_enabled: true,
       arm_target_ghost_enabled: element("so101-target-ghost-enabled")?.checked !== false,
       arm_following_error_safety_enabled: element("so101-following-error-safety-enabled")?.checked !== false,
-      arm_freeze_overlay_on_stale_enabled: element("so101-freeze-overlay-on-stale-enabled")?.checked !== false,
+      arm_freeze_overlay_on_stale_enabled: true,
       arm_d455_visual_correction_enabled: element("so101-d455-visual-correction-enabled")?.checked === true,
       arm_idle_return_enabled: element("so101-idle-return-enabled")?.checked === true,
     };
@@ -195,10 +195,8 @@ class So101WebModule {
     element("so101-overlay-enabled").checked = saved.robot_overlay_enabled !== false;
     element("so101-overlay-style").value = saved.robot_overlay_style === "solid" ? "solid" : "alignment";
     element("so101-overlay-occlusion-enabled").checked = (saved.robot_overlay_mask_scanned_robot ?? saved.robot_overlay_mask_scanned_arm) !== false;
-    element("so101-measured-feedback-enabled").checked = saved.arm_measured_feedback_enabled !== false;
     element("so101-target-ghost-enabled").checked = saved.arm_target_ghost_enabled !== false;
     element("so101-following-error-safety-enabled").checked = saved.arm_following_error_safety_enabled !== false;
-    element("so101-freeze-overlay-on-stale-enabled").checked = saved.arm_freeze_overlay_on_stale_enabled !== false;
     element("so101-d455-visual-correction-enabled").checked = saved.arm_d455_visual_correction_enabled === true;
     element("so101-idle-return-enabled").checked = saved.arm_idle_return_enabled === true;
   }
@@ -258,7 +256,7 @@ class So101WebModule {
     element("so101-enable").disabled = !((arm.leaderConnected || arm.keyboardConnected) && arm.serverConnected && arm.followerConnected) || arm.armed || blocksEnable;
     element("so101-enable").textContent = arm.armed ? "Arm Enabled" : "Enable Arm";
     element("so101-restart").disabled = !arm.serverConnected || arm.restartRequested;
-    element("so101-restart").textContent = arm.restartRequested ? "Restarting Arm…" : "Restart Arm Connection";
+    element("so101-restart").textContent = arm.restartRequested ? "Reconnecting Arm…" : "Reconnect Arm Hardware";
     const returningRest = status.rest_return_active === true;
     element("so101-return-rest").disabled = !arm.serverConnected || !arm.followerConnected || returningRest || ["fault", "restarting", "calibrating"].includes(arm.state);
     element("so101-return-rest").textContent = returningRest ? `Returning to Rest ${Math.round(Number(status.rest_return_progress || 0) * 100)}%` : "Return Arm to Rest Pose";
@@ -288,10 +286,10 @@ class So101WebModule {
 
   sendFeedbackSettings() {
     return window.so101ArmController?.setFeedbackSettings({
-      measured_feedback_enabled: element("so101-measured-feedback-enabled").checked,
+      measured_feedback_enabled: true,
       target_ghost_enabled: element("so101-target-ghost-enabled").checked,
       following_error_safety_enabled: element("so101-following-error-safety-enabled").checked,
-      freeze_overlay_on_stale_enabled: element("so101-freeze-overlay-on-stale-enabled").checked,
+      freeze_overlay_on_stale_enabled: true,
       d455_visual_correction_enabled: element("so101-d455-visual-correction-enabled").checked,
     });
   }
@@ -326,7 +324,7 @@ class So101WebModule {
       window.so101ArmController?.setIdleReturn(event.currentTarget.checked, 600);
       event.currentTarget.blur();
     });
-    for (const id of ["so101-measured-feedback-enabled", "so101-target-ghost-enabled", "so101-following-error-safety-enabled", "so101-freeze-overlay-on-stale-enabled", "so101-d455-visual-correction-enabled"]) {
+    for (const id of ["so101-target-ghost-enabled", "so101-following-error-safety-enabled", "so101-d455-visual-correction-enabled"]) {
       element(id).addEventListener("change", (event) => { sendViewSettings(); this.sendFeedbackSettings(); event.currentTarget.blur(); });
     }
     for (const id of ["so101-overlay-enabled", "so101-overlay-occlusion-enabled", "so101-overlay-style"]) {

@@ -234,10 +234,8 @@ class So101Operator(GenericRobotOperator):
 
     def persistent_view_settings(self) -> tuple[str, ...]:
         return (
-            "arm_measured_feedback_enabled",
             "arm_target_ghost_enabled",
             "arm_following_error_safety_enabled",
-            "arm_freeze_overlay_on_stale_enabled",
             "arm_d455_visual_correction_enabled",
             "arm_idle_return_enabled",
         )

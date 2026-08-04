@@ -12,7 +12,6 @@ from pathlib import Path
 
 import robot_teleop.cameras  # noqa: F401
 import robot_teleop.robots  # noqa: F401
-import robot_teleop.tracking  # noqa: F401
 from robot_teleop.config import DEFAULT_CONFIG, load_config
 from robot_teleop.doctor import format_report, run_checks
 from robot_teleop.modules import load_robot_modules

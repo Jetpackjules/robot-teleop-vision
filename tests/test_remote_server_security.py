@@ -398,6 +398,7 @@ def test_remote_view_settings_are_typed_and_clamped():
             "workspace_surface_size": 99,
             "workspace_surface_opacity": 0.001,
             "display_mode": "rgb_camera",
+            "stream_preset": "latency",
             "calibrate_robot_position": True,
             "focus_pick_uv": [1.5, -0.25],
             "focus_pick_sent_unix_ms": 123456,
@@ -418,12 +419,15 @@ def test_remote_view_settings_are_typed_and_clamped():
     assert result["workspace_surface_size"] == 10.0
     assert result["workspace_surface_opacity"] == 0.01
     assert result["display_mode"] == "rgb_camera"
+    assert result["stream_preset"] == "latency"
     assert result["focus_pick_uv"] == [1.0, 0.0]
     assert result["focus_pick_sent_unix_ms"] == 123456
     with pytest.raises(ValueError, match="boolean"):
         handler.validate_view_settings({"inspect_enabled": "yes"})
     with pytest.raises(ValueError, match="alignment or solid"):
         handler.validate_view_settings({"robot_overlay_style": "wireframe"})
+    with pytest.raises(ValueError, match="quality or latency"):
+        handler.validate_view_settings({"stream_preset": "automatic"})
     with pytest.raises(ValueError, match="two coordinates"):
         handler.validate_view_settings({"focus_pick_uv": [0.5]})
 
@@ -435,6 +439,7 @@ def test_site_settings_persist_only_stable_setup_and_clamp_navigation():
             "type": "view_settings",
             "settings_version": 10,
             "display_mode": "point_cloud",
+            "stream_preset": "quality",
             "head_tracking_enabled": False,
             "workspace_surface_offset": 0.025,
             "arm_idle_return_enabled": True,
@@ -450,6 +455,7 @@ def test_site_settings_persist_only_stable_setup_and_clamp_navigation():
     )
     assert result["settings_version"] == 10
     assert result["display_mode"] == "point_cloud"
+    assert result["stream_preset"] == "quality"
     assert result["head_tracking_enabled"] is False
     assert result["workspace_surface_offset"] == 0.025
     assert result["arm_idle_return_enabled"] is True
@@ -504,3 +510,12 @@ def test_controller_keeps_daily_controls_separate_from_advanced_setup():
     assert 'id="robot-setup-root"' in page
     assert page.index('id="robot-settings-root"') < page.index('id="advanced-setup"')
     assert page.index('id="robot-setup-root"') > page.index('id="advanced-setup"')
+    assert 'id="stream-preset"' in page
+    assert '>Reconnect Video</button>' in page
+    assert page.count('id="recenter"') == 1
+    assert 'id="inspect-recenter"' not in page
+    assert 'id="inspect-enabled"' not in page
+    assert 'id="head-tracking-options"' in page
+    assert page.index('id="persistent-temporal-reference-enabled"') > page.index(
+        "<h3>Troubleshooting</h3>"
+    )

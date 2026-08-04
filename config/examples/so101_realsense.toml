@@ -36,6 +36,3 @@ hold_on_connect = true
 ignore_motor_6 = false
 # Optional V4L2 path. Blank auto-discovers the example arm's wrist camera.
 wrist_camera_device = ""
-
-[tracking]
-adapter = "browser_mediapipe"

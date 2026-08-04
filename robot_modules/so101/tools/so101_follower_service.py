@@ -2127,7 +2127,7 @@ class FollowerController:
         self.state = "fault"
         self.hardware_fault = message
         self.fault = f"hardware fault: {message}"
-        self.status_message = "Follower hardware stopped; use Restart Arm Connection."
+        self.status_message = "Follower hardware stopped; use Reconnect Arm Hardware."
         self.calibration_sweep_active = False
         self.rest_return_active = False
         self.rest_return_waypoints = []

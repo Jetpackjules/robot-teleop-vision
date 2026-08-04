@@ -90,6 +90,8 @@ For an explicitly local-only deployment, set `stack.public_mode = "off"`.
 - Temporal-update toggles, white background, and latency graphing.
 - Dynamically loaded robot overlay, occlusion, auxiliary views, controls, telemetry, and calibration UI.
 
+For camera setup, select an auto-discovered RealSense camera node in Godot. Routine capture, crop, projector, color, and far-depth controls stay at the top; the collapsed **Expert Depth Tuning** group contains the real per-camera Intel SDK filter chain and optional FastFoundation parameters. Its master filter switch is off by default because post-processing can trade motion latency and capture FPS for smoother depth.
+
 ## Repository map
 
 | Path | Purpose |

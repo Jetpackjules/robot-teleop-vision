@@ -1,6 +1,6 @@
 # Adding hardware
 
-Camera and tracking sources use small shared adapters. A robot uses a module because its geometry, controls, status translation, safety process, and calibration often need to ship together.
+Camera sources use small shared adapters. A robot uses a module because its geometry, controls, status translation, safety process, and calibration often need to ship together. Browser head tracking is an optional view control, not a hardware adapter or launcher setting.
 
 ## Camera adapter
 
@@ -29,10 +29,6 @@ Copy `robot_modules/so101` as a structural reference, then replace its implement
 - A hardware process that enforces command age, watchdog, limits, and Hold independently of the browser.
 
 Godot geometry/calibration and web controls are optional. Without them the common point-cloud viewer and semantic robot transport still work. Full details and examples are in [Robot modules](ROBOT_MODULES.md).
-
-## Tracking adapter
-
-A tracking adapter describes the tracking source. Use `disabled` for direct mouse orbit/pan/zoom. Browser MediaPipe is optional and never required for robot control.
 
 ## Acceptance checklist
 

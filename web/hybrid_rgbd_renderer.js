@@ -82,7 +82,7 @@ const state = {
   manualPan: [0, 0, 0],
   pointerNavigation: null,
   settings: {
-    inspect_enabled: false,
+    inspect_enabled: true,
     yaw_gain: 2.5,
     pitch_gain: 1.825,
     orbit_pitch_offset: 0,
