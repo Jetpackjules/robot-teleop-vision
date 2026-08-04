@@ -128,3 +128,7 @@ robot-teleop migrate-state --from-project "2.5D window V3"
 ```
 
 Shared camera/world state and the installed module manifests' declared durable files are copied into Robot Teleop Vision's Godot user-data directory. Captures, logs, physical profiles, and debug images are never copied into the repository.
+
+## License
+
+Robot Teleop Vision is licensed under the [Apache License 2.0](LICENSE). Third-party models and robot assets retain the licenses documented alongside them.
