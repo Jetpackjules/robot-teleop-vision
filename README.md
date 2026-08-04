@@ -109,6 +109,18 @@ For camera setup, select an auto-discovered RealSense camera node in Godot. Rout
 
 Read [Windows first-run](docs/WINDOWS.md), [Headless Linux](docs/HEADLESS_LINUX.md), [Architecture](docs/ARCHITECTURE.md), [Robot modules](docs/ROBOT_MODULES.md), [Safety](docs/SAFETY.md), [Calibration](docs/CALIBRATION.md), and [Adapters](docs/ADAPTERS.md) before deploying a new robot or site.
 
+## Supported hardware
+
+| Type | Model | Status |
+| --- | --- | --- |
+| Camera | Intel RealSense D455 | Supported |
+| Camera | Intel RealSense D435 | Supported |
+| Camera | Intel RealSense D435i | Supported |
+| Camera | Other librealsense RGB-D models | Supported (untested) |
+| Robot | SO-101 leader/follower | Supported |
+
+Additional camera backends can be added under `robot_teleop/cameras/`; additional robot integrations live under `robot_modules/<robot>/`.
+
 ## License
 
 Robot Teleop Vision is licensed under the [Apache License 2.0](LICENSE). Third-party models and robot assets retain the licenses documented alongside them.
