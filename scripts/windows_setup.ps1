@@ -20,6 +20,48 @@ if ($PackagedRuntime) {
     Set-Content "config\local.toml" $Config -Encoding UTF8
 }
 
+if (-not $PackagedRuntime) {
+    $ExtensionManifest = "res://native/realsense_shared_memory/realsense_shared_memory.gdextension"
+    $ExtensionList = Join-Path $Root ".godot\extension_list.cfg"
+    $NeedsGodotImport = -not (Test-Path $ExtensionList)
+    if (-not $NeedsGodotImport) {
+        $NeedsGodotImport = -not (Get-Content $ExtensionList -Raw).Contains($ExtensionManifest)
+    }
+
+    if ($NeedsGodotImport) {
+        $GodotExecutable = [string](& ".venv\Scripts\python.exe" -c 'from robot_teleop.config import load_config; from robot_teleop.doctor import find_godot; path = find_godot(load_config().godot.executable); print(path or "")')
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not resolve the configured Godot executable."
+        }
+        $GodotExecutable = $GodotExecutable.Trim()
+        if (-not $GodotExecutable) {
+            throw "Godot 4.6+ was not found. Add Godot to PATH or set godot.executable in config\local.toml, then rerun this script."
+        }
+
+        $GodotImportExecutable = $GodotExecutable
+        if ([IO.Path]::GetExtension($GodotExecutable) -ieq ".exe" -and -not [IO.Path]::GetFileNameWithoutExtension($GodotExecutable).EndsWith("_console", [StringComparison]::OrdinalIgnoreCase)) {
+            $ConsoleCandidate = Join-Path ([IO.Path]::GetDirectoryName($GodotExecutable)) ([IO.Path]::GetFileNameWithoutExtension($GodotExecutable) + "_console.exe")
+            if (Test-Path -LiteralPath $ConsoleCandidate) {
+                $GodotImportExecutable = $ConsoleCandidate
+            }
+        }
+
+        Write-Host "Importing the Godot project and registering native extensions..."
+        & $GodotImportExecutable --headless --editor --path $Root --quit
+        if ($LASTEXITCODE -ne 0) {
+            throw "Godot project import failed. Review the output above before starting the runtime."
+        }
+    }
+
+    if (-not (Test-Path $ExtensionList)) {
+        throw "Godot did not create .godot\extension_list.cfg. The native RealSense extension is not registered."
+    }
+    if (-not (Get-Content $ExtensionList -Raw).Contains($ExtensionManifest)) {
+        throw "Godot did not register the RealSense GDExtension. Rerun setup after resolving the Godot import errors above."
+    }
+    Write-Host "Verified Godot native-extension registration."
+}
+
 Write-Host "Setup complete."
 if (-not (Get-Command cloudflared -ErrorAction SilentlyContinue)) {
     Write-Warning "cloudflared was not found. Install it for the default free public URL, or set stack.public_mode = 'off' for local-only use."

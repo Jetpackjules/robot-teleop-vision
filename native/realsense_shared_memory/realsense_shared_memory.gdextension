@@ -1,6 +1,6 @@
 [configuration]
 entry_symbol = "realsense_shared_memory_library_init"
-compatibility_minimum = "4.4"
+compatibility_minimum = "4.6"
 
 [libraries]
 windows.debug.x86_64 = "res://native/realsense_shared_memory/bin/realsense_shared_memory.dll"

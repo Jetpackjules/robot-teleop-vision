@@ -21,10 +21,13 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[realsense,calibration,test]"
 robot-teleop init --example vision_only
+godot --headless --editor --path . --quit
 robot-teleop doctor
 robot-teleop modules
 robot-teleop start
 ```
+
+The one-time headless editor import registers the bundled RealSense GDExtension in a clean source checkout. On Windows, [`scripts/windows_setup.ps1`](scripts/windows_setup.ps1) performs this import and verifies the extension index automatically. `RealSenseSharedMemoryPointCloud native extension is unavailable` is not a benign USB or camera warning: the point-cloud view cannot operate until setup and Doctor both pass.
 
 In another terminal:
 

@@ -8,7 +8,7 @@ Install these before cloning:
 
 - Git for Windows.
 - Python 3.11 x64, including the `py` launcher and **Add Python to PATH** option.
-- Godot 4.6.3 or newer x64.
+- Godot 4.6.3 or newer x64, available as `godot` or `godot4` on `PATH`. If you use a custom location, run setup once to create `config/local.toml`, set `godot.executable` there, and rerun setup.
 - Intel RealSense SDK 2.0/runtime and the current camera firmware/driver.
 - `cloudflared` on `PATH` for the default free temporary public URL.
 
@@ -28,7 +28,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\.venv\Scripts\robot-teleop.exe modules --json
 ```
 
-The setup script creates ignored `config/local.toml` in safe vision-only mode and assigns a unique local operator password. A clean clone cannot command a robot.
+The setup script creates ignored `config/local.toml` in safe vision-only mode, assigns a unique local operator password, and performs the one-time headless Godot editor import required to register the bundled GDExtension. It stops before runtime startup if `.godot/extension_list.cfg` does not list the RealSense extension. A clean clone cannot command a robot.
 
 Start the stack in that PowerShell window:
 
@@ -50,6 +50,30 @@ The newest browser page becomes the sole stream/control owner. Opening another p
 Import this checkout's `project.godot`. The project title is **Robot Teleop Vision**. The **Teleop Setup** dock can create config, run Doctor, start the same supervised runtime, open the website, and safely stop it. Calibration, motion, and view controls intentionally remain in the website.
 
 Use Forward+ unless that PC cannot support it. Compatibility is supported, but Forward+ is the normal desktop renderer. The native RealSense nodes appear only when a camera and the Intel runtime are available.
+
+## Native RealSense extension verification
+
+The following warning is not an expected camera or USB warning:
+
+```text
+RealSenseSharedMemoryPointCloud native extension is unavailable
+```
+
+It means Godot did not load the point-cloud renderer, so the browser can remain connected while showing no point cloud. From the repository root, rerun setup and Doctor before investigating camera profiles:
+
+```powershell
+.\scripts\windows_setup.ps1
+Get-Content .godot\extension_list.cfg
+.\.venv\Scripts\robot-teleop.exe doctor
+```
+
+The extension list must contain:
+
+```text
+res://native/realsense_shared_memory/realsense_shared_memory.gdextension
+```
+
+If setup cannot create that entry, preserve its complete Godot output. Do not treat a successful tunnel, web page, or camera USB negotiation as evidence that the native renderer loaded.
 
 ## Browser acceptance checklist
 

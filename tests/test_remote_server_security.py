@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import ssl
 import sys
 import time
 from collections import deque
@@ -10,11 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from lan_remote_view_server import LanRemoteHandler, LanRemoteServer
+from lan_remote_view_server import LanRemoteHandler, LanRemoteServer, ensure_cert
+
 from robot_teleop.operator import load_robot_operator
 
 
@@ -23,6 +24,18 @@ def bare_handler(headers=None, server=None):
     handler.headers = headers or {}
     handler.server = server or SimpleNamespace(robot_operator=load_robot_operator("so101"))
     return handler
+
+
+def test_tls_certificate_generation_does_not_require_openssl(tmp_path):
+    cert = tmp_path / "tls" / "lan_remote.crt"
+    key = tmp_path / "tls" / "lan_remote.key"
+
+    ensure_cert(cert, key, "127.0.0.1")
+
+    assert cert.is_file()
+    assert key.is_file()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=cert, keyfile=key)
 
 
 def test_login_redirect_target_never_leaves_origin():

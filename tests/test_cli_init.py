@@ -13,5 +13,6 @@ def test_init_enables_cloudflare_with_generated_password(tmp_path):
     assert config.stack.public_mode == "quick"
     assert config.stack.password_default != "change-me"
     assert len(config.stack.password_default) >= 24
+    assert not config.stack.password_default.startswith("-")
     if os.name != "nt":
         assert destination.stat().st_mode & 0o777 == 0o600

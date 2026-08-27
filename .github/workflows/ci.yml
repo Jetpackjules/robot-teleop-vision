@@ -45,11 +45,87 @@ jobs:
           curl -fL -o godot.zip https://github.com/godotengine/godot-builds/releases/download/4.6.3-stable/Godot_v4.6.3-stable_linux.x86_64.zip
           unzip -q godot.zip
           chmod +x Godot_v4.6.3-stable_linux.x86_64
-      - name: Scan without loading site-specific native libraries
+      # This job isolates GDScript parsing. The Windows job below loads and
+      # validates the committed native RealSense DLL on every CI run.
+      - name: Scan GDScript without native libraries
         run: |
+          set -o pipefail
           mv native/realsense_shared_memory/realsense_shared_memory.gdextension native/realsense_shared_memory/realsense_shared_memory.gdextension.disabled
           ./Godot_v4.6.3-stable_linux.x86_64 --headless --editor --path . --quit 2>&1 | tee godot-scan.log
           ! grep -Eiq "parse error|script error" godot-scan.log
+
+  godot-windows-native:
+    name: Godot Windows native extension smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Godot 4.6.3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest -Uri "https://github.com/godotengine/godot-builds/releases/download/4.6.3-stable/Godot_v4.6.3-stable_win64.exe.zip" -OutFile godot.zip
+          Expand-Archive -Path godot.zip -DestinationPath .
+      - name: Import project and verify extension registration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $GodotExecutable = (Resolve-Path ".\Godot_v4.6.3-stable_win64_console.exe").Path
+          & $GodotExecutable --headless --editor --path . --quit
+          if ($LASTEXITCODE -ne 0) {
+              throw "Godot project import failed with exit code $LASTEXITCODE."
+          }
+          $ExtensionList = ".godot\extension_list.cfg"
+          $ExtensionManifest = "res://native/realsense_shared_memory/realsense_shared_memory.gdextension"
+          if (-not (Test-Path $ExtensionList)) {
+              throw "Godot did not create $ExtensionList."
+          }
+          if (-not (Get-Content $ExtensionList -Raw).Contains($ExtensionManifest)) {
+              throw "Godot did not register $ExtensionManifest."
+          }
+      - name: Require native capture and point-cloud classes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $SmokeScript = @'
+          extends SceneTree
+
+          const REQUIRED_CLASSES := [
+              "RealSenseDirectFrameSource",
+              "RealSensePairCalibrator",
+              "RealSenseSharedMemoryReader",
+              "RealSenseSharedMemoryPointCloud",
+          ]
+          const POINT_CLOUD_CLASS := "RealSenseSharedMemoryPointCloud"
+          const REQUIRED_POINT_CLOUD_METHODS := [
+              "get_depth_u16_frame",
+              "get_color_image",
+              "request_rgbd_encode",
+              "take_rgbd_encoded_frame",
+          ]
+
+          func _initialize() -> void:
+              for required_class in REQUIRED_CLASSES:
+                  if not ClassDB.class_exists(required_class):
+                      push_error("Missing required native class: %s" % required_class)
+                      quit(1)
+                      return
+              var available_methods := {}
+              for method in ClassDB.class_get_method_list(POINT_CLOUD_CLASS):
+                  available_methods[String(method.get("name", ""))] = true
+              for method_name in REQUIRED_POINT_CLOUD_METHODS:
+                  if not available_methods.has(method_name):
+                      push_error("Missing required %s method: %s" % [POINT_CLOUD_CLASS, method_name])
+                      quit(1)
+                      return
+              print("Native RealSense capture and point-cloud API loaded.")
+              quit(0)
+          '@
+          Set-Content -Path ".godot\native_extension_smoke.gd" -Value $SmokeScript -Encoding utf8
+          $GodotExecutable = (Resolve-Path ".\Godot_v4.6.3-stable_win64_console.exe").Path
+          & $GodotExecutable --headless --path . --quit-after 120 --script ".godot\native_extension_smoke.gd"
+          if ($LASTEXITCODE -ne 0) {
+              throw "Native RealSense GDExtension smoke test failed with exit code $LASTEXITCODE."
+          }
 
   windows-package:
     name: Windows packaged runtime

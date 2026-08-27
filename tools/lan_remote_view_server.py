@@ -6,6 +6,7 @@ import fractions
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import os
 import socket
@@ -19,18 +20,29 @@ import uuid
 import zlib
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
-import av
 import aiortc.codecs as aiortc_codecs
+import av
 import jwt
 import numpy as np
-from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
-from aiortc import RTCRtpSender
+from aiortc import (
+    RTCConfiguration,
+    RTCIceServer,
+    RTCPeerConnection,
+    RTCRtpSender,
+    RTCSessionDescription,
+    VideoStreamTrack,
+)
 from aiortc.codecs import h264, vpx
 from aiortc.exceptions import InvalidStateError
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -39,7 +51,6 @@ if str(REPO_ROOT) not in sys.path:
 from robot_teleop.modules import public_robot_module
 from robot_teleop.operator import RobotCommandError, load_robot_operator
 from robot_teleop.state import godot_app_userdata_root
-
 
 h264.MAX_BITRATE = 24_000_000
 h264.DEFAULT_BITRATE = 4_000_000
@@ -3953,29 +3964,72 @@ def ensure_cert(cert: Path, key: Path, host: str):
     if cert.exists() and key.exists():
         return
     cert.parent.mkdir(parents=True, exist_ok=True)
-    alt_names = ["DNS:localhost", "IP:127.0.0.1"]
-    if host not in ("0.0.0.0", "::"):
-        alt_names.append(f"IP:{host}")
-    for ip in lan_ips():
-        entry = f"IP:{ip}"
-        if entry not in alt_names:
-            alt_names.append(entry)
-    alt_name = ",".join(alt_names)
-    cmd = [
-        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-        "-keyout", str(key), "-out", str(cert), "-days", "365",
-        "-subj", "/CN=Godot LAN Remote",
-        "-addext", f"subjectAltName={alt_name}",
+    key.parent.mkdir(parents=True, exist_ok=True)
+    alt_names: list[x509.GeneralName] = [
+        x509.DNSName("localhost"),
+        x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if host not in ("0.0.0.0", "::"):
+        try:
+            alt_names.append(x509.IPAddress(ipaddress.ip_address(host)))
+        except ValueError:
+            alt_names.append(x509.DNSName(host))
+    known_ips = {str(name.value) for name in alt_names if isinstance(name, x509.IPAddress)}
+    for address in lan_ips():
+        if address not in known_ips:
+            alt_names.append(x509.IPAddress(ipaddress.ip_address(address)))
+            known_ips.add(address)
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Godot LAN Remote")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=365))
+        .add_extension(x509.SubjectAlternativeName(alt_names), critical=False)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .sign(private_key, hashes.SHA256())
+    )
+    key.write_bytes(
+        private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    cert.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    try:
+        os.chmod(key, 0o600)
+    except OSError:
+        pass
 
 
 def lan_ips() -> list[str]:
+    addresses: set[str] = set()
     try:
-        raw = subprocess.check_output(["hostname", "-I"], text=True).strip()
-    except Exception:
-        return []
-    return [ip for ip in raw.split() if "." in ip and not ip.startswith("127.")]
+        raw = subprocess.check_output(
+            ["hostname", "-I"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        addresses.update(raw.split())
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET):
+            addresses.add(info[4][0])
+    except OSError:
+        pass
+    return sorted(
+        address
+        for address in addresses
+        if "." in address and not address.startswith("127.") and address != "0.0.0.0"
+    )
 
 
 def clamp_int(value: str, minimum: int, maximum: int) -> int:
@@ -4621,7 +4675,7 @@ def main():
     try:
         ensure_cert(cert, key, args.host)
     except Exception as exc:
-        print(f"Could not create TLS cert with openssl: {exc}", file=sys.stderr)
+        print(f"Could not create TLS certificate: {exc}", file=sys.stderr)
         sys.exit(1)
 
     server = LanRemoteServer(

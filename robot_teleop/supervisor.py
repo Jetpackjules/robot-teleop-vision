@@ -14,12 +14,16 @@ import urllib.request
 from urllib.parse import urlparse
 
 from robot_teleop.config import REPO_ROOT, AppConfig
-from robot_teleop.doctor import find_cloudflared, find_godot
+from robot_teleop.doctor import (
+    ensure_godot_extension_index,
+    find_cloudflared,
+    find_godot,
+    godot_extension_smoke_status,
+)
 from robot_teleop.interfaces import LaunchSpec
 from robot_teleop.journal import JournalSink
 from robot_teleop.modules import public_robot_module
 from robot_teleop.registry import create
-
 
 RUN_DIR = REPO_ROOT / ".teleop"
 STATE_PATH = RUN_DIR / "run.json"
@@ -182,6 +186,15 @@ class Supervisor:
                 raise RuntimeError("Godot 4.6+ was not found; set godot.executable in config/local.toml")
             godot_command = [str(godot), "--headless"]
             if not self.config.godot.packaged_runtime:
+                ensure_godot_extension_index(godot, self.config.project_root)
+                extension_ok, extension_detail = godot_extension_smoke_status(
+                    godot,
+                    self.config.project_root,
+                )
+                if not extension_ok:
+                    raise RuntimeError(
+                        f"Godot native RGB-D extension check failed: {extension_detail}"
+                    )
                 godot_command.extend(("--path", str(self.config.project_root)))
             self._spawn(
                 LaunchSpec(
@@ -203,7 +216,7 @@ class Supervisor:
             "--udp-port", str(self.config.stack.tracking_port),
             "--stream-port", str(self.config.stack.stream_port),
             "--robot-calibration-status-port", str(self.config.stack.calibration_status_port),
-            "--password", password,
+            f"--password={password}",
         ]
         if self.config.stack.public_mode == "quick":
             if not password or password == "change-me":

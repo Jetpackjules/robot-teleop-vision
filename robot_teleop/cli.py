@@ -30,7 +30,7 @@ def _initialize(destination: Path, example: str, force: bool) -> int:
     contents = source.read_text(encoding="utf-8")
     contents = contents.replace(
         'password_default = "change-me"',
-        f'password_default = "{secrets.token_urlsafe(24)}"',
+        f'password_default = "rtv_{secrets.token_urlsafe(24)}"',
     )
     destination.write_text(contents, encoding="utf-8")
     try:
