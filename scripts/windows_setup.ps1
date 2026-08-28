@@ -29,9 +29,9 @@ if (-not $PackagedRuntime) {
     }
 
     if ($NeedsGodotImport) {
-        $GodotExecutable = [string](& ".venv\Scripts\python.exe" -c 'from robot_teleop.config import load_config; from robot_teleop.doctor import find_godot; path = find_godot(load_config().godot.executable); print(path or "")')
+        $GodotExecutable = [string](& ".venv\Scripts\robot-teleop.exe" godot-path)
         if ($LASTEXITCODE -ne 0) {
-            throw "Could not resolve the configured Godot executable."
+            throw "Godot 4.6+ was not found. Add Godot to PATH or set godot.executable in config\local.toml, then rerun this script."
         }
         $GodotExecutable = $GodotExecutable.Trim()
         if (-not $GodotExecutable) {

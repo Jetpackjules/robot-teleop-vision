@@ -14,7 +14,7 @@ import robot_teleop.cameras
 import robot_teleop.robots
 from robot_teleop.config import DEFAULT_CONFIG, load_config
 from robot_teleop.diagnostics import create_support_bundle
-from robot_teleop.doctor import format_report, run_checks
+from robot_teleop.doctor import find_godot, format_report, run_checks
 from robot_teleop.modules import load_robot_modules
 from robot_teleop.registry import create
 from robot_teleop.state import migrate_project_state
@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     initialize.add_argument("--example", choices=_example_names(), default="vision_only")
     initialize.add_argument("--force", action="store_true")
     sub.add_parser("doctor", help="check dependencies and discover hardware")
+    sub.add_parser("godot-path", help="print the resolved Godot executable path")
     devices = sub.add_parser("devices", help="list discovered camera devices")
     devices.add_argument("--json", action="store_true")
     modules = sub.add_parser("modules", help="list installed robot modules")
@@ -125,6 +126,12 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(f"{item['id']}: {item['label']}" for item in modules))
         return 0
     config = load_config(config_path)
+    if args.command == "godot-path":
+        godot = find_godot(config.godot.executable)
+        if godot is None:
+            return 1
+        print(godot)
+        return 0
     if args.command == "doctor":
         checks, devices = run_checks(config)
         print(format_report(checks, devices))
