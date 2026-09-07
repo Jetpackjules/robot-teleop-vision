@@ -5,6 +5,7 @@ const OVERLAY_PATH := "../WorldLevelAnchor/RobotOverlay"
 const CAMERA_ROOT_PATH := "../WorldLevelAnchor/CameraClouds"
 const REALSENSE_ARUCO_GROUND_TRUTH_PATH := "user://realsense_alignment_ground_truth.json"
 const STATUS_TYPE := "robot_calibration_status"
+const SWEEP_ACK_TIMEOUT_MSEC := 10000
 const MAX_SOLVE_FRAMES := 24
 const TRUSTED_HEADING_LIMIT_DEGREES := 8.0
 const TRUSTED_TRANSLATION_LIMIT_M := 0.02
@@ -167,6 +168,7 @@ var _editor_sweep_due_msec := 0
 var _editor_sweep_requested := false
 var _editor_sweep_requested_msec := 0
 var _editor_sweep_acknowledged := false
+var _calibration_request_id := ""
 var _preflight_sequences: Dictionary = {}
 var _preflight_ready_samples := 0
 var _next_preflight_msec := 0
@@ -456,8 +458,9 @@ func start_arm_position_calibration(
 				return
 	if auto_move and overlay.has_method("get_latest_status"):
 		var follower_status: Dictionary = overlay.call("get_latest_status")
-		if not bool(follower_status.get("follower_connected", false)):
-			_fail("Editor calibration needs the follower service on telemetry UDP 4252.")
+		var telemetry_error := _follower_telemetry_error(overlay, follower_status)
+		if not telemetry_error.is_empty():
+			_fail(telemetry_error)
 			return
 		if str(follower_status.get("state", "")) == "fault":
 			_fail("Follower is faulted: %s. Use Reconnect Arm Hardware first." % str(follower_status.get("fault", "unknown fault")))
@@ -484,6 +487,7 @@ func start_arm_position_calibration(
 	_editor_sweep_requested = false
 	_editor_sweep_acknowledged = false
 	_editor_sweep_requested_msec = 0
+	_calibration_request_id = ""
 	_last_accepted_pose = []
 	_capture_diagnostic = "Waiting to sample telemetry and depth."
 	_capture_renderer_count = 0
@@ -685,10 +689,16 @@ func cancel_arm_position_calibration() -> void:
 func _start_editor_sweep() -> void:
 	if not _auto_move_this_capture or _state != "capturing":
 		return
-	_connect_arm_command_peer()
-	_arm_command_udp.put_packet(JSON.stringify({
+	var connection_error := _connect_arm_command_peer()
+	if connection_error != OK:
+		_fail("Cannot connect to follower command UDP %d (error %d). No sweep was sent." % [follower_command_port, connection_error])
+		return
+	_calibration_request_id = Crypto.new().generate_random_bytes(16).hex_encode()
+	var send_error := _arm_command_udp.put_packet(JSON.stringify({
 		"type": _sweep_command_type(),
 		"action": "start",
+		"calibration_request_id": _calibration_request_id,
+		"calibration_request_expires_unix_ms": Time.get_unix_time_from_system() * 1000.0 + SWEEP_ACK_TIMEOUT_MSEC,
 		"control_session": "godot-editor-calibration",
 		"view_strategy_attempt": (
 			(
@@ -702,6 +712,9 @@ func _start_editor_sweep() -> void:
 			else 1
 		),
 	}).to_utf8_buffer())
+	if send_error != OK:
+		_fail("Could not send calibration to follower command UDP %d (error %d). No solve was attempted." % [follower_command_port, send_error])
+		return
 	_editor_sweep_requested = true
 	_editor_sweep_requested_msec = Time.get_ticks_msec()
 	_editor_sweep_acknowledged = false
@@ -765,6 +778,7 @@ func _stop_editor_sweep(reason: String) -> void:
 	_arm_command_udp.put_packet(JSON.stringify({
 		"type": _sweep_command_type(),
 		"action": "stop",
+		"calibration_request_id": _calibration_request_id,
 		"reason": reason,
 		"control_session": "godot-editor-calibration",
 	}).to_utf8_buffer())
@@ -773,15 +787,17 @@ func _stop_editor_sweep(reason: String) -> void:
 	_editor_sweep_acknowledged = false
 
 
-func _connect_arm_command_peer() -> void:
+func _connect_arm_command_peer() -> Error:
 	_arm_command_udp.close()
-	var selected_port := follower_command_port if follower_command_port > 0 else 4248
-	_arm_command_udp.connect_to_host("127.0.0.1", selected_port)
+	if follower_command_port < 1 or follower_command_port > 65535:
+		return ERR_INVALID_PARAMETER
+	return _arm_command_udp.connect_to_host("127.0.0.1", follower_command_port)
 
 
 func return_arm_to_rest_pose() -> bool:
 	if not _arm_command_udp.is_socket_connected():
-		_connect_arm_command_peer()
+		if _connect_arm_command_peer() != OK:
+			return false
 	var error := _arm_command_udp.put_packet(JSON.stringify({
 		"type": "arm_return_to_rest",
 		"control_session": "godot-editor-rest-return",
@@ -821,6 +837,66 @@ func score_transform_for_test(frames: Array, value: Transform3D) -> Dictionary:
 	return _score_transform(value, frames, false)
 
 
+func _follower_telemetry_error(overlay: Node, follower: Dictionary) -> String:
+	var endpoint := "the configured telemetry port"
+	if overlay.has_method("get_telemetry_diagnostic"):
+		var transport: Dictionary = overlay.call("get_telemetry_diagnostic")
+		endpoint = "127.0.0.1 UDP %d" % int(transport.get("port", 0))
+		if not bool(transport.get("bound", false)):
+			return "Cannot listen for follower telemetry on %s (bind error %d). Close duplicate Godot instances or correct conflicting ports; the listener retries automatically." % [endpoint, int(transport.get("bind_error", 0))]
+	if not bool(follower.get("follower_connected", false)):
+		return "No connected follower telemetry on %s. Check the follower service and its configured profile; restart robot-teleop after changing ports." % endpoint
+	return ""
+
+
+func _check_sweep_acknowledgement(follower: Dictionary, now_msec: int) -> bool:
+	# A cached rejection/ack from the previous attempt is not evidence about
+	# this one. Never resend a motion request just because telemetry is late.
+	var request_matches := (
+		not _calibration_request_id.is_empty()
+		and str(follower.get("calibration_request_id", "")) == _calibration_request_id
+	)
+	var sent_msec := float(follower.get("sent_unix_ms", 0.0))
+	var age_msec := Time.get_unix_time_from_system() * 1000.0 - sent_msec
+	var fresh := sent_msec > 0.0 and age_msec >= -1000.0 and age_msec <= 1000.0
+	if request_matches and fresh:
+		var rejection := str(follower.get("calibration_rejection", ""))
+		var request_state := str(follower.get("calibration_request_state", ""))
+		if str(follower.get("state", "")) == "fault" or request_state == "fault":
+			_fail("Follower calibration fault: %s. No solve was attempted." % str(follower.get("fault", follower.get("message", "unknown follower fault"))))
+			return false
+		if not rejection.is_empty():
+			_fail("Follower rejected calibration: %s. No solve was attempted." % rejection)
+			return false
+		if request_state == "cancelled":
+			_fail("Follower calibration was interrupted: %s. No solve was attempted." % str(follower.get("message", "Hold or another controller stopped the sweep")))
+			return false
+		if bool(follower.get("calibration_sweep_active", false)):
+			_editor_sweep_acknowledged = true
+			return true
+		if _editor_sweep_acknowledged and request_state == "completed":
+			return true
+		if request_state != "planning":
+			_fail("Follower did not start the requested sweep: %s. No solve was attempted." % str(follower.get("message", "check the follower service status")))
+			return false
+	if _editor_sweep_acknowledged:
+		_fail("Follower calibration telemetry became stale or changed to another request. The current request was stopped; no solve was attempted.")
+		return false
+	if now_msec - _editor_sweep_requested_msec > SWEEP_ACK_TIMEOUT_MSEC:
+		var detail := ""
+		if not follower.has("calibration_request_id"):
+			detail = " The follower has no request-ID support; restart it from the same updated repo as Godot."
+		elif not fresh:
+			detail = " Follower telemetry is stale; check its process and motor I/O."
+		else:
+			detail = " Check that the follower and Godot use the same resolved command/telemetry ports."
+		_fail("No acknowledgement for calibration on follower command UDP %d within %d seconds.%s No solve was attempted." % [follower_command_port, SWEEP_ACK_TIMEOUT_MSEC / 1000, detail])
+		return false
+	_capture_diagnostic = "Waiting for the follower to acknowledge this calibration request on command UDP %d." % follower_command_port
+	_set_status("capturing", _capture_diagnostic, 0.0, 0.0)
+	return false
+
+
 func _update_capture() -> void:
 	var now := Time.get_ticks_msec()
 	var elapsed := float(now - _started_msec) / 1000.0
@@ -829,20 +905,8 @@ func _update_capture() -> void:
 		_fail("Calibration preflight timed out without three fresh depth frames. The follower was not moved.")
 		return
 	if _editor_sweep_requested:
-		if bool(follower_status.get("calibration_sweep_active", false)):
-			_editor_sweep_acknowledged = true
-		elif not _editor_sweep_acknowledged:
-			var rejection := str(follower_status.get("calibration_rejection", ""))
-			if not rejection.is_empty():
-				_fail(
-					"Follower rejected the calibration sweep without moving: %s "
-					% rejection
-					+ "No solve was attempted."
-				)
-				return
-			elif now - _editor_sweep_requested_msec > 2500:
-				_fail("Follower did not acknowledge the calibration sweep. No solve was attempted.")
-				return
+		if not _check_sweep_acknowledgement(follower_status, now):
+			return
 	var required_seconds := (
 		maxf(capture_seconds, editor_sweep_minimum_seconds)
 		if _auto_move_this_capture
@@ -882,7 +946,7 @@ func _update_capture() -> void:
 				)
 				/ float(MAXIMUM_AUTOMATED_CLAW_CAPTURE_ATTEMPTS)
 			) * 0.05
-	if now >= _next_sample_msec:
+	if now >= _next_sample_msec and (not _editor_sweep_requested or _editor_sweep_acknowledged):
 		_next_sample_msec = now + int(sample_interval_seconds * 1000.0)
 		_capture_frame()
 	var excitation := _pose_excitation()
@@ -5159,6 +5223,11 @@ func _set_status(state: String, message: String, progress: float, confidence: fl
 
 
 func _fail(message: String, confidence: float = 0.0) -> void:
+	if _automation_active:
+		# Preflight/transport failures must release the automated workflow too,
+		# otherwise every subsequent button press silently returns as "busy".
+		_fail_automation(message)
+		return
 	_stop_editor_sweep("calibration failed")
 	_state = "failed"
 	_editor_status_until_msec = Time.get_ticks_msec() + 30000

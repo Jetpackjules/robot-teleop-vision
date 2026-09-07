@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import urllib.request
+from pathlib import Path
 from urllib.parse import urlparse
 
 from robot_teleop.config import REPO_ROOT, AppConfig
@@ -66,6 +67,18 @@ def read_state() -> dict:
         return json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {"running": False}
+
+
+def write_runtime_configuration(project_root: Path, payload: dict) -> None:
+    """Publish the same non-secret launch settings for a standalone editor."""
+    destination = project_root / ".teleop" / "runtime_config.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".runtime_config.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class Supervisor:
@@ -169,6 +182,43 @@ class Supervisor:
         )
 
     def start(self) -> None:
+        calibration_port = self.config.stack.calibration_status_port
+        if (
+            isinstance(calibration_port, bool)
+            or not isinstance(calibration_port, int)
+            or not 1 <= calibration_port <= 65535
+        ):
+            raise ValueError("stack.calibration_status_port must be an integer from 1 to 65535")
+        module_configuration = getattr(
+            self.robot,
+            "godot_configuration",
+            lambda **_kwargs: {},
+        )(
+            calibration_status_port=calibration_port,
+            reserved_udp_ports={
+                "stack.tracking_port": self.config.stack.tracking_port,
+                # The shared Godot gateway still uses its scene default. Do
+                # not let a custom module endpoint steal that listener even
+                # when the operator's configured tracking target differs.
+                "Godot remote-control gateway": 4247,
+            },
+        )
+        runtime_configuration = {
+            "schema_version": 1,
+            "module": self.config.robot.adapter,
+            "enabled": self.config.robot.enabled,
+            "calibration_status_port": calibration_port,
+            "module_settings": module_configuration,
+        }
+        # Resolve everything before starting hardware so a bad port/profile
+        # cannot leave a partially started follower behind.
+        runtime_configuration_json = json.dumps(runtime_configuration)
+        robot_spec = self.robot.launch_spec()
+        operator_environment = getattr(
+            self.robot,
+            "operator_environment",
+            dict,
+        )()
         for port, label in (
             (self.config.stack.https_port, "HTTPS UI"),
             (self.config.stack.stream_port, "Godot RGB-D stream"),
@@ -177,7 +227,7 @@ class Supervisor:
             if not _port_available(port):
                 raise RuntimeError(f"{label} port {port} is already in use")
         self._publish_state("starting")
-        robot_spec = self.robot.launch_spec()
+        write_runtime_configuration(self.config.project_root, runtime_configuration)
         if robot_spec:
             self._spawn(robot_spec)
         if self.config.godot.launch_runtime:
@@ -200,7 +250,10 @@ class Supervisor:
                 LaunchSpec(
                     "Godot runtime",
                     tuple(godot_command),
-                    {"ROBOT_TELEOP_MODULE": self.config.robot.adapter},
+                    {
+                        "ROBOT_TELEOP_MODULE": self.config.robot.adapter,
+                        "ROBOT_TELEOP_RUNTIME_CONFIG": runtime_configuration_json,
+                    },
                 )
             )
         password = os.environ.get(
@@ -222,11 +275,6 @@ class Supervisor:
             if not password or password == "change-me":
                 raise RuntimeError("quick public mode requires a strong GODOT_REMOTE_PASSWORD")
             server.append("--allow-quick-tunnel-robot")
-        operator_environment = getattr(
-            self.robot,
-            "operator_environment",
-            lambda: {},
-        )()
         module_paths = os.pathsep.join(self.config.robot.module_paths)
         self._spawn(
             LaunchSpec(

@@ -85,6 +85,7 @@ class ArmPairProfile:
     watchdog_ms: int
     start_pose_tolerance: tuple[float, ...]
     max_step: tuple[float, ...]
+    editor_status_port: int = 4252
 
     @classmethod
     def load(cls, path: str | Path = DEFAULT_PROFILE) -> "ArmPairProfile":
@@ -112,6 +113,7 @@ class ArmPairProfile:
             watchdog_ms=int(data.get("watchdog_ms", 250)),
             start_pose_tolerance=tolerances,
             max_step=max_step,
+            editor_status_port=int(data.get("editor_status_port", 4252)),
         )
 
     def map_leader_to_follower(self, leader_raw: list[int]) -> tuple[list[float], list[int]]:

@@ -876,6 +876,12 @@ class FollowerController:
         self.calibration_sweep_mode = "base"
         self.calibration_joint_index = -1
         self.calibration_rejection = ""
+        self.calibration_request_id = ""
+        self.calibration_request_state = "idle"
+        self.calibration_request_expires_unix_ms = 0.0
+        # Keep completed/rejected IDs for this service lifetime as well: a
+        # delayed duplicate must never restart motion after Hold or a failure.
+        self._seen_calibration_request_ids: set[str] = set()
         self.rest_pose: dict | None = None
         self.rest_pose_fault = ""
         try:
@@ -946,52 +952,42 @@ class FollowerController:
                 else "Automatic idle return disabled."
             )
             return
-        if kind == "arm_calibration_sweep":
+        calibration_commands = {
+            "arm_calibration_sweep": ("base", 1, "automatic calibration sweep stopped"),
+            "arm_joint_calibration_sweep": ("joints", 3, "automatic joint-calibration sweep stopped"),
+            "arm_base_axis_sweep": ("axis", 3, "automatic base-axis sweep stopped"),
+            "arm_wrist_calibration_sweep": ("wrist", 3, "automatic wrist-calibration sweep stopped"),
+            "arm_claw_calibration_sweep": ("claw", 5, "automatic claw-calibration sweep stopped"),
+        }
+        if kind in calibration_commands:
             action = str(message.get("action", "start"))
+            request_id = str(message.get("calibration_request_id", ""))
+            mode, maximum_attempt, stop_message = calibration_commands[kind]
             if action == "start":
-                self.start_calibration_sweep("base")
-            else:
-                self.stop_calibration_sweep("automatic calibration sweep stopped")
-            return
-        if kind == "arm_joint_calibration_sweep":
-            action = str(message.get("action", "start"))
-            if action == "start":
+                if request_id and request_id in self._seen_calibration_request_ids:
+                    return
+                attempt = max(1, min(maximum_attempt, int(message.get("view_strategy_attempt", 1))))
+                self.calibration_request_id = request_id
+                if request_id:
+                    self._seen_calibration_request_ids.add(request_id)
                 self.start_calibration_sweep(
-                    "joints",
-                    max(1, min(3, int(message.get("view_strategy_attempt", 1)))),
+                    mode,
+                    attempt,
+                    calibration_request_expires_unix_ms=message.get(
+                        "calibration_request_expires_unix_ms", 0.0
+                    ),
                 )
             else:
-                self.stop_calibration_sweep("automatic joint-calibration sweep stopped")
-            return
-        if kind == "arm_base_axis_sweep":
-            action = str(message.get("action", "start"))
-            if action == "start":
-                self.start_calibration_sweep(
-                    "axis",
-                    max(1, min(3, int(message.get("view_strategy_attempt", 1)))),
-                )
-            else:
-                self.stop_calibration_sweep("automatic base-axis sweep stopped")
-            return
-        if kind == "arm_wrist_calibration_sweep":
-            action = str(message.get("action", "start"))
-            if action == "start":
-                self.start_calibration_sweep(
-                    "wrist",
-                    max(1, min(3, int(message.get("view_strategy_attempt", 1)))),
-                )
-            else:
-                self.stop_calibration_sweep("automatic wrist-calibration sweep stopped")
-            return
-        if kind == "arm_claw_calibration_sweep":
-            action = str(message.get("action", "start"))
-            if action == "start":
-                self.start_calibration_sweep(
-                    "claw",
-                    max(1, min(5, int(message.get("view_strategy_attempt", 1)))),
-                )
-            else:
-                self.stop_calibration_sweep("automatic claw-calibration sweep stopped")
+                # Legacy clients have no transaction ID. An identified stop
+                # must not cancel a newer calibration, but legacy Hold/stop
+                # remains available as an unconditional safety action.
+                if request_id:
+                    # UDP can reorder a cancellation ahead of its start.
+                    # Remember it even when it is not the current transaction.
+                    self._seen_calibration_request_ids.add(request_id)
+                if request_id and request_id != self.calibration_request_id:
+                    return
+                self.stop_calibration_sweep(stop_message)
             return
         if kind == "arm_visual_contact_stop":
             self.sample_feedback_safely()
@@ -1299,6 +1295,8 @@ class FollowerController:
         self.status_message = "Leader control is armed."
 
     def hold(self, reason: str) -> None:
+        if self.calibration_sweep_active or self.calibration_request_state == "planning":
+            self.stop_calibration_sweep(reason)
         if self.rest_return_active:
             self.rest_return_active = False
             self.rest_return_waypoints = []
@@ -1324,6 +1322,8 @@ class FollowerController:
         self.keyboard_tool_velocity = [0.0] * 6
 
     def release_torque(self) -> None:
+        if self.calibration_sweep_active or self.calibration_request_state == "planning":
+            self.stop_calibration_sweep("operator released torque during automatic calibration")
         self.rest_return_active = False
         self.rest_return_waypoints = []
         if self.bus.connected:
@@ -1345,6 +1345,8 @@ class FollowerController:
         self.status_message = "Gripper torque released; joints 1-5 remain held."
 
     def restart_hardware(self) -> None:
+        if self.calibration_sweep_active or self.calibration_request_state == "planning":
+            self.stop_calibration_sweep("follower hardware restarted during automatic calibration")
         self.restart_count += 1
         self.calibration_sweep_active = False
         self.rest_return_active = False
@@ -1396,12 +1398,38 @@ class FollowerController:
         self,
         mode: str = "base",
         view_strategy_attempt: int = 1,
+        *,
+        calibration_request_expires_unix_ms: float = 0.0,
     ) -> None:
+        self.calibration_rejection = ""
+        self.calibration_request_state = "planning"
+        self.calibration_request_expires_unix_ms = 0.0
+        self.calibration_sweep_active = False
+        self.calibration_sweep_waypoints = []
+        self.calibration_sweep_duration = 0.0
+        self.calibration_sweep_progress = 0.0
+        self.calibration_pose_settled = False
+        self.calibration_joint_index = -1
         if self.state == "fault":
+            self.calibration_request_state = "fault"
+            self.calibration_rejection = self.fault or "restart the follower hardware first"
             self.status_message = "Automatic calibration rejected: restart the follower hardware first."
             return
         if not self.bus.connected:
+            self.calibration_request_state = "rejected"
+            self.calibration_rejection = "follower is not connected"
             self._reject("follower is not connected")
+            return
+        try:
+            expires_ms = float(calibration_request_expires_unix_ms)
+            if not math.isfinite(expires_ms) or expires_ms < 0.0:
+                raise ValueError("expiry must be finite and nonnegative")
+        except (TypeError, ValueError):
+            self.calibration_request_expires_unix_ms = 0.0
+            self._reject_calibration_start("invalid calibration request expiry")
+            return
+        self.calibration_request_expires_unix_ms = expires_ms
+        if self._reject_expired_calibration_start():
             return
         if self.rest_return_active:
             self.stop_rest_return("automatic calibration replaced return to rest")
@@ -1410,7 +1438,10 @@ class FollowerController:
             self.follower_normalized = self.profile.follower_calibration.raw_to_normalized(self.follower_raw)
             self.calibration_sweep_start = list(self.follower_normalized)
         except Exception as exc:
-            self.fail(f"could not read the follower before automatic calibration: {exc}")
+            self.calibration_rejection = f"could not read the follower before automatic calibration: {exc}"
+            self.fail(self.calibration_rejection)
+            return
+        if self._reject_expired_calibration_start():
             return
 
         self.calibration_sweep_mode = mode if mode in ("base", "joints", "axis", "wrist", "claw") else "base"
@@ -1441,31 +1472,29 @@ class FollowerController:
                 )
             self.calibration_sweep_duration = sum(item[1] for item in self.calibration_sweep_waypoints)
         except Exception as exc:
-            self.calibration_sweep_active = False
-            self.calibration_sweep_waypoints = []
-            self.calibration_sweep_duration = 0.0
-            self.calibration_sweep_progress = 0.0
-            self.calibration_pose_settled = False
-            self.calibration_joint_index = -1
-            self.control_source = "none"
-            self.state = "hold" if self.torque_enabled else "ready"
-            self.fault = ""
-            self.calibration_rejection = str(exc)
-            self.status_message = f"Automatic calibration rejected without moving the follower: {exc}"
+            self._reject_calibration_start(str(exc))
             return
 
+        if self._reject_expired_calibration_start():
+            return
         try:
             self.target_normalized = list(self.follower_normalized)
             self.applied_normalized = list(self.follower_normalized)
             self._write_current_pose()
+            if self._reject_expired_calibration_start():
+                return
             self.bus.enable_torque()
         except Exception as exc:
-            self.fail(f"could not start automatic calibration sweep: {exc}")
+            self.calibration_rejection = f"could not start automatic calibration sweep: {exc}"
+            self.fail(self.calibration_rejection)
             return
         self.torque_enabled = True
+        if self._reject_expired_calibration_start():
+            return
         self.control_source = "calibration"
         self.latest_input_source = "calibration"
         self.calibration_sweep_active = True
+        self.calibration_request_state = "running"
         self.calibration_pose_settled = False
         self.calibration_joint_index = -1
         self.calibration_sweep_started_at = self.now()
@@ -1479,7 +1508,39 @@ class FollowerController:
             f"({self.calibration_sweep_duration:.1f}s)."
         )
 
-    def stop_calibration_sweep(self, reason: str) -> None:
+    def _reject_calibration_start(self, reason: str) -> None:
+        if self.rest_return_active:
+            self.stop_rest_return("automatic calibration replaced return to rest")
+        self.calibration_sweep_active = False
+        self.calibration_sweep_waypoints = []
+        self.calibration_sweep_duration = 0.0
+        self.calibration_sweep_progress = 0.0
+        self.calibration_pose_settled = False
+        self.calibration_joint_index = -1
+        self.control_source = "none"
+        self.state = "hold" if self.torque_enabled else "ready"
+        self.fault = ""
+        self.calibration_rejection = reason
+        self.calibration_request_state = "rejected"
+        self.status_message = f"Automatic calibration rejected without moving the follower: {reason}"
+
+    def _reject_expired_calibration_start(self) -> bool:
+        # The deadline is for starting, not completing, the sweep. Planning and
+        # motor I/O are synchronous, so check again before any trajectory starts
+        # even if a queued cancellation has not yet reached receive().
+        if (
+            self.calibration_request_expires_unix_ms > 0.0
+            and time.time() * 1000.0 >= self.calibration_request_expires_unix_ms
+        ):
+            self._reject_calibration_start(
+                "calibration start request expired; no sweep was started"
+            )
+            return True
+        return False
+
+    def stop_calibration_sweep(self, reason: str, *, completed: bool = False) -> None:
+        if self.calibration_request_state in ("planning", "running"):
+            self.calibration_request_state = "completed" if completed else "cancelled"
         if self.calibration_sweep_active and self.applied_normalized is not None:
             self.target_normalized = list(self.applied_normalized)
         self.calibration_sweep_active = False
@@ -1671,7 +1732,10 @@ class FollowerController:
             )
             self._write_positions(self.profile.follower_calibration.normalized_to_raw(self.applied_normalized))
             if max(abs(a - b) for a, b in zip(self.applied_normalized, self.target_normalized, strict=True)) <= 0.25:
-                self.stop_calibration_sweep("Automatic calibration sweep complete; follower is holding its raised safe pose.")
+                self.stop_calibration_sweep(
+                    "Automatic calibration sweep complete; follower is holding its raised safe pose.",
+                    completed=True,
+                )
             return
         segment_started_at = 0.0
         segment = 0
@@ -2072,6 +2136,9 @@ class FollowerController:
             "calibration_sweep_mode": self.calibration_sweep_mode,
             "calibration_joint_index": self.calibration_joint_index,
             "calibration_rejection": self.calibration_rejection,
+            "calibration_request_id": self.calibration_request_id,
+            "calibration_request_state": self.calibration_request_state,
+            "calibration_request_expires_unix_ms": self.calibration_request_expires_unix_ms,
             "rest_pose_available": self.rest_pose is not None,
             "rest_pose_fault": self.rest_pose_fault,
             "rest_return_active": self.rest_return_active,
@@ -2117,6 +2184,8 @@ class FollowerController:
         }
 
     def fail(self, message: str) -> None:
+        if self.calibration_request_state in ("planning", "running"):
+            self.calibration_request_state = "fault"
         try:
             if self.bus.connected:
                 self.bus.disable_torque()
@@ -2270,13 +2339,23 @@ def run_service(
     return 0
 
 
+def _configured_follower_port_exists(port: str, *, platform: str | None = None) -> bool:
+    # Windows COM names are device-namespace endpoints, not filesystem paths.
+    # In particular, pySerial expands COM10+ to a \\.\COMx device path itself.
+    # Let the existing exact-port open/handshake report availability on Windows;
+    # never substitute a discovered device or choose a different follower.
+    if (sys.platform if platform is None else platform) == "win32":
+        return True
+    return Path(port).exists()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Safety-isolated SO-101 follower process.")
     parser.add_argument("--profile", default=str(DEFAULT_PROFILE))
     parser.add_argument("--command-port", type=int)
     parser.add_argument("--status-port", type=int)
     parser.add_argument("--godot-status-port", type=int)
-    parser.add_argument("--editor-status-port", type=int, default=4252)
+    parser.add_argument("--editor-status-port", type=int)
     parser.add_argument("--hz", type=float, default=30.0)
     parser.add_argument(
         "--feedback-hz",
@@ -2297,15 +2376,24 @@ def main() -> int:
     )
     args = parser.parse_args()
     profile = ArmPairProfile.load(Path(args.profile))
-    command_port = args.command_port or profile.command_port
-    status_port = args.status_port or profile.status_port
-    godot_status_port = args.godot_status_port or profile.godot_status_port
+    command_port = profile.command_port if args.command_port is None else args.command_port
+    status_port = profile.status_port if args.status_port is None else args.status_port
+    godot_status_port = profile.godot_status_port if args.godot_status_port is None else args.godot_status_port
+    editor_status_port = profile.editor_status_port if args.editor_status_port is None else args.editor_status_port
+    for name, value, minimum in (
+        ("command-port", command_port, 1),
+        ("status-port", status_port, 1),
+        ("godot-status-port", godot_status_port, 0),
+        ("editor-status-port", editor_status_port, 0),
+    ):
+        if not minimum <= value <= 65535:
+            parser.error(f"--{name} must be between {minimum} and 65535")
     bus: FollowerBus
     if args.dry_run:
         bus = FakeFollowerBus(profile.follower_calibration.normalized_to_raw([20, 20, 20, 20, 20, 20]))
         print("SO-101 follower service is in dry-run mode", flush=True)
     else:
-        if not Path(profile.follower_port).exists():
+        if not _configured_follower_port_exists(profile.follower_port):
             print(f"Follower not found at {profile.follower_port}", file=sys.stderr)
             return 2
         if args.ignore_motor_6:
@@ -2328,7 +2416,7 @@ def main() -> int:
         command_port,
         status_port,
         godot_status_port,
-        args.editor_status_port,
+        editor_status_port,
         args.hz,
         args.feedback_hz,
         args.hold_on_connect,

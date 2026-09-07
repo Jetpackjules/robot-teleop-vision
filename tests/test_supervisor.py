@@ -35,7 +35,7 @@ def test_operator_password_starting_with_dash_is_passed_as_one_argument(tmp_path
     config = AppConfig(
         source=tmp_path / "local.toml",
         stack=StackConfig(public_mode="off", password_default="-generated-password"),
-        godot=GodotConfig(launch_runtime=False),
+        godot=GodotConfig(launch_runtime=False, project=str(tmp_path)),
     )
     supervisor = Supervisor(config)
     launches = []

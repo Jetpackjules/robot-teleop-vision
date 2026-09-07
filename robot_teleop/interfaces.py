@@ -35,3 +35,12 @@ class RobotAdapter(Protocol):
     def public_manifest(self) -> dict[str, Any]: ...
 
     def operator_environment(self) -> dict[str, str]: ...
+
+    def godot_configuration(
+        self,
+        *,
+        calibration_status_port: int,
+        reserved_udp_ports: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        """Return non-secret settings; reject collisions with shared UDP listeners."""
+        ...

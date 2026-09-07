@@ -212,6 +212,31 @@ Auxiliary views are declared in `capabilities.views`, described by the operator,
 
 ## Godot module
 
+An adapter may implement
+`godot_configuration(*, calibration_status_port, reserved_udp_ports=None)` to
+return a JSON-serializable dictionary of **non-secret** module wiring. Validate
+conflicting/reserved UDP endpoints there, using the same resolved settings for
+the hardware service and operator environment. The launcher resolves this before
+starting any child and supplies:
+
+```json
+{
+  "schema_version": 1,
+  "module": "examplebot",
+  "enabled": true,
+  "calibration_status_port": 4251,
+  "module_settings": {}
+}
+```
+
+The runtime receives this as `ROBOT_TELEOP_RUNTIME_CONFIG`; a standalone editor
+can read the identical `.teleop/runtime_config.json` in the configured Godot
+project. This ignored file is configuration, not discovery or proof of a live
+robot. Never include passwords, auth tokens, or complete private profiles. Apply
+resolved ports **before** adding socket-owning nodes to the tree, and preserve
+fresh-feedback/motion-readiness checks. Restart the launcher and reopen an editor
+scene after changing its wiring.
+
 `RobotModule.tscn` should add its implementation to the `robot_module` group. The common runtime calls methods only when they exist:
 
 - `apply_remote_settings(payload)`

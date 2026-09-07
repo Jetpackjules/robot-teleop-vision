@@ -254,6 +254,8 @@ var _target_ghost_joint_nodes: Array[Node3D] = []
 var _target_ghost_joint_origins: Array[Transform3D] = []
 var _udp := PacketPeerUDP.new()
 var _udp_bound := false
+var _udp_bind_error: int = OK
+var _next_udp_bind_msec := 0
 var _last_status: Dictionary = {}
 var _registration_status: Dictionary = {}
 var _registration_modified_time: int = 0
@@ -280,10 +282,7 @@ func _ready() -> void:
 	_registration_modified_time = _registration_file_modified_time()
 	if Engine.is_editor_hint():
 		_set_target_from_normalized(preview_pose_degrees)
-	var selected_port := editor_telemetry_port if Engine.is_editor_hint() else telemetry_port
-	_udp_bound = _udp.bind(selected_port, "127.0.0.1") == OK
-	if not _udp_bound:
-		push_warning("SO-101 overlay could not bind telemetry UDP %d" % selected_port)
+	_bind_telemetry()
 	set_process(true)
 
 func _exit_tree() -> void:
@@ -292,6 +291,8 @@ func _exit_tree() -> void:
 	_udp_bound = false
 
 func _process(delta: float) -> void:
+	if not _udp_bound and Time.get_ticks_msec() >= _next_udp_bind_msec:
+		_bind_telemetry()
 	_poll_saved_registration()
 	_poll_telemetry()
 	var blend := 1.0 - pow(clampf(telemetry_smoothing, 0.0, 0.98), maxf(delta, 0.0001) * 60.0)
@@ -712,6 +713,25 @@ func get_robot_base_global_position() -> Vector3:
 
 func get_latest_status() -> Dictionary:
 	return _last_status.duplicate(true)
+
+
+func get_telemetry_diagnostic() -> Dictionary:
+	return {
+		"port": editor_telemetry_port if Engine.is_editor_hint() else telemetry_port,
+		"bound": _udp_bound,
+		"bind_error": _udp_bind_error,
+	}
+
+
+func _bind_telemetry() -> void:
+	var selected_port := editor_telemetry_port if Engine.is_editor_hint() else telemetry_port
+	_udp.close()
+	var error := _udp.bind(selected_port, "127.0.0.1")
+	_udp_bound = error == OK
+	if not _udp_bound and error != _udp_bind_error:
+		push_warning("SO-101 overlay could not bind telemetry UDP %d (error %d); retrying. Close a duplicate Godot instance or correct conflicting port settings." % [selected_port, error])
+	_udp_bind_error = error
+	_next_udp_bind_msec = Time.get_ticks_msec() + 1000
 
 
 func get_measured_normalized_pose() -> Array:

@@ -3,10 +3,13 @@ extends Node
 
 const OVERLAY_SCRIPT := "res://robot_modules/so101/godot/so101_robot_overlay.gd"
 const CALIBRATOR_SCRIPT := "res://robot_modules/so101/godot/so101_motion_calibrator.gd"
+const TRANSPORT_CONFIG := preload("res://robot_modules/so101/godot/so101_transport_config.gd")
 
 var _view: Node = null
 var _overlay: Node3D = null
 var _calibrator: Node = null
+var _configuration_error := ""
+var _hardware_enabled := true
 
 
 func _ready() -> void:
@@ -22,6 +25,15 @@ func _exit_tree() -> void:
 
 
 func _install() -> void:
+	var configuration := TRANSPORT_CONFIG.resolve(OS.get_environment(TRANSPORT_CONFIG.ENVIRONMENT_NAME))
+	_configuration_error = str(configuration.get("error", ""))
+	if not _configuration_error.is_empty():
+		push_error(_configuration_error)
+		return
+	_hardware_enabled = bool(configuration.enabled)
+	if not _hardware_enabled:
+		return
+	var ports: Dictionary = configuration.ports
 	_view = get_parent().get_parent()
 	if _view == null:
 		push_error("SO-101 module requires the shared point-cloud view as its host")
@@ -33,6 +45,9 @@ func _install() -> void:
 	_overlay = Node3D.new()
 	_overlay.name = "RobotOverlay"
 	_overlay.set_script(load(OVERLAY_SCRIPT))
+	# Set wiring before add_child: _ready binds the selected telemetry socket.
+	_overlay.set("telemetry_port", ports.telemetry_port)
+	_overlay.set("editor_telemetry_port", ports.editor_telemetry_port)
 	world_anchor.add_child(_overlay)
 	_overlay.set("overlay_enabled", true)
 	_overlay.set("overlay_transparency", 0.4)
@@ -41,6 +56,8 @@ func _install() -> void:
 	_calibrator = Node.new()
 	_calibrator.name = "RobotCalibrator"
 	_calibrator.set_script(load(CALIBRATOR_SCRIPT))
+	_calibrator.set("follower_command_port", ports.command_port)
+	_calibrator.set("calibration_status_port", configuration.calibration_status_port)
 	_view.add_child(_calibrator)
 	if _view.has_method("_update_robot_overlay_settings"):
 		_view.call("_update_robot_overlay_settings")
@@ -103,18 +120,18 @@ func _apply_manual_claw_settings(payload: Dictionary) -> void:
 
 
 func start_full_calibration(from_editor: bool = false) -> void:
-	if is_instance_valid(_calibrator):
+	if _hardware_enabled and is_instance_valid(_calibrator):
 		_calibrator.call("start_automated_arm_calibration", from_editor)
 
 
 func refine_calibration(from_editor: bool = false) -> void:
-	if is_instance_valid(_calibrator):
+	if _hardware_enabled and is_instance_valid(_calibrator):
 		_calibrator.call("start_joint_alignment_calibration", from_editor)
 
 
 func return_to_rest() -> bool:
 	return bool(
-		is_instance_valid(_calibrator)
+		_hardware_enabled and is_instance_valid(_calibrator)
 		and _calibrator.call("return_arm_to_rest_pose")
 	)
 
@@ -145,6 +162,13 @@ func restore_calibration_checkpoint() -> bool:
 
 
 func get_calibration_status() -> Dictionary:
+	if not _configuration_error.is_empty() or not _hardware_enabled:
+		return {
+			"state": "failed",
+			"message": _configuration_error if not _configuration_error.is_empty() else "Follower hardware is disabled in the launcher configuration. Enable the intended robot profile and restart before calibration.",
+			"frames": 0,
+			"confidence": 0.0,
+		}
 	if not is_instance_valid(_calibrator):
 		return {
 			"state": "loading",
