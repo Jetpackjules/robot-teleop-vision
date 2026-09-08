@@ -16,16 +16,23 @@ From the repository root, run:
 ```
 
 The launcher opens the standalone Godot scene using the OpenGL compatibility
-renderer and opens the controller page. It
-uses the project `.venv` Python when available, otherwise `python` on PATH.
+renderer and opens the controller page with a live view of that Godot render.
+Solid geometry is selected initially. **Synthetic depth** switches to the
+single virtual depth sensor's point cloud; **Solid geometry** restores the
+complete geometry view. **Front view** and **Side view** change the viewpoint
+without a webcam. The existing head tracking, leader and slider controls are
+below the preview. The launcher uses the project `.venv` Python when available,
+otherwise `python` on PATH.
 Godot is located on PATH or in Downloads; use `-GodotPath 'C:\Tools\Godot_console.exe'`
 to select it explicitly. Add `-NoBrowser` to leave the browser closed, or
 `-DryRun` to print the commands without starting anything. `-?` shows help.
 
 Logs are written under `.teleop/alignment-demo`. The Python relay runs hidden
 and Godot opens a visible window. An existing relay on port 14860 is reused
-only if `/config` identifies this simulation protocol, version and UDP port
-14861. Other occupied ports produce an error without stopping any process.
+only if `/config` identifies this simulation protocol version 1, controller
+revision 2 and UDP port 14861. Older relays are refused because they cannot
+provide the current controller ownership/preview protocol. Other occupied
+ports produce an error without stopping any process.
 The relay remains available after the Godot window closes; its PID is printed
 when the launcher starts it. Webcam and leader input stay off until explicitly
 enabled in the controller.
@@ -34,7 +41,7 @@ Alternatively, open two terminals from the repository root:
 
 ```powershell
 # Terminal 1: replace godot with your Godot executable if it is not on PATH.
-godot --path . --rendering-method gl_compatibility res://examples/alignment_demo/godot/AlignmentDemo.tscn -- --simulation-input-port=14861
+godot --path . --rendering-method gl_compatibility res://examples/alignment_demo/godot/AlignmentDemo.tscn -- --simulation-input-port=14861 --simulation-preview-dir=.teleop/alignment-demo
 
 # Terminal 2: only Python's standard library is required by this relay.
 .\.venv\Scripts\python.exe tools/serve_alignment_demo.py
@@ -46,6 +53,22 @@ envelope only to `127.0.0.1:14861`. Godot opens the receive-only input socket
 only when the `--simulation-input-port` flag is present. If either port is
 occupied, choose an unused HTTP port with `--port`; change the UDP port on
 both launch commands together. Do not use production SO-101 ports.
+
+The browser preview is the actual Godot viewport, exported locally as a
+960-pixel JPEG up to ten times per second. Godot atomically replaces the fixed
+`preview.jpg` and `preview-state.json` files in `.teleop/alignment-demo`; the
+relay serves only those fixed preview paths. The page checks the frame time
+and displays stopped/stale status when the renderer is no longer updating.
+Relay connectivity alone is not a renderer handshake. Headless Godot reports
+that no rendered preview is available and never supplies a substitute image.
+The controls also require the scene to report a bound input socket on the
+relay's intended UDP port. Use the native Godot window for full-refresh
+recording; the browser panel is a ten-frame-per-second preview.
+
+Opening a newer controller page takes ownership automatically. The old page
+releases webcam, leader and slider input and does not reconnect. Temporary
+relay loss retries automatically with devices off. Camera-start cancellation
+uses an example-local tracker bridge; the production tracker is unchanged.
 
 1. With no hardware, use the Godot demonstration or press **Enable sliders**.
 2. For actual head tracking, press **Start head tracking** and allow the
@@ -65,10 +88,17 @@ both launch commands together. Do not use production SO-101 ports.
    The leader must already be freely movable. **Disconnect** closes its port.
 
 Head and joint streams pause when samples are stale; closing the page releases
-its inputs. Reset/recenter/replay affect only the synthetic scene. The relay
-has no simulator acknowledgement, so “relay connected” confirms delivery to
-the local UDP endpoint, not that Godot is running. Keep the physical follower
+its inputs. Reset/recenter/replay affect only the synthetic scene. “Relay
+connected” describes the input connection; the separate preview status uses
+fresh state and decoded frames from Godot to verify that the renderer is
+running. This is not a per-command acknowledgement. Keep the physical follower
 powered off while using this demonstration.
+
+The newest controller page takes ownership of input. A superseded page stops
+its webcam and serial reader and does not automatically take control back.
+After a temporary relay interruption, the page may reconnect its input
+connection, but webcam, leader and manual input remain off until enabled again.
+Other pages can continue viewing decoded native preview frames.
 
 The six joint values use the existing SO-101 calibration convention: five
 servo-normalized angles plus gripper percentage. They are inputs to a virtual
@@ -80,7 +110,8 @@ In Godot, **P** starts replay and **R** resets the task. **W/A/S/D** move the
 tool in X/Z, **Q/E** move down/up, and **Space** toggles the gripper. Hold the
 right mouse button to orbit and use the wheel to zoom. **1/2** select front/side
 views, **C** toggles cloud/solid rendering, and **H** recenters head input.
-Launch options include `--simulation-replay`, `--simulation-mesh`,
+Launch options include `--simulation-replay`, `--simulation-mesh` (the default),
+`--simulation-point-cloud`, `--simulation-preview-dir=.teleop/alignment-demo`,
 `--simulation-clean-view` and `--simulation-fixed-view`, after the `--` separator.
 
 Keyboard and replay use position-only inverse kinematics; leader joint values
@@ -113,8 +144,15 @@ scene state, not rendered appearance. Actual webcam and physical-leader
 operation require the explicit user actions above and are separate from this
 hardware-free validation.
 
-Verified on September 8, 2026 with Godot 4.7.1 and Node available: **19 tests
-passed**, including the full relay-to-running-scene check, both pending
-serial-connection cancellation cases, and the grasp/release physics probe.
-Ruff and JavaScript syntax checks also passed. These results do not certify
-physical hardware behavior.
+The physics probe also verifies solid/depth and front/side actions. A separate
+headless test requires an unavailable preview state and no fabricated image.
+On September 8, 2026, native Godot 4.7.1 preview validation confirmed advancing
+JPEG frames, solid/depth switching, fake head/joint input, stale-input holding
+and a stopped state when Godot closed. These results do not certify physical
+hardware behavior.
+
+The final full suite passed **311 tests** on September 8, 2026. Additional
+checks cover newest-tab handoff, idle connections, reconnect recovery,
+pending camera/serial cancellation, source-history retirement and mismatched
+scene input ports. Browser review confirmed live frames, slider input,
+solid/depth switching, view controls and a completed placement replay.

@@ -95,6 +95,7 @@ function Test-DemoRelayIdentity {
         $Config.service -ceq 'robot-teleop-alignment-demo' -and
         $Config.protocol -ceq 'alignment_demo' -and
         ($Config.version -is [int] -or $Config.version -is [long]) -and $Config.version -eq 1 -and
+        ($Config.controller_revision -is [int] -or $Config.controller_revision -is [long]) -and $Config.controller_revision -eq 2 -and
         ($Config.udp_port -is [int] -or $Config.udp_port -is [long]) -and $Config.udp_port -eq $demoUdpPort)
 }
 
@@ -120,7 +121,7 @@ $demoStamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
 $demoGodotLog = Join-Path $demoLogDirectory ("godot-$demoStamp.log")
 $demoRelayOut = Join-Path $demoLogDirectory ("relay-$demoStamp.stdout.log")
 $demoRelayError = Join-Path $demoLogDirectory ("relay-$demoStamp.stderr.log")
-$demoGodotArguments = @('--path', $demoRoot, '--rendering-method', 'gl_compatibility', '--log-file', $demoGodotLog, $demoScene, '--', '--simulation-input-port=14861')
+$demoGodotArguments = @('--path', $demoRoot, '--rendering-method', 'gl_compatibility', '--log-file', $demoGodotLog, $demoScene, '--', '--simulation-input-port=14861', "--simulation-preview-dir=$demoLogDirectory")
 $demoRelayArguments = @('-u', $demoRelay, '--port', '14860', '--udp-port', '14861')
 
 if ($DryRun) {
@@ -146,7 +147,7 @@ if (Test-DemoTcpListener) {
         throw "Port $demoHttpPort is occupied but its /config endpoint could not be verified. Use the existing service or close it yourself before retrying. No process has been stopped."
     }
     if (-not (Test-DemoRelayIdentity $demoConfig)) {
-        throw "Port $demoHttpPort is occupied by an unrelated or older relay. Expected robot-teleop-alignment-demo / alignment_demo version 1, UDP $demoUdpPort. Close or update that service yourself; this launcher will not replace it."
+        throw "Port $demoHttpPort is occupied by an unrelated or older relay. Expected robot-teleop-alignment-demo / alignment_demo version 1, controller revision 2, UDP $demoUdpPort. Close or update that service yourself; this launcher will not replace it."
     }
     $demoReuseRelay = $true
 }
@@ -181,6 +182,7 @@ if ($demoGodotProcess.HasExited) {
 }
 Write-Host "Alignment demo PID $($demoGodotProcess.Id). Godot log: $demoGodotLog"
 Write-Host "Controller: $demoControllerUrl"
+Write-Host 'The controller displays the live Godot render. Solid geometry is selected initially; switch to Synthetic depth above the preview.'
 Write-Host 'Head tracking and leader input stay off until you enable them in the controller.'
 if (-not $NoBrowser) {
     try { Start-Process $demoControllerUrl | Out-Null }

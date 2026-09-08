@@ -41,3 +41,26 @@ def test_virtual_alignment_grasp_release_contact_and_input(tmp_path):
     assert state["final"]["completed"] is True
     assert state["final"]["held"] is False
     assert state["final"]["input_bound"] is False
+
+
+def test_headless_scene_never_exports_a_fake_rendered_preview(tmp_path):
+    godot = find_godot(os.environ.get("ROBOT_TELEOP_TEST_GODOT", ""))
+    if godot is None:
+        pytest.skip("Set ROBOT_TELEOP_TEST_GODOT for executable preview checks")
+    preview = tmp_path / "preview"
+    result = subprocess.run(
+        [str(godot_console_executable(godot)), "--headless", "--path", str(ROOT),
+         "--log-file", str(tmp_path / "preview.log"), "--quit-after", "3",
+         "res://examples/alignment_demo/godot/AlignmentDemo.tscn", "--",
+         f"--simulation-preview-dir={preview}"],
+        cwd=ROOT, capture_output=True, text=True, timeout=15, check=False,
+        env={**os.environ, "APPDATA": str(tmp_path / "appdata"),
+             "XDG_DATA_HOME": str(tmp_path / "data")},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SCRIPT ERROR" not in result.stdout + result.stderr
+    state = json.loads((preview / "preview-state.json").read_text())
+    assert state["running"] is False
+    assert "Headless" in state["reason"]
+    assert state["frame_seq"] == 0
+    assert not (preview / "preview.jpg").exists()

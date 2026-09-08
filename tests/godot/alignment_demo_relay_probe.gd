@@ -32,6 +32,8 @@ func run() -> void:
 	demo.cloud.enabled = false
 	await physics_frame
 	check(demo.input_bridge.bound, "Explicit simulation UDP listener binds")
+	check(demo.get_demo_state().input_port == demo.input_bridge.port and demo.input_bridge.port > 1023,
+		"Preview reports the actual bound simulation UDP port")
 	print("ALIGNMENT_RELAY_READY")
 	if not await wait_for_packets(demo, 1):
 		check(false, "First WebSocket-relayed UDP packet reached Godot")

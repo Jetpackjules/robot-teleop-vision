@@ -11,6 +11,8 @@ var rejected_packets := 0
 var last_sample_msec := -1
 var _udp := PacketPeerUDP.new()
 var _sequences: Dictionary = {}
+var _source_last_seen: Dictionary = {}
+const SOURCE_RETENTION_MSEC := 3000
 
 
 func _ready() -> void:
@@ -50,17 +52,31 @@ static func finite_number(value: Variant) -> bool:
 	return (value is float or value is int) and is_finite(float(value))
 
 
-func accept_packet(payload: Dictionary, now_ms: float = -1.0) -> bool:
+func accept_packet(payload: Dictionary, now_ms: float = -1.0, received_msec: int = -1) -> bool:
 	if now_ms < 0.0:
 		now_ms = Time.get_unix_time_from_system() * 1000.0
+	if received_msec < 0:
+		received_msec = Time.get_ticks_msec()
+	_retire_inactive_sources(received_msec)
 	if not _valid(payload, now_ms):
 		rejected_packets += 1
 		return false
 	_sequences[str(payload.source)] = int(payload.seq)
-	last_sample_msec = Time.get_ticks_msec()
+	_source_last_seen[str(payload.source)] = received_msec
+	last_sample_msec = received_msec
 	accepted_packets += 1
 	sample_received.emit(payload)
 	return true
+
+
+func _retire_inactive_sources(now_msec: int) -> void:
+	# Browser reconnects receive new UUIDs. Keep only recently accepted sources,
+	# while retaining each source beyond the entire +/-1000 ms timestamp window.
+	# Any original packet from a retired source is already too old to replay.
+	for source_id in _source_last_seen.keys():
+		if now_msec - int(_source_last_seen[source_id]) > SOURCE_RETENTION_MSEC:
+			_source_last_seen.erase(source_id)
+			_sequences.erase(source_id)
 
 
 func _valid(p: Dictionary, now_ms: float) -> bool:
@@ -76,7 +92,7 @@ func _valid(p: Dictionary, now_ms: float) -> bool:
 		return false
 	if not _sequences.has(str(p.source)) and _sequences.size() >= 128:
 		return false
-	if p.has("action") and p.action not in ["reset", "recenter", "replay"]:
+	if p.has("action") and p.action not in ["reset", "recenter", "replay", "render_solid", "render_cloud", "view_front", "view_side"]:
 		return false
 	for key in ["arm", "head"]:
 		if p.has(key) and not p[key] is Dictionary:

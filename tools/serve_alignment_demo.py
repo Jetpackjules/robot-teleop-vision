@@ -20,17 +20,18 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HTTP_PORT = 14860
 DEFAULT_UDP_PORT = 14861
 MAX_FRAME = 4096
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+PREVIEW_DIRECTORY = ROOT / ".teleop/alignment-demo"
 STATIC_FILES = {
     "/": (ROOT / "examples/alignment_demo/web/simulation_controller.html", "text/html; charset=utf-8"),
     "/simulation_controller.js": (ROOT / "examples/alignment_demo/web/simulation_controller.js", "text/javascript"),
-    "/godot_webcam_tracker_bridge.js": (ROOT / "web/godot_webcam_tracker_bridge.js", "text/javascript"),
+    "/example_webcam_tracker_bridge.js": (ROOT / "examples/alignment_demo/web/example_webcam_tracker_bridge.js", "text/javascript"),
 }
 
 
@@ -90,7 +91,9 @@ def validate_packet(payload: object, *, now_ms: int | None = None) -> dict:
         "arm": {"active": arm["active"], "source": arm_source, "normalized": normalized},
     }
     if "action" in payload:
-        if payload["action"] not in ("reset", "recenter", "replay"):
+        if payload["action"] not in (
+            "reset", "recenter", "replay", "render_solid", "render_cloud", "view_front", "view_side",
+        ):
             raise ValueError("Unknown simulation action")
         result["action"] = payload["action"]
     return result
@@ -138,6 +141,10 @@ class DemoServer(ThreadingHTTPServer):
         self.udp_target = ("127.0.0.1", udp_port)
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.controller_lock = threading.Lock()
+        self.controller = None
+        self.controller_id = None
+        self.controller_rank = None
+        self.superseded_ids = set()
         super().__init__(("127.0.0.1", http_port), DemoHandler)
 
     def server_bind(self) -> None:
@@ -150,7 +157,62 @@ class DemoServer(ThreadingHTTPServer):
     def send_simulation(self, packet: dict) -> None:
         self.udp.sendto(json.dumps(packet, allow_nan=False, separators=(",", ":")).encode(), self.udp_target)
 
+    def _pause_controller(self, controller) -> None:
+        if controller.last_packet is None:
+            return
+        packet = controller.last_packet
+        packet.pop("action", None)
+        packet["seq"] += 1
+        packet["timestamp_ms"] = int(time.time() * 1000)
+        packet["head"]["active"] = False
+        packet["arm"]["active"] = False
+        self.send_simulation(packet)
+        controller.last_packet = None
+
+    def claim_controller(self, controller) -> bool:
+        # Retain the previous page identity even after a network disconnect, so
+        # its delayed reconnect cannot steal ownership from a newer page.
+        with self.controller_lock:
+            if controller.client_id in self.superseded_ids:
+                return False
+            rank = (controller.opened_ms, controller.client_id)
+            if (self.controller_rank is not None and self.controller_id != controller.client_id
+                    and rank < self.controller_rank):
+                self.superseded_ids.add(controller.client_id)
+                return False
+            previous = self.controller
+            if self.controller_id and self.controller_id != controller.client_id:
+                self.superseded_ids.add(self.controller_id)
+            if previous is not None:
+                self._pause_controller(previous)
+                previous.end_controller(superseded=True)
+            self.controller = controller
+            self.controller_id = controller.client_id
+            self.controller_rank = rank
+            return True
+
+    def forward_input(self, controller, packet: dict) -> None:
+        with self.controller_lock:
+            if self.controller is not controller:
+                raise ValueError("This page no longer owns simulation input")
+            if packet["seq"] <= controller.last_seq:
+                raise ValueError("Sequence must advance")
+            packet["source"] = controller.source
+            self.send_simulation(packet)
+            controller.last_packet, controller.last_seq = packet, packet["seq"]
+
+    def release_controller(self, controller) -> None:
+        with self.controller_lock:
+            if self.controller is controller:
+                self._pause_controller(controller)
+                self.controller = None
+
     def server_close(self) -> None:
+        with self.controller_lock:
+            if self.controller is not None:
+                self._pause_controller(self.controller)
+                self.controller.end_controller(superseded=False)
+                self.controller = None
         super().server_close()
         self.udp.close()
 
@@ -186,8 +248,10 @@ class DemoHandler(BaseHTTPRequestHandler):
         elif path == "/config":
             self._response(200, json.dumps({
                 "service": "robot-teleop-alignment-demo", "protocol": "alignment_demo",
-                "version": 1, "udp_port": self.server.udp_target[1],
+                "version": 1, "controller_revision": 2, "udp_port": self.server.udp_target[1],
             }).encode(), "application/json")
+        elif path in {"/preview.jpg", "/preview-state.json"}:
+            self._preview(path)
         elif path in STATIC_FILES:
             file_path, content_type = STATIC_FILES[path]
             try:
@@ -198,6 +262,50 @@ class DemoHandler(BaseHTTPRequestHandler):
             self._response(200, content, content_type)
         else:
             self._response(404, b"No route")
+
+    def _preview(self, path: str) -> None:
+        try:
+            state_path = PREVIEW_DIRECTORY / "preview-state.json"
+            if state_path.stat().st_size > 16384:
+                raise ValueError("Preview state too large")
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            stamp = _number(raw.get("timestamp_ms"), 0, 2**53 - 1)
+            if not raw.get("running") or not -250 <= time.time() * 1000 - stamp <= 2000:
+                raise ValueError("Preview is stale")
+            state = {name: raw.get(name) for name in (
+                "timestamp_ms", "frame_seq", "render_mode", "input_mode", "replay", "held", "completed",
+                "head_active", "external_arm_active", "input_bound", "input_port", "accepted_packets",
+            )}
+            state["running"] = True
+            if path == "/preview-state.json":
+                self._response(200, json.dumps(state, allow_nan=False).encode(), "application/json")
+            else:
+                image_path = PREVIEW_DIRECTORY / "preview.jpg"
+                if image_path.stat().st_size > 4000000:
+                    raise ValueError("Preview image too large")
+                content = image_path.read_bytes()
+                if not content.startswith(b"\xff\xd8"):
+                    raise ValueError("Invalid preview image")
+                self._response(200, content, "image/jpeg")
+        except (OSError, ValueError, TypeError, AttributeError):
+            self._response(503, b'{"running":false}', "application/json")
+
+    def send_frame(self, opcode: int, payload: bytes) -> None:
+        with self.frame_lock:
+            self.wfile.write(frame_bytes(opcode, payload))
+
+    def end_controller(self, *, superseded: bool) -> None:
+        try:
+            if superseded:
+                self.send_frame(1, b'{"type":"controller_status","state":"superseded"}')
+            self.send_frame(8, struct.pack("!H", 4001 if superseded else 1012)
+                            + (b"Newer controller tab opened" if superseded else b"Relay restarting"))
+        except OSError:
+            pass
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def _websocket(self):
         origin = self.headers.get("Origin", "")
@@ -215,12 +323,20 @@ class DemoHandler(BaseHTTPRequestHandler):
                 or self.headers.get("Sec-WebSocket-Version") != "13" or len(decoded_key) != 16):
             self._response(400, b"Invalid WebSocket handshake")
             return
-        if not self.server.controller_lock.acquire(blocking=False):
-            self._response(409, b"A controller is already connected; close its tab first")
+        query = parse_qs(urlsplit(self.path).query)
+        self.client_id = query.get("client", [uuid.uuid4().hex])[0]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.client_id):
+            self._response(400, b"Invalid controller identity")
             return
-        last_packet = None
-        last_seq = -1
-        source = "browser-" + uuid.uuid4().hex
+        try:
+            self.opened_ms = _number(float(query.get("opened", [time.time() * 1000])[0]), 0, 2**53 - 1)
+        except ValueError:
+            self._response(400, b"Invalid page creation time")
+            return
+        self.last_packet = None
+        self.last_seq = -1
+        self.source = "browser-" + uuid.uuid4().hex
+        self.frame_lock = threading.Lock()
         try:
             self.send_response(101)
             self.send_header("Upgrade", "websocket")
@@ -228,40 +344,30 @@ class DemoHandler(BaseHTTPRequestHandler):
             accept = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
             self.send_header("Sec-WebSocket-Accept", accept)
             self.end_headers()
-            self.connection.settimeout(3)
+            self.connection.settimeout(None)
+            if not self.server.claim_controller(self):
+                self.end_controller(superseded=True)
+                return
+            self.send_frame(1, b'{"type":"controller_status","state":"owner"}')
             while True:
                 opcode, data = receive_frame(self.rfile)
                 if opcode == 8:
-                    self.wfile.write(frame_bytes(8, b""))
+                    self.send_frame(8, b"")
                     break
                 if opcode == 9:
-                    self.wfile.write(frame_bytes(10, data))
+                    self.send_frame(10, data)
                     continue
                 if opcode == 10:
                     continue
                 try:
                     packet = validate_packet(json.loads(data.decode("utf-8")))
-                    if packet["seq"] <= last_seq:
-                        raise ValueError("Sequence must advance")
-                    packet["source"] = source
-                    self.server.send_simulation(packet)
-                    last_packet, last_seq = packet, packet["seq"]
+                    self.server.forward_input(self, packet)
                 except (ValueError, UnicodeError):
-                    self.wfile.write(frame_bytes(1, b'{"error":"Invalid or stale simulation input"}'))
+                    self.send_frame(1, b'{"error":"Invalid or stale simulation input"}')
         except (EOFError, OSError, ValueError):
             pass
         finally:
-            if last_packet:
-                last_packet.pop("action", None)
-                last_packet["seq"] += 1
-                last_packet["timestamp_ms"] = int(time.time() * 1000)
-                last_packet["head"]["active"] = False
-                last_packet["arm"]["active"] = False
-                try:
-                    self.server.send_simulation(last_packet)
-                except OSError:
-                    pass
-            self.server.controller_lock.release()
+            self.server.release_controller(self)
             self.close_connection = True
 
 

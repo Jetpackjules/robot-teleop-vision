@@ -192,11 +192,98 @@ export class ReadOnlyLeader {
   }
 }
 
+export class RelayConnection {
+  constructor({url, onState, releaseInputs, onMessage = () => {},
+    createSocket = (address) => new WebSocket(address),
+    setTimer = setTimeout, clearTimer = clearTimeout}) {
+    Object.assign(this, {url, onState, releaseInputs, onMessage, createSocket, setTimer, clearTimer});
+    this.socket = null;
+    this.state = "disconnected";
+    this.retry = 0;
+    this.timer = null;
+  }
+
+  get connected() { return this.state === "owner" && this.socket?.readyState === 1; }
+  get terminal() { return this.state === "superseded" || this.state === "stopped"; }
+
+  setState(state) { this.state = state; this.onState(state); }
+
+  clearRetry() { if (this.timer !== null) this.clearTimer(this.timer); this.timer = null; }
+
+  scheduleRetry() {
+    if (this.terminal || this.timer !== null) return;
+    const delay = Math.min(5000, 250 * 2 ** Math.min(this.retry++, 5));
+    this.timer = this.setTimer(() => { this.timer = null; this.connect(); }, delay);
+  }
+
+  connect() {
+    if (this.terminal || this.socket?.readyState === 0 || this.socket?.readyState === 1) return;
+    this.clearRetry();
+    this.setState("connecting");
+    let socket;
+    try { socket = this.createSocket(this.url); } catch (_) {
+      this.setState("disconnected"); this.scheduleRetry(); return;
+    }
+    this.socket = socket;
+    socket.addEventListener("message", (event) => {
+      if (socket !== this.socket || this.terminal) return;
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === "controller_status" && message.state === "superseded") {
+          this.supersede();
+        } else if (message.type === "controller_status" && message.state === "owner") {
+          this.retry = 0; this.setState("owner");
+        } else this.onMessage(message);
+      } catch (_) { /* Ignore non-JSON relay messages. */ }
+    });
+    socket.addEventListener("close", (event) => {
+      if (socket !== this.socket || this.terminal) return;
+      if (event.code === 4001) { this.supersede(); return; }
+      this.socket = null;
+      this.releaseInputs("disconnected");
+      this.setState("disconnected");
+      this.scheduleRetry();
+    });
+    socket.addEventListener("error", () => {
+      // Browser WebSockets deliver close after an error; close owns retry.
+      if (socket === this.socket) socket.close();
+    });
+  }
+
+  supersede() {
+    if (this.terminal) return;
+    this.clearRetry();
+    this.setState("superseded");
+    this.releaseInputs("superseded");
+    this.socket?.close();
+  }
+
+  recover() { if (!this.terminal && !this.connected) this.connect(); }
+
+  send(packet) {
+    if (!this.connected || this.socket.bufferedAmount > 8192) return false;
+    try { this.socket.send(JSON.stringify(packet)); return true; } catch (_) {
+      this.socket.close(); return false;
+    }
+  }
+
+  stop() {
+    this.clearRetry();
+    this.setState("stopped");
+    this.releaseInputs("stopped");
+    this.socket?.close();
+  }
+}
+
+export function sceneInputReady(state, udpPort) {
+  return state?.running === true && state.input_bound === true
+    && Number.isInteger(state.input_port) && state.input_port === udpPort;
+}
+
 async function startController() {
   const byId = (id) => document.getElementById(id);
-  const config = await fetch("/config").then((response) => response.json());
-  byId("udp-target").textContent = `127.0.0.1:${config.udp_port}`;
-  let socket = null;
+  let config = {udp_port: 14861};
+  let sceneConnected = false;
   let seq = 0;
   const source = `browser-${crypto.randomUUID()}`;
   let calibration = null;
@@ -223,41 +310,57 @@ async function startController() {
       byId("leader-status").textContent = error.message;
     }
   }, (message) => { byId("leader-status").textContent = message; });
+  const relay = new RelayConnection({
+    url: `ws://${location.host}/input?client=${encodeURIComponent(source)}&opened=${performance.timeOrigin}`,
+    releaseInputs: () => {
+      manualEnabled = false;
+      leaderSampleAt = 0;
+      pendingAction = null;
+      void stopWebcam();
+      void leader.disconnect().then(() => {
+        byId("leader-status").textContent = "Leader disconnected";
+        refreshControls();
+      });
+      byId("manual-status").textContent = "Slider input off";
+    },
+    onState: (state) => {
+      const messages = {
+        owner: `This tab controls the local simulation · UDP ${config.udp_port}`,
+        connecting: "Connecting to the local input relay…",
+        disconnected: "Relay connection lost. Reconnecting automatically; webcam and leader are off.",
+        superseded: "A newer controller tab has taken over. Webcam and leader released. This tab will not reconnect; reload it only to take control again.",
+        stopped: "Controller stopped. Webcam and leader released.",
+      };
+      byId("relay-status").textContent = messages[state];
+      refreshControls();
+      if (state === "owner") {
+        void fetch("/config").then((response) => response.json()).then((value) => {
+          config = value; byId("udp-target").textContent = `127.0.0.1:${config.udp_port}`;
+        }).catch(() => {});
+      }
+    },
+    onMessage: (message) => { if (message.error) byId("relay-status").textContent = message.error; },
+  });
 
   function refreshControls() {
-    const connected = socket?.readyState === WebSocket.OPEN;
+    const connected = relay.connected && sceneConnected;
     const serialBusy = Boolean(leader.port || leader.stopping || leader.connecting);
     byId("leader-connect").disabled = !connected || !calibration || serialBusy || !("serial" in navigator);
     byId("leader-disconnect").disabled = !serialBusy;
     byId("leader-profile").disabled = serialBusy;
     byId("manual-enable").disabled = !connected || serialBusy || manualEnabled;
     byId("manual-stop").disabled = !manualEnabled;
-    for (const input of sliderInputs) input.disabled = !manualEnabled || serialBusy;
+    for (const input of sliderInputs) input.disabled = !connected || !manualEnabled || serialBusy;
     byId("head-start").disabled = !connected || webcamEnabled || webcamPending;
     byId("head-stop").disabled = !webcamEnabled && !webcamPending;
     byId("webcam-device").disabled = webcamEnabled || webcamPending;
-  }
-
-  function connectRelay() {
-    socket = new WebSocket(`ws://${location.host}/input`);
-    socket.addEventListener("open", () => {
-      byId("relay-status").textContent = `Local relay connected · sending simulation input to UDP ${config.udp_port}`;
-      refreshControls();
-    });
-    socket.addEventListener("message", (event) => {
-      try { const result = JSON.parse(event.data); if (result.error) byId("relay-status").textContent = result.error; } catch (_) { /* no data */ }
-    });
-    socket.addEventListener("close", () => {
-      manualEnabled = false;
-      void stopWebcam();
-      void leader.disconnect().then(refreshControls);
-      byId("relay-status").textContent = "Relay disconnected. Close any other controller tab, then reload this page to reconnect.";
-      refreshControls();
-    });
+    for (const id of ["head-recenter", "scene-reset", "scene-replay", "render-solid", "render-cloud", "view-front", "view-side"]) {
+      if (byId(id)) byId(id).disabled = !connected;
+    }
   }
 
   function sendPacket() {
-    if (socket?.readyState !== WebSocket.OPEN || socket.bufferedAmount > 8192) return;
+    if (!relay.connected || !sceneConnected) return;
     const head = window.godotWebcamTrackerLatest || {};
     const headActive = webcamEnabled && head.active === true && Date.now() - Number(head.sent_unix_ms || 0) < 250;
     const leaderActive = leader.running && leaderSampleAt > 0 && performance.now() - leaderSampleAt < 250;
@@ -272,8 +375,8 @@ async function startController() {
       },
       arm: { active: leader.port ? leaderActive : manualEnabled, source: leader.port ? "leader" : "manual", normalized: pose },
     };
-    if (pendingAction) { packet.action = pendingAction; pendingAction = null; }
-    socket.send(JSON.stringify(packet));
+    if (pendingAction) packet.action = pendingAction;
+    if (relay.send(packet)) pendingAction = null;
     if (webcamEnabled) byId("head-status").textContent = headActive
       ? `Tracking · x ${head.x.toFixed(1)} / y ${head.y.toFixed(1)} / z ${head.z.toFixed(1)} cm`
       : head.status || "Looking for your face…";
@@ -281,21 +384,24 @@ async function startController() {
 
   async function stopWebcam() {
     headGeneration += 1;
+    const wasPending = webcamPending;
+    webcamPending = false;
     webcamEnabled = false;
     window.stopGodotWebcamTracker?.();
-    byId("head-status").textContent = webcamPending
+    byId("head-status").textContent = wasPending
       ? "Stopping pending webcam request… close any camera prompt if it is still open."
       : "Webcam off";
     refreshControls();
   }
 
   byId("head-start").addEventListener("click", async () => {
+    if (!relay.connected || !sceneConnected) return;
     const generation = ++headGeneration;
     webcamPending = true;
     byId("head-status").textContent = "Requesting webcam; loading face tracker…";
     refreshControls();
     try {
-      await import("/godot_webcam_tracker_bridge.js");
+      await import("/example_webcam_tracker_bridge.js");
       if (generation !== headGeneration) return;
       await window.startGodotWebcamTracker({
         backend: "mediapipe", remoteEnabled: false, deviceId: byId("webcam-device").value,
@@ -303,21 +409,23 @@ async function startController() {
         videoContainerId: "webcam-preview", showFaceOverlay: false,
         neutralZCm: 35, smoothing: 0.35, trackingFps: 30, holdLastPoseMs: 200,
       });
-      if (generation !== headGeneration) { window.stopGodotWebcamTracker(); return; }
+      if (generation !== headGeneration) return;
       webcamEnabled = true;
       pendingAction = "recenter";
       const devices = await window.listGodotWebcamTrackerDevices();
+      if (generation !== headGeneration) return;
       const selected = byId("webcam-device").value;
       byId("webcam-device").replaceChildren(new Option("Default user-facing webcam", ""));
       for (const device of devices) byId("webcam-device").add(new Option(device.label || "Webcam", device.deviceId));
       byId("webcam-device").value = selected;
     } catch (error) {
-      window.stopGodotWebcamTracker?.();
-      webcamEnabled = false;
-      byId("head-status").textContent = `Webcam stopped: ${error.message}`;
+      if (generation === headGeneration) {
+        window.stopGodotWebcamTracker?.();
+        webcamEnabled = false;
+        byId("head-status").textContent = `Webcam stopped: ${error.message}`;
+      }
     } finally {
-      webcamPending = false;
-      if (generation !== headGeneration) byId("head-status").textContent = "Webcam off";
+      if (generation === headGeneration) webcamPending = false;
       refreshControls();
     }
   });
@@ -334,6 +442,7 @@ async function startController() {
     refreshControls();
   });
   byId("leader-connect").addEventListener("click", async () => {
+    if (!relay.connected || !sceneConnected) return;
     manualEnabled = false;
     leaderSampleAt = 0;
     byId("leader-connect").disabled = true;
@@ -357,7 +466,7 @@ async function startController() {
     input.addEventListener("input", () => { manualPose[index] = Number(input.value); output.textContent = `${manualPose[index].toFixed(1)}${index === 5 ? "%" : "°"}`; });
     label.append(text, input, output); byId("sliders").append(label); sliderInputs.push(input);
   });
-  byId("manual-enable").addEventListener("click", () => { manualEnabled = true; byId("manual-status").textContent = "Sliders controlling virtual joints"; refreshControls(); });
+  byId("manual-enable").addEventListener("click", () => { if (!relay.connected || !sceneConnected) return; manualEnabled = true; byId("manual-status").textContent = "Sliders controlling virtual joints"; refreshControls(); });
   byId("manual-stop").addEventListener("click", () => { manualEnabled = false; byId("manual-status").textContent = "Slider input off"; refreshControls(); });
   byId("scene-reset").addEventListener("click", () => { pendingAction = "reset"; sendPacket(); });
   byId("scene-replay").addEventListener("click", async () => {
@@ -373,14 +482,69 @@ async function startController() {
   });
   const timer = setInterval(sendPacket, 1000 / TARGET_HZ);
   const refreshTimer = setInterval(refreshControls, 500);
+  let previewBusy = false;
+  let pageStopped = false;
+  let previewUrl = null;
+  async function refreshPreview() {
+    if (previewBusy || document.hidden || pageStopped || !byId("simulation-preview")) return;
+    previewBusy = true;
+    try {
+      const response = await fetch("/preview-state.json", {signal: AbortSignal.timeout(2000)});
+      if (!response.ok) throw new Error("Scene preview is not running");
+      const state = await response.json();
+      if (!state.running || Date.now() - state.timestamp_ms > 2000) throw new Error("Scene preview is stale");
+      sceneConnected = sceneInputReady(state, config.udp_port);
+      refreshControls();
+      if (pageStopped) return;
+      const frame = await fetch(`/preview.jpg?frame=${state.timestamp_ms}`, {signal: AbortSignal.timeout(2000)});
+      if (!frame.ok) throw new Error("Preview frame unavailable");
+      const nextUrl = URL.createObjectURL(await frame.blob());
+      const decoded = new Image();
+      decoded.src = nextUrl;
+      try { await decoded.decode(); } catch (error) { URL.revokeObjectURL(nextUrl); throw error; }
+      if (pageStopped) { URL.revokeObjectURL(nextUrl); return; }
+      const image = byId("simulation-preview");
+      image.src = nextUrl; image.hidden = false;
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = nextUrl;
+      byId("render-solid")?.setAttribute("aria-pressed", String(state.render_mode === "solid"));
+      byId("render-cloud")?.setAttribute("aria-pressed", String(state.render_mode === "point_cloud"));
+      byId("simulation-status").textContent = sceneConnected ? "Live Godot simulation" : "Godot is running; controller input is not connected";
+      byId("simulation-detail").textContent = sceneConnected
+        ? `${state.render_mode === "point_cloud" ? "Point cloud" : "Solid geometry"} · ${state.replay ? "replay" : state.input_mode || "manual"} · ${state.held ? "holding object" : state.completed ? "task complete" : "object released"}${state.head_active ? " · head tracking active" : ""}`
+        : `The scene must listen on local UDP ${config.udp_port}. Restart it with the Windows launcher to enable these controls.`;
+    } catch (_) {
+      if (!pageStopped) {
+        sceneConnected = false;
+        refreshControls();
+        byId("simulation-preview").hidden = true;
+        byId("simulation-status").textContent = "Scene preview unavailable";
+        byId("simulation-detail").textContent = "Start the standalone demo with the Windows launcher. Input relay connectivity alone does not confirm a running scene.";
+      }
+    } finally { previewBusy = false; }
+  }
+  for (const [id, action] of [["render-solid", "render_solid"], ["render-cloud", "render_cloud"], ["view-front", "view_front"], ["view-side", "view_side"]]) {
+    byId(id)?.addEventListener("click", () => { if (relay.connected && sceneConnected) { pendingAction = action; sendPacket(); } });
+  }
+  const previewTimer = setInterval(refreshPreview, 100);
+  const recover = () => { if (!document.hidden) { relay.recover(); void refreshPreview(); } };
+  window.addEventListener("focus", recover);
+  window.addEventListener("online", recover);
+  document.addEventListener("visibilitychange", recover);
   window.addEventListener("pagehide", () => {
-    clearInterval(timer); clearInterval(refreshTimer);
+    pageStopped = true;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    clearInterval(timer); clearInterval(refreshTimer); clearInterval(previewTimer);
     manualEnabled = false; webcamEnabled = false; leaderSampleAt = 0;
-    sendPacket(); socket?.close();
-    window.stopGodotWebcamTracker?.(); void leader.disconnect();
+    pendingAction = null; sendPacket(); relay.stop();
+  });
+  window.addEventListener("pageshow", (event) => {
+    // A browser-back restore has already released its devices on pagehide.
+    // Treat the user's navigation as a fresh page, with no device autostart.
+    if (event.persisted) location.reload();
   });
   if (!("serial" in navigator)) byId("leader-status").textContent = "Web Serial unavailable. Open this localhost page in desktop Chrome or Edge.";
-  refreshControls(); connectRelay();
+  refreshControls(); relay.connect(); void refreshPreview();
 }
 
 if (typeof document !== "undefined") {

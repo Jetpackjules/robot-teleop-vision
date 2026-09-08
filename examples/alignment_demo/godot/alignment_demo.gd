@@ -4,6 +4,7 @@ extends Node3D
 const VirtualArm := preload("res://examples/alignment_demo/godot/virtual_so101.gd")
 const Cloud := preload("res://examples/alignment_demo/godot/synthetic_point_cloud.gd")
 const SimulationInput := preload("res://examples/alignment_demo/godot/simulation_input.gd")
+const SimulationPreview := preload("res://examples/alignment_demo/godot/simulation_preview.gd")
 const BLOCK_START := Vector3(.005, .023, -.075)
 const BOWL_CENTER := Vector3(-.075, 0, -.165)
 const BLOCK_SIZE := .042
@@ -18,7 +19,7 @@ var completed := false
 var replay_active := false
 var replay_time := 0.0
 var input_mode := "Keyboard"
-var point_cloud_mode := true
+var point_cloud_mode := false
 var _head_active := false
 var _head_neutral_set := false
 var _head_neutral := Vector3.ZERO
@@ -45,6 +46,7 @@ var _fixed_view := false
 var _clean_view := false
 var _controls_panel: Control
 var _canvas: CanvasLayer
+var _preview_directory := ""
 
 
 func _ready() -> void:
@@ -71,6 +73,10 @@ func _ready() -> void:
 	for argument in OS.get_cmdline_user_args():
 		if argument == "--simulation-mesh":
 			point_cloud_mode = false
+		if argument == "--simulation-point-cloud":
+			point_cloud_mode = true
+		if argument.begins_with("--simulation-preview-dir="):
+			_preview_directory = argument.trim_prefix("--simulation-preview-dir=")
 		if argument == "--simulation-fixed-view":
 			_fixed_view = true
 		if argument == "--simulation-clean-view":
@@ -91,6 +97,12 @@ func _ready() -> void:
 		badge.add_theme_color_override("font_color",Color(.08,.14,.20))
 		_canvas.add_child(badge)
 	_update_camera()
+	if not _preview_directory.is_empty():
+		var preview := SimulationPreview.new()
+		preview.name = "LocalRenderedPreview"
+		preview.output_directory = _preview_directory
+		preview.source = self
+		add_child(preview)
 
 
 func _build_environment() -> void:
@@ -400,6 +412,14 @@ func _apply_accepted_packet(payload: Dictionary) -> void:
 	if action == "reset": reset_demo()
 	if action == "replay": start_replay()
 	if action == "recenter": recenter_head()
+	if action == "render_solid":
+		point_cloud_mode = false
+		_set_render_mode()
+	if action == "render_cloud":
+		point_cloud_mode = true
+		_set_render_mode()
+	if action == "view_front": set_view_angle(0)
+	if action == "view_side": set_view_angle(-.75)
 	var head: Dictionary = payload.get("head",{})
 	_head_active = bool(head.get("active",false))
 	if _head_active:
@@ -488,7 +508,10 @@ func get_demo_state() -> Dictionary:
 		"bowl_center":[BOWL_CENTER.x,BOWL_CENTER.y,BOWL_CENTER.z],"gripper":_gripper,
 		"replay":replay_active,"replay_time":replay_time,"input_mode":input_mode,
 		"synthetic_points":cloud.sample_count,"point_cloud_mode":point_cloud_mode,
-		"input_bound":input_bridge.bound,"accepted_packets":input_bridge.accepted_packets}
+		"render_mode":"point_cloud" if point_cloud_mode else "solid",
+		"head_active":_head_active,"external_arm_active":_external_arm_active,
+		"input_bound":input_bridge.bound,"input_port":input_bridge.port,
+		"accepted_packets":input_bridge.accepted_packets}
 
 
 func _capture_view() -> void:
