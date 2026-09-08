@@ -195,7 +195,8 @@ export class ReadOnlyLeader {
 export class RelayConnection {
   constructor({url, onState, releaseInputs, onMessage = () => {},
     createSocket = (address) => new WebSocket(address),
-    setTimer = setTimeout, clearTimer = clearTimeout}) {
+    setTimer = (callback, delay) => setTimeout(callback, delay),
+    clearTimer = (timer) => clearTimeout(timer)}) {
     Object.assign(this, {url, onState, releaseInputs, onMessage, createSocket, setTimer, clearTimer});
     this.socket = null;
     this.state = "disconnected";

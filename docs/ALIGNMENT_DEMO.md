@@ -155,4 +155,6 @@ The final full suite passed **311 tests** on September 8, 2026. Additional
 checks cover newest-tab handoff, idle connections, reconnect recovery,
 pending camera/serial cancellation, source-history retirement and mismatched
 scene input ports. Browser review confirmed live frames, slider input,
-solid/depth switching, view controls and a completed placement replay.
+solid/depth switching, view controls and a completed placement replay. A real
+relay stop/start also confirmed automatic browser recovery without a reload;
+webcam and leader remained off.
