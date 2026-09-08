@@ -17,7 +17,7 @@ func packet(seq: int) -> Dictionary:
 		"arm":{"active":false},"head":{"active":false}}
 
 func run() -> void:
-	var packed := load("res://godot/simulation/AlignmentDemo.tscn") as PackedScene
+	var packed := load("res://examples/alignment_demo/godot/AlignmentDemo.tscn") as PackedScene
 	check(packed != null,"Standalone scene loads")
 	var demo = packed.instantiate()
 	root.add_child(demo)

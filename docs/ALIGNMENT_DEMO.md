@@ -4,6 +4,8 @@ This separate Godot scene illustrates viewpoint-dependent alignment with a
 virtual SO-101. It does not start the production camera, follower, tunnel or
 operator stack. Its scene and object interactions are synthetic, not a replay
 of the Sweden–Singapore experiment or evidence of physical task success.
+The new scene and controller live under `examples/alignment_demo`; existing
+production pages, scenes and robot modules remain separate.
 
 ## Windows launcher
 
@@ -32,7 +34,7 @@ Alternatively, open two terminals from the repository root:
 
 ```powershell
 # Terminal 1: replace godot with your Godot executable if it is not on PATH.
-godot --path . --rendering-method gl_compatibility res://godot/simulation/AlignmentDemo.tscn -- --simulation-input-port=14861
+godot --path . --rendering-method gl_compatibility res://examples/alignment_demo/godot/AlignmentDemo.tscn -- --simulation-input-port=14861
 
 # Terminal 2: only Python's standard library is required by this relay.
 .\.venv\Scripts\python.exe tools/serve_alignment_demo.py
@@ -74,10 +76,25 @@ kinematic model, not measured follower state. A demonstration cannot validate
 the real arm's calibration, collision safety, contact mechanics or remote
 camera coverage.
 
+In Godot, **P** starts replay and **R** resets the task. **W/A/S/D** move the
+tool in X/Z, **Q/E** move down/up, and **Space** toggles the gripper. Hold the
+right mouse button to orbit and use the wheel to zoom. **1/2** select front/side
+views, **C** toggles cloud/solid rendering, and **H** recenters head input.
+Launch options include `--simulation-replay`, `--simulation-mesh`,
+`--simulation-clean-view` and `--simulation-fixed-view`, after the `--` separator.
+
+Keyboard and replay use position-only inverse kinematics; leader joint values
+drive forward kinematics directly. Grasp attachment uses a proximity rule.
+Released objects use rigid-body gravity and collisions with the bowl/table;
+the arm itself does not exert contact forces. The cloud is raycast at 8 Hz from
+one fixed virtual depth sensor, so its occlusion gaps reflect synthetic sensor
+coverage. The front reference view and depth sensor have different poses.
+Rendered replay footage uses scripted head motion, not recorded webcam input.
+
 Validation without any camera or robot:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_alignment_demo_controller.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_alignment_demo_controller.py tests/test_alignment_demo_physics.py
 ```
 
 The test drives a real local WebSocket/UDP relay with fake head and joint
@@ -96,7 +113,8 @@ scene state, not rendered appearance. Actual webcam and physical-leader
 operation require the explicit user actions above and are separate from this
 hardware-free validation.
 
-Verified on September 8, 2026 with Godot 4.7.1 and Node available: **18 tests
-passed**, including the full relay-to-running-scene check and both pending
-serial-connection cancellation cases. Ruff and JavaScript syntax checks also
-passed. These results do not certify physical hardware behavior.
+Verified on September 8, 2026 with Godot 4.7.1 and Node available: **19 tests
+passed**, including the full relay-to-running-scene check, both pending
+serial-connection cancellation cases, and the grasp/release physics probe.
+Ruff and JavaScript syntax checks also passed. These results do not certify
+physical hardware behavior.

@@ -28,8 +28,8 @@ DEFAULT_UDP_PORT = 14861
 MAX_FRAME = 4096
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 STATIC_FILES = {
-    "/": (ROOT / "web/simulation_controller.html", "text/html; charset=utf-8"),
-    "/simulation_controller.js": (ROOT / "web/simulation_controller.js", "text/javascript"),
+    "/": (ROOT / "examples/alignment_demo/web/simulation_controller.html", "text/html; charset=utf-8"),
+    "/simulation_controller.js": (ROOT / "examples/alignment_demo/web/simulation_controller.js", "text/javascript"),
     "/godot_webcam_tracker_bridge.js": (ROOT / "web/godot_webcam_tracker_bridge.js", "text/javascript"),
 }
 

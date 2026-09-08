@@ -1,9 +1,9 @@
 extends Node3D
 ## Standalone, hardware-free alignment task. Never loads the production Main scene.
 
-const VirtualArm := preload("res://godot/simulation/virtual_so101.gd")
-const Cloud := preload("res://godot/simulation/synthetic_point_cloud.gd")
-const SimulationInput := preload("res://godot/simulation/simulation_input.gd")
+const VirtualArm := preload("res://examples/alignment_demo/godot/virtual_so101.gd")
+const Cloud := preload("res://examples/alignment_demo/godot/synthetic_point_cloud.gd")
+const SimulationInput := preload("res://examples/alignment_demo/godot/simulation_input.gd")
 const BLOCK_START := Vector3(.005, .023, -.075)
 const BOWL_CENTER := Vector3(-.075, 0, -.165)
 const BLOCK_SIZE := .042
@@ -120,7 +120,7 @@ func _build_environment() -> void:
 
 func _material(color: Color) -> ShaderMaterial:
 	var material := ShaderMaterial.new()
-	material.shader = preload("res://godot/simulation/simulation_surface.gdshader")
+	material.shader = preload("res://examples/alignment_demo/godot/simulation_surface.gdshader")
 	material.set_shader_parameter("base_color",color)
 	return material
 

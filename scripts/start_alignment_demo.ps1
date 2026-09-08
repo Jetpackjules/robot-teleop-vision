@@ -29,7 +29,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $demoRoot = Split-Path -Parent $PSScriptRoot
-$demoScene = 'res://godot/simulation/AlignmentDemo.tscn'
+$demoScene = 'res://examples/alignment_demo/godot/AlignmentDemo.tscn'
 $demoRelay = Join-Path $demoRoot 'tools\serve_alignment_demo.py'
 $demoLogDirectory = Join-Path $demoRoot '.teleop\alignment-demo'
 $demoControllerUrl = 'http://127.0.0.1:14860/'
@@ -110,7 +110,7 @@ function Assert-DemoUdpAvailable {
     }
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $demoRoot 'godot\simulation\AlignmentDemo.tscn') -PathType Leaf) -or
+if (-not (Test-Path -LiteralPath (Join-Path $demoRoot 'examples\alignment_demo\godot\AlignmentDemo.tscn') -PathType Leaf) -or
     -not (Test-Path -LiteralPath $demoRelay -PathType Leaf)) {
     throw 'The standalone alignment scene or simulation relay is missing from this checkout.'
 }

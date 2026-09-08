@@ -79,7 +79,7 @@ func _set_mesh_layer(node: Node) -> void:
 	if node is MeshInstance3D:
 		node.layers = 1
 		var material := ShaderMaterial.new()
-		material.shader = preload("res://godot/simulation/simulation_surface.gdshader")
+		material.shader = preload("res://examples/alignment_demo/godot/simulation_surface.gdshader")
 		material.set_shader_parameter("base_color",Color(.20,.30,.40))
 		node.material_override = material
 		# The depth sensor raycasts the actual rendered mesh, including the open

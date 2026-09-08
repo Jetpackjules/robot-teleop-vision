@@ -22,7 +22,7 @@ func wait_for_packets(demo: Node, count: int) -> bool:
 
 
 func run() -> void:
-	var scene := load("res://godot/simulation/AlignmentDemo.tscn") as PackedScene
+	var scene := load("res://examples/alignment_demo/godot/AlignmentDemo.tscn") as PackedScene
 	if scene == null:
 		printerr("RELAY_PROBE_FAIL: Could not load the isolated demo scene")
 		quit(1)

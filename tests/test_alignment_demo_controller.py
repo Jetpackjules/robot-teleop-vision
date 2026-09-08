@@ -142,7 +142,7 @@ def test_browser_encoder_reader_uses_only_sync_read_and_calibration_math(tmp_pat
     if not node:
         pytest.skip("Node is needed for the isolated JavaScript reader test")
     module = tmp_path / "controller.mjs"
-    shutil.copyfile(ROOT / "web/simulation_controller.js", module)
+    shutil.copyfile(ROOT / "examples/alignment_demo/web/simulation_controller.js", module)
     fixture = json.loads((ROOT / "tests/fixtures/so101_arm_pair.json").read_text())
     script = tmp_path / "probe.mjs"
     script.write_text("""
