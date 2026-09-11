@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alignment demo · local controls</title>
+  <style>
+    :root{color-scheme:dark;font:16px/1.5 system-ui,sans-serif;background:#0d1520;color:#e9eff7}
+    *{box-sizing:border-box}body{margin:0}main{max-width:1200px;margin:auto;padding:32px 24px 64px}
+    h1{font-size:2rem;margin:8px 0}h2{font-size:1.2rem;margin:0 0 12px}p{margin:8px 0 18px;color:#b7c6d8}
+    .eyebrow{font-size:.78rem;letter-spacing:.13em;text-transform:uppercase;color:#91d7c8}.status{padding:12px 16px;border:1px solid #30465c;border-radius:12px;margin:20px 0;background:#142131}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}section{background:#152231;border:1px solid #2a3c51;border-radius:16px;padding:22px}section.wide{grid-column:1/-1}
+    button,select,input[type=file]{font:inherit}button{background:#93dbc9;color:#10251f;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;margin:5px 8px 5px 0}button.secondary{background:#263e55;color:#e9eff7}button:disabled{opacity:.45;cursor:not-allowed}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #f8ce72;outline-offset:3px}
+    select{width:100%;padding:9px;background:#0d1825;color:inherit;border:1px solid #415870;border-radius:8px;margin:8px 0}label{display:block}input[type=file]{max-width:100%;font-size:.86rem;margin:10px 0 15px}.readout{font:13px/1.5 ui-monospace,monospace;color:#92d5c6;min-height:2em;white-space:pre-wrap;overflow-wrap:anywhere}
+    .slider{display:grid;grid-template-columns:130px 1fr 60px;align-items:center;gap:12px;margin:14px 0}.slider input{width:100%}.slider output{text-align:right;font-variant-numeric:tabular-nums}.small{font-size:.84rem}.error{color:#ffb5a9}#webcam-preview{max-width:100%;border-radius:10px;overflow:hidden}#webcam-preview video{max-width:100%}
+    .visual-panel{margin:20px 0;padding:18px;overflow:hidden}.visual-toolbar{display:flex;gap:14px;justify-content:space-between;align-items:center;flex-wrap:wrap}.visual-toolbar h2{margin:0}.visual-toolbar p{margin:4px 0 0}.visual-options{display:flex;flex-wrap:wrap;gap:6px}.visual-options button{margin:0;padding:8px 12px;font-size:.88rem}.visual-options button[aria-pressed=true]{background:#93dbc9;color:#10251f}
+    .preview-stage{position:relative;aspect-ratio:16/9;background:#0b121b;border:1px solid #34495c;border-radius:10px;margin-top:16px;overflow:hidden;display:grid;place-items:center}.preview-stage img{display:block;width:100%;height:100%;object-fit:contain;grid-area:1/1;pointer-events:none}.preview-stage img[hidden]{display:none}.preview-placeholder{grid-area:1/1;text-align:center;max-width:470px;padding:24px;color:#b7c6d8}.preview-placeholder strong{display:block;color:#e9eff7;font-size:1.15rem;margin-bottom:8px}.preview-stage:has(img:not([hidden])) .preview-placeholder{display:none}.preview-note{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:10px}.preview-note p{margin:0}.live-status{font-size:.88rem;font-weight:600;color:#93dbc9}
+    @media(max-width:680px){.grid{grid-template-columns:1fr}main{padding:24px 16px}h1{font-size:1.65rem}.slider{grid-template-columns:106px 1fr 52px;gap:8px}section{padding:18px}}
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Local simulation · input controller</div>
+  <h1>Explore alignment with your head and hands</h1>
+  <p>Move the virtual SO-101 with your leader arm and adjust the viewpoint with head tracking. The live render appears here; the physical follower and remote depth camera are not used.</p>
+  <div class="status" role="status" id="relay-status">Connecting to the local input relay…</div>
+  <section class="visual-panel" aria-labelledby="visual-title">
+    <div class="visual-toolbar">
+      <div><h2 id="visual-title">Virtual workspace</h2><p class="live-status" id="simulation-status" role="status">Waiting for the Godot simulation…</p></div>
+      <div class="visual-options" aria-label="Virtual workspace view">
+        <button id="render-solid" class="secondary" aria-pressed="true">Solid geometry</button>
+        <button id="render-cloud" class="secondary" aria-pressed="false">Synthetic depth</button>
+        <button id="view-front" class="secondary">Front view</button>
+        <button id="view-side" class="secondary">Side view</button>
+      </div>
+    </div>
+    <div class="preview-actions">
+      <button id="scene-replay">Replay demonstration</button><button id="scene-reset" class="secondary">Reset scene</button>
+    </div>
+    <div class="preview-stage">
+      <img id="simulation-preview" alt="Live rendered Godot simulation with a virtual arm, pink block and bowl" hidden>
+      <div class="preview-placeholder"><strong>The simulation view will appear here</strong>Start the local alignment demo with <code>scripts/start_alignment_demo.ps1</code>. This panel shows the actual Godot render when it is running.</div>
+    </div>
+    <div class="preview-note">
+      <p id="simulation-detail" class="small">Checking for a fresh rendered frame…</p>
+      <p class="small">Live Godot view · use the controls below or the native window</p>
+    </div>
+  </section>
+  <div class="grid">
+    <section>
+      <h2>Head-tracked viewpoint</h2>
+      <p>Use a webcam to move the virtual viewpoint. Camera access starts only when you press Start.</p>
+      <label for="webcam-device">Webcam</label>
+      <select id="webcam-device"><option value="">Default user-facing webcam</option></select>
+      <button id="head-start">Start head tracking</button><button id="head-stop" class="secondary" disabled>Stop webcam</button>
+      <button id="head-recenter" class="secondary">Recenter view</button>
+      <div id="head-status" class="readout" role="status">Webcam off</div>
+      <div id="webcam-preview"></div>
+    </section>
+    <section>
+      <h2>Physical leader → virtual arm</h2>
+      <p>Load your leader calibration, then choose its USB serial port. The reader only requests encoder positions; it never sends position or torque commands.</p>
+      <label for="leader-profile">Local arm-pair profile or leader calibration JSON</label>
+      <input id="leader-profile" type="file" accept=".json,application/json">
+      <div id="profile-status" class="small">The file stays in this browser. Only joint values go to the local demo.</div>
+      <button id="leader-connect" disabled>Connect leader</button><button id="leader-disconnect" class="secondary" disabled>Disconnect</button>
+      <div id="leader-status" class="readout" role="status">Leader not connected</div>
+      <p class="small">Use desktop Chrome or Edge. A leader already open in another controller must be disconnected there first. The leader must already be freely movable; this page does not change torque.</p>
+    </section>
+    <section class="wide">
+      <h2>Try it without hardware</h2>
+      <p>Use Replay demonstration above, or enable these sliders to pose the virtual arm. Slider input stops when a leader is connected.</p>
+      <button id="manual-enable">Enable sliders</button><button id="manual-stop" class="secondary" disabled>Stop sliders</button>
+      <div id="sliders"></div>
+      <div id="manual-status" class="readout" role="status">Slider input off</div>
+    </section>
+  </div>
+  <p class="small" style="margin-top:22px">The relay sends only simulation input to <span id="udp-target">127.0.0.1:14861</span>. The preview’s running status comes from fresh Godot frames. Closing this tab releases the webcam and serial reader; stale input stops updating the virtual arm.</p>
+</main>
+<script type="module" src="/simulation_controller.js"></script>
+</body>
+</html>
