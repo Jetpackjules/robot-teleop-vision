@@ -21,4 +21,5 @@ native/realsense_shared_memory/bin/*.lib
 
 # Physical-device identity and calibration are deliberately local-only.
 robot_modules/*/local/
+robot_modules/so101/tools/so101_rest_pose.json*
 user_data/

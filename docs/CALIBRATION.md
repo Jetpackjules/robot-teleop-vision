@@ -123,6 +123,24 @@ required; do not bypass these checks to obtain a saved overlay.
   unregistered world position does not affect this check. Encoder-range and
   modeled-clearance checks still apply; a physically familiar rest pose does
   not imply a matching saved rest-pose file exists.
+- **Return to Rest** uses a separate per-arm encoder pose. Save six previously
+  observed, operator-confirmed raw encoder readings with
+  `.venv\Scripts\python.exe scripts/save_so101_rest_pose.py --raw R1 R2 R3 R4 R5 R6 --apply`.
+  Replace each `R` value with that arm's reading; there is no universal raw pose.
+  This file-only command validates the corrected profile, ranges and stock mesh
+  floor clearance, then backs up and saves `so101_rest_pose.json` beside the
+  configured arm profile. It does not connect to motors or change cameras or
+  visual registration. The updated follower reloads the file on the next Return
+  to Rest request, rejects a changed arm/calibration, and checks live hardware
+  limits and the complete planned route before enabling motion. Restart the
+  launcher once after updating its Python code; support the arm before shutdown
+  releases torque. Godot can stay open for this Python-only update.
+  Rest-return floor checks use unsimplified mesh support vertices at measured
+  joint angles, avoiding empty bounding-box corners near the claw. Other
+  calibration/teleoperation clearance checks remain unchanged. The check models
+  a plane and stock links, not obstacles or self-collision; supervise the first
+  physical return. Regenerate the asset after mesh changes with
+  `scripts/build_so101_rest_hulls.py` (Open3D required only for regeneration).
 - **Not enough frames**: the reference camera did not provide enough settled, distinct poses. Keep the relevant links visible and rerun.
 - **Geometrically indistinct path**: measured poses did not span enough angle to identify the intended axis.
 - **Hardware process faulted**: remove power/support the robot, inspect power/USB/mechanics, and clear the underlying fault before requesting another sweep.

@@ -12,7 +12,7 @@ from collections import deque
 from pathlib import Path
 from typing import Protocol
 
-from so101_arm_common import ArmPairProfile, DEFAULT_PROFILE, limit_step, pose_is_close
+from so101_arm_common import DEFAULT_PROFILE, ArmPairProfile, limit_step, pose_is_close
 from so101_kinematics import (
     JOINT_DIRECTIONS,
     JOINT_LIMITS_RAD,
@@ -20,11 +20,12 @@ from so101_kinematics import (
     arm_pose,
     joint_rate_step,
     rendered_minimum_height,
+    rest_mesh_minimum_height,
     solve_pose_target,
     tool_rate_step,
     wrist_frame_twist,
 )
-
+from so101_rest_pose import load_rest_pose
 
 CALIBRATION_BROAD_SEGMENT_SECONDS = 2.40
 CALIBRATION_SAMPLE_DWELL_SECONDS = 0.60
@@ -42,7 +43,6 @@ BASE_AXIS_SEGMENT_SECONDS = 1.65
 # Godot to receive multiple fresh depth frames there.
 BASE_AXIS_SAMPLE_DWELL_SECONDS = 1.50
 RUNTIME_IK_MIN_CLEARANCE_M = 0.010
-DEFAULT_REST_POSE = Path(__file__).resolve().with_name("so101_rest_pose.json")
 REST_RETURN_ARM_SPEED_DEGREES_PER_SECOND = 12.0
 REST_RETURN_GRIPPER_SPEED_PER_SECOND = 18.0
 REST_RETURN_CLEARANCE_TOLERANCE_M = 0.001
@@ -131,9 +131,10 @@ def tool_clearance_metric(normalized: list[float] | tuple[float, ...]) -> float:
     return rendered_minimum_height(normalized)
 
 
-def _path_min_clearance(start: list[float], end: list[float], samples: int = 12) -> float:
+def _path_min_clearance(start: list[float], end: list[float], samples: int = 12, *, metric=None) -> float:
+    metric = metric or tool_clearance_metric
     return min(
-        tool_clearance_metric([
+        metric([
             before + (after - before) * amount / samples
             for before, after in zip(start, end, strict=True)
         ])
@@ -142,13 +143,14 @@ def _path_min_clearance(start: list[float], end: list[float], samples: int = 12)
 
 
 def _build_raised_calibration_prefix(
-    starting_pose: list[float],
+    starting_pose: list[float], *, metric=None, pose_allowed=None,
 ) -> tuple[list[float], list[tuple[list[float], float, str]]]:
     """Raise the complete rendered arm monotonically above its base plane."""
     start = [float(value) for value in starting_pose]
+    metric = metric or tool_clearance_metric
     raised = list(start)
     lift_path: list[list[float]] = []
-    start_clearance = tool_clearance_metric(start)
+    start_clearance = metric(start)
     for _ in range(CALIBRATION_LIFT_MAX_STEPS):
         candidates: list[tuple[float, list[float]]] = []
         for joint_index in (1, 2, 3):
@@ -157,17 +159,20 @@ def _build_raised_calibration_prefix(
                 candidate[joint_index] += direction * CALIBRATION_LIFT_STEP_DEGREES
                 if abs(candidate[joint_index] - start[joint_index]) > 60.0:
                     continue
-                candidates.append((tool_clearance_metric(candidate), candidate))
+                if pose_allowed is None or pose_allowed(candidate):
+                    candidates.append((metric(candidate), candidate))
+        if not candidates:
+            break
         best_clearance, best_pose = max(candidates, key=lambda item: item[0])
-        current_clearance = tool_clearance_metric(raised)
+        current_clearance = metric(raised)
         if best_clearance <= current_clearance + 0.0002:
             break
-        if _path_min_clearance(raised, best_pose, 6) < current_clearance - 0.0002:
+        if _path_min_clearance(raised, best_pose, 6, metric=metric) < current_clearance - 0.0002:
             break
         raised = best_pose
         lift_path.append(list(raised))
 
-    raised_clearance = tool_clearance_metric(raised)
+    raised_clearance = metric(raised)
     if raised_clearance < CALIBRATION_SAFE_HEIGHT_M:
         raise RuntimeError(
             "could not find a calibration pose that keeps every rendered link above the base plane "
@@ -185,7 +190,7 @@ def _rest_segment_seconds(start: list[float], end: list[float]) -> float:
 
 
 def build_rest_return_waypoints(
-    starting_pose: list[float], rest_pose: list[float]
+    starting_pose: list[float], rest_pose: list[float], *, pose_allowed=None,
 ) -> list[tuple[list[float], float, str]]:
     """Plan a slow, modeled-base-safe path to an encoder-defined rest pose.
 
@@ -195,20 +200,28 @@ def build_rest_return_waypoints(
     """
     start = [float(value) for value in starting_pose]
     rest = [float(value) for value in rest_pose]
-    start_height = tool_clearance_metric(start)
-    rest_height = tool_clearance_metric(rest)
+    def path_height(before, after):
+        samples = max(80, math.ceil(max(abs(a - b) for a, b in zip(before, after, strict=True)) * 2))
+        return _path_min_clearance(before, after, samples, metric=rest_mesh_minimum_height)
+
+    start_height = rest_mesh_minimum_height(start)
+    rest_height = rest_mesh_minimum_height(rest)
     if min(start_height, rest_height) < REST_RETURN_MINIMUM_MODELED_HEIGHT_M:
         raise RuntimeError(
             "rest return rejected because an endpoint is below the modeled base plane "
             f"(start={start_height * 1000.0:.1f} mm, rest={rest_height * 1000.0:.1f} mm)"
         )
     allowed_height = min(start_height, rest_height, CALIBRATION_SAFE_HEIGHT_M) - REST_RETURN_CLEARANCE_TOLERANCE_M
-    if _path_min_clearance(start, rest, 80) >= allowed_height:
+    if path_height(start, rest) >= allowed_height:
         return [(rest, _rest_segment_seconds(start, rest), "moving slowly to rest")]
 
-    start_raised, start_lift = _build_raised_calibration_prefix(start)
-    rest_raised, rest_lift = _build_raised_calibration_prefix(rest)
-    if _path_min_clearance(start_raised, rest_raised, 80) < CALIBRATION_SAFE_HEIGHT_M:
+    start_raised, start_lift = _build_raised_calibration_prefix(
+        start, metric=rest_mesh_minimum_height, pose_allowed=pose_allowed,
+    )
+    rest_raised, rest_lift = _build_raised_calibration_prefix(
+        rest, metric=rest_mesh_minimum_height, pose_allowed=pose_allowed,
+    )
+    if path_height(start_raised, rest_raised) < CALIBRATION_SAFE_HEIGHT_M:
         raise RuntimeError("no modeled-base-safe bridge to the saved rest pose is available")
     result: list[tuple[list[float], float, str]] = []
     previous = start
@@ -223,41 +236,6 @@ def build_rest_return_waypoints(
     for pose in reversed(rest_lift_poses[:-1]):
         result.append((list(pose), _rest_segment_seconds(previous, pose), "lowering into rest"))
         previous = list(pose)
-    return result
-
-
-def load_rest_pose(profile: ArmPairProfile, path: Path = DEFAULT_REST_POSE) -> dict:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if int(payload.get("version", 0)) != 1:
-        raise RuntimeError("unsupported rest-pose file version")
-    if str(payload.get("follower_serial", "")) != profile.follower_serial:
-        raise RuntimeError("rest pose belongs to a different follower arm")
-    raw = payload.get("raw_positions")
-    normalized_saved = payload.get("normalized_positions")
-    if not isinstance(raw, list) or len(raw) != 6 or any(
-        isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 4095
-        for value in raw
-    ):
-        raise RuntimeError("rest pose must contain six valid raw encoder positions")
-    if not isinstance(normalized_saved, list) or len(normalized_saved) != 6 or any(
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-        for value in normalized_saved
-    ):
-        raise RuntimeError("rest pose must contain six finite normalized positions")
-    normalized = profile.follower_calibration.raw_to_normalized(raw)
-    mismatch = max(
-        abs(current - float(saved))
-        for current, saved in zip(normalized, normalized_saved, strict=True)
-    )
-    if mismatch > 2.0:
-        raise RuntimeError(
-            f"rest pose does not match the current servo calibration ({mismatch:.1f} deg mismatch)"
-        )
-    result = dict(payload)
-    result["raw_positions"] = list(raw)
-    result["normalized_positions"] = list(normalized)
     return result
 
 
@@ -905,7 +883,7 @@ class FollowerController:
         profile: ArmPairProfile,
         bus: FollowerBus,
         now=time.monotonic,
-        rest_pose_path: Path = DEFAULT_REST_POSE,
+        rest_pose_path: Path | None = None,
     ):
         self.profile = profile
         self.bus = bus
@@ -974,6 +952,7 @@ class FollowerController:
         # delayed duplicate must never restart motion after Hold or a failure.
         self._seen_calibration_request_ids: set[str] = set()
         self.rest_pose: dict | None = None
+        self.rest_pose_path = rest_pose_path
         self.rest_pose_fault = ""
         try:
             self.rest_pose = load_rest_pose(profile, rest_pose_path)
@@ -1680,6 +1659,14 @@ class FollowerController:
         self.status_message = reason
 
     def start_rest_return(self, reason: str = "operator") -> None:
+        if self.rest_return_active:
+            return  # A repeated button press must not replace an active route.
+        try:
+            self.rest_pose = load_rest_pose(self.profile, self.rest_pose_path)
+            self.rest_pose_fault = ""
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+            self.rest_pose = None
+            self.rest_pose_fault = str(exc)
         if self.rest_pose is None:
             self.status_message = f"Return to rest unavailable: {self.rest_pose_fault or 'no rest pose is saved'}."
             return
@@ -1693,6 +1680,27 @@ class FollowerController:
             self.follower_raw = self._read_positions()
             self.follower_normalized = self.profile.follower_calibration.raw_to_normalized(self.follower_raw)
             rest = list(self.rest_pose["normalized_positions"])
+            calibration = self.profile.follower_calibration
+            raw_limits = self.bus.read_position_limits()
+            if len(raw_limits) != 6 or any(not 0 <= low < high <= 4095 for low, high in raw_limits):
+                raise RuntimeError("invalid hardware motor limits")
+            if calibration.coordinate_system == "lerobot_urdf" and raw_limits != list(zip(
+                calibration.start_pos, calibration.end_pos, strict=True,
+            )):
+                raise RuntimeError("hardware motor limits changed since this profile was calibrated")
+
+            def pose_allowed(pose):
+                raw = calibration.normalized_to_raw_unclipped(pose)
+                return 0.0 <= pose[5] <= 100.0 and all(
+                    low - 1e-7 <= value <= high + 1e-7
+                    for value, (low, high) in zip(raw, raw_limits, strict=True)
+                )
+
+            if not pose_allowed(self.follower_normalized) or not pose_allowed(rest):
+                raise RuntimeError("rest-return endpoint exceeds hardware motor limits")
+            waypoints = build_rest_return_waypoints(self.follower_normalized, rest, pose_allowed=pose_allowed)
+            if not all(pose_allowed(pose) for pose, _, _ in waypoints):
+                raise RuntimeError("rest-return route exceeds hardware motor limits")
             close, _ = pose_is_close(
                 self.follower_normalized,
                 rest,
@@ -1709,7 +1717,6 @@ class FollowerController:
                 self.hold("Follower is already at the saved rest pose.")
                 self.rest_return_progress = 1.0
                 return
-            waypoints = build_rest_return_waypoints(self.follower_normalized, rest)
             duration = sum(item[1] for item in waypoints)
             if not waypoints or duration <= 0.0:
                 raise RuntimeError("no rest-return trajectory is available")

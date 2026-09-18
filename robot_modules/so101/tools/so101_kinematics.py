@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 
 if __package__:
     from .so101_arm_common import (
         BASE_JOINT_OFFSET_DEG,
+        JOINT_DIRECTIONS,
+        JOINT_OFFSETS_DEG,
+    )
+    from .so101_arm_common import (
         BASE_STRAIGHT_NORMALIZED_DEG as BASE_STRAIGHT_NORMALIZED_DEG,
-        JOINT_DIRECTIONS, JOINT_OFFSETS_DEG,
     )
 else:
     from so101_arm_common import (
         BASE_JOINT_OFFSET_DEG,
+        JOINT_DIRECTIONS,
+        JOINT_OFFSETS_DEG,
+    )
+    from so101_arm_common import (
         BASE_STRAIGHT_NORMALIZED_DEG as BASE_STRAIGHT_NORMALIZED_DEG,
-        JOINT_DIRECTIONS, JOINT_OFFSETS_DEG,
     )
 
 
@@ -135,8 +144,17 @@ def overlay_joint_radians(normalized: list[float] | tuple[float, ...]) -> np.nda
     return np.asarray(arm, dtype=float)
 
 
-def rendered_link_transforms(normalized: list[float] | tuple[float, ...]) -> dict[str, np.ndarray]:
+def rendered_link_transforms(
+    normalized: list[float] | tuple[float, ...], *, measured_angles: bool = False,
+) -> dict[str, np.ndarray]:
     joints = overlay_joint_radians(normalized)
+    if measured_angles:
+        # A readback near a calibrated hardware stop can be slightly outside
+        # the nominal URDF bounds. Clamping it changes the physical geometry.
+        joints[:5] = np.radians([
+            float(normalized[i]) * OVERLAY_JOINT_DIRECTIONS[i] + OVERLAY_JOINT_OFFSETS_DEG[i]
+            for i in range(5)
+        ])
     transforms: dict[str, np.ndarray] = {}
     chain = np.eye(4)
     names = ("shoulder_link", "upper_arm_link", "lower_arm_link", "wrist_link", "gripper_link")
@@ -166,8 +184,41 @@ def rendered_geometry_points(normalized: list[float] | tuple[float, ...]) -> np.
 
 
 def rendered_minimum_height(normalized: list[float] | tuple[float, ...]) -> float:
-    """Lowest rendered moving-link vertex above the robot base plane (ROS +Z)."""
+    """Lowest moving-link bounding-box corner above the base origin (ROS +Z)."""
     return float(np.min(rendered_geometry_points(normalized)[:, 2]))
+
+
+@lru_cache(maxsize=1)
+def _rest_collision_hulls() -> dict[str, np.ndarray]:
+    assets = Path(__file__).resolve().parents[1] / "assets"
+    with np.load(assets / "rest_collision_hulls.npz", allow_pickle=False) as data:
+        hulls = {}
+        for name in ("base_link", *LINK_BOUNDS):
+            digest = hashlib.sha256((assets / f"{name}.glb").read_bytes()).hexdigest()
+            if digest != str(data[f"{name}_sha256"]):
+                raise RuntimeError(f"Rest-return collision geometry is stale for {name}")
+            vertices = data[name].copy()
+            if vertices.ndim != 2 or vertices.shape[1] != 3 or not np.isfinite(vertices).all():
+                raise RuntimeError(f"Invalid rest-return collision geometry for {name}")
+            vertices.setflags(write=False)
+            hulls[name] = vertices
+    return hulls
+
+
+def rest_mesh_minimum_height(normalized: list[float] | tuple[float, ...]) -> float:
+    """Exact mesh support height at measured angles, relative to the base origin.
+
+    This rest-only check avoids empty bounding-box corners near the floor. It
+    checks the stock meshes against a plane, not obstacles or self-collisions.
+    Hardware encoder limits are checked separately before any motor write.
+    """
+    if len(normalized) != 6 or not all(math.isfinite(float(v)) for v in normalized):
+        raise ValueError("Rest-return geometry requires six finite joint values")
+    hulls = _rest_collision_hulls()
+    return min(
+        float(np.min(hulls[name] @ transform[2, :3]) + transform[2, 3])
+        for name, transform in rendered_link_transforms(normalized, measured_angles=True).items()
+    )
 
 
 def forward_kinematics(joints_rad: np.ndarray) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
