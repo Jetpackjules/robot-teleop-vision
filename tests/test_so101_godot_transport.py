@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,12 @@ def test_godot_transport_and_calibration_transactions_without_hardware(tmp_path)
         "XDG_DATA_HOME": str(tmp_path / "data"),
     }
     environment.pop("ROBOT_TELEOP_RUNTIME_CONFIG", None)
+    environment["ROBOT_TELEOP_SOLVER_PYTHON"] = sys.executable
+    # A solver fixture with a spaced path exercises Windows process quoting.
+    (tmp_path / "solver fixture.py").write_text(
+        "import json, pathlib, sys\npathlib.Path(sys.argv[1]).write_text(json.dumps({'value': 42}))\n",
+        encoding="utf-8",
+    )
     result = subprocess.run(
         [str(godot_console_executable(godot)), "--headless", "--path", str(tmp_path),
          "--script", "res://probe.gd"],

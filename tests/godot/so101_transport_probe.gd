@@ -54,6 +54,23 @@ func status(id: String = "current-request") -> Dictionary:
 
 
 func _run() -> void:
+	var solver := AckProbe.new()
+	var configured_python := OS.get_environment("ROBOT_TELEOP_SOLVER_PYTHON")
+	check(solver._solver_python_executable() == configured_python, "explicit solver Python")
+	var solver_result := solver._execute_external_json_solver(
+		ProjectSettings.globalize_path("res://solver fixture.py"),
+		PackedStringArray([ProjectSettings.globalize_path("user://solver result.json")]),
+		ProjectSettings.globalize_path("user://solver result.json"), "base_solve",
+	)
+	check(solver_result.get("ok", false) and solver_result.get("value") == 42, "real Python solver process and spaced paths")
+	OS.set_environment("ROBOT_TELEOP_SOLVER_PYTHON", ProjectSettings.globalize_path("res://missing-python.exe"))
+	solver_result = solver._execute_external_json_solver(
+		ProjectSettings.globalize_path("res://solver fixture.py"), PackedStringArray(),
+		ProjectSettings.globalize_path("user://solver result.json"), "base_solve",
+	)
+	check(not solver_result.get("ok", true) and "could not start" in solver_result.status, "launch error is not evidence rejection")
+	OS.set_environment("ROBOT_TELEOP_SOLVER_PYTHON", configured_python)
+	solver.free()
 	var resolved := Transport.resolve(JSON.stringify(config()), "res://missing.json")
 	check(resolved.ports.command_port == 14248, "custom command port")
 	check(resolved.ports.telemetry_port == 14250, "custom runtime telemetry")

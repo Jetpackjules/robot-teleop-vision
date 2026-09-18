@@ -159,6 +159,7 @@ var _started_unix_ms := 0.0
 var _next_sample_msec := 0
 var _last_status_send_msec := 0
 var _solve_thread := Thread.new()
+var _checked_solver_python: String = ""
 var _status_udp := PacketPeerUDP.new()
 var _arm_command_udp := PacketPeerUDP.new()
 var _capture_diagnostic := "Waiting to sample telemetry and depth."
@@ -465,6 +466,19 @@ func start_arm_position_calibration(
 		if str(follower_status.get("state", "")) == "fault":
 			_fail("Follower is faulted: %s. Use Reconnect Arm Hardware first." % str(follower_status.get("fault", "unknown fault")))
 			return
+	# Check the actual solver environment before requesting any physical sweep.
+	var solver_python := _solver_python_executable()
+	if _checked_solver_python != solver_python:
+		var dependency_output: Array = []
+		var dependency_exit := OS.execute(solver_python, PackedStringArray([
+			"-c", "import numpy, scipy, open3d, cv2",
+		]), dependency_output, true)
+		if dependency_exit != 0:
+			_fail("Calibration Python/dependency check failed before motion: %s (exit %d). Run scripts/windows_setup.ps1 on Windows. %s" % [
+				solver_python, dependency_exit, "\n".join(dependency_output).strip_edges(),
+			])
+			return
+		_checked_solver_python = solver_python
 	# Fresh containers are safe when this @tool script is hot-reloaded onto an
 	# existing editor node. Mutating a newly-added stale member can crash Godot.
 	_frames = []
@@ -3956,6 +3970,17 @@ func _launch_automated_joint_solver(through_joint: int) -> void:
 		)
 
 
+func _solver_python_executable() -> String:
+	var configured := OS.get_environment("ROBOT_TELEOP_SOLVER_PYTHON").strip_edges()
+	if not configured.is_empty():
+		return configured
+	var relative := "res://.venv/Scripts/python.exe" if OS.has_feature("windows") else "res://.venv/bin/python"
+	var project_python := ProjectSettings.globalize_path(relative)
+	if FileAccess.file_exists(project_python):
+		return project_python
+	return "python" if OS.has_feature("windows") else "python3"
+
+
 func _execute_external_json_solver(
 	script_path: String,
 	arguments: PackedStringArray,
@@ -3967,13 +3992,16 @@ func _execute_external_json_solver(
 	var command_arguments := PackedStringArray([script_path])
 	command_arguments.append_array(arguments)
 	var output: Array = []
-	var exit_code := OS.execute("/usr/bin/python3", command_arguments, output, true)
+	var python := _solver_python_executable()
+	var exit_code := OS.execute(python, command_arguments, output, true)
 	if exit_code != 0:
 		return {
 			"ok": false,
 			"automation_stage": stage,
-			"status": "External %s rejected its evidence (exit %d): %s" % [
+			"status": "External %s %s using %s (exit %d): %s" % [
 				stage,
+				"could not start" if exit_code == -1 else "failed",
+				python,
 				exit_code,
 				"\n".join(output).strip_edges(),
 			],
