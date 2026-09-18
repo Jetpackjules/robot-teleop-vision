@@ -50,3 +50,14 @@ def test_diagnostic_closes_port_after_partial_connection_failure():
     with pytest.raises(OSError, match="port busy"):
         diagnostics.collect_registers(bus, ["shoulder_pan"])
     assert bus.calls == ["connect", "close"]
+
+
+def test_cleanup_error_does_not_hide_original_connection_failure():
+    bus = ReadOnlyBus(fail_connect=True)
+
+    def broken_close():
+        raise AttributeError("NoneType object has no attribute close")
+
+    bus.port_handler.closePort = broken_close
+    with pytest.raises(OSError, match="port busy"):
+        diagnostics.collect_registers(bus, ["shoulder_pan"])

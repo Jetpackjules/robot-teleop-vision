@@ -1328,9 +1328,96 @@ def test_calibration_rejects_unreachable_encoder_waypoint_before_enabling_torque
     controller.start_calibration_sweep("axis")
 
     assert not controller.calibration_sweep_active
-    assert "encoder range for elbow_flex" in controller.calibration_rejection
+    assert "motor-limit-adjusted path is not clear" in controller.calibration_rejection
     assert not bus.torque
     assert bus.positions == raw
+    assert not controller.write_times
+
+
+def test_calibration_all_stages_fit_singapore_hardware_limits_and_move_measured_pose():
+    pair = profile()
+    limits = [(739, 3435), (854, 3207), (854, 3069), (812, 3122), (0, 4095), (1377, 2878)]
+    calibration = replace(
+        pair.follower_calibration,
+        homing_offset=(183, 482, 1346, -120, 1668, 0),
+        start_pos=tuple(low for low, _ in limits),
+        end_pos=tuple(high for _, high in limits),
+    )
+    pair = replace(pair, follower_calibration=calibration)
+
+    class LimitedBus(FakeFollowerBus):
+        def read_position_limits(self):
+            return limits
+
+        def write_positions(self, positions):
+            assert all(low <= raw <= high for raw, (low, high) in zip(positions, limits, strict=True))
+            super().write_positions(positions)
+
+    clock = [10.0]
+    bus = LimitedBus([2692, 865, 3069, 977, 2063, 1389])
+    controller = FollowerController(pair, bus, now=lambda: clock[0])
+    controller.connect()
+    for mode, attempt in (("axis", 1), ("joints", 1), ("wrist", 1), ("wrist", 2), ("claw", 1)):
+        before = list(bus.positions)
+        controller.start_calibration_sweep(mode, attempt)
+        assert controller.calibration_sweep_active, (mode, controller.calibration_rejection)
+        samples = [pose for pose, _, label in controller.calibration_sweep_waypoints
+                   if label.startswith("sampling servo")]
+        assert all(tool_clearance_metric(pose) >= CALIBRATION_SAFE_HEIGHT_M for pose in samples)
+        if mode == "axis":
+            assert max(pose[0] for pose in samples) - min(pose[0] for pose in samples) >= 50
+            assert all(pose[1:] == samples[0][1:] for pose in samples)
+            anchor = next(pose for pose, _, label in controller.calibration_sweep_waypoints
+                          if label == "moving to base-axis anchor")
+            assert calibration.normalized_to_raw(anchor)[2] < 3069
+        if mode == "joints":
+            for joint in (1, 2, 3, 4):
+                observed = [pose[joint] for pose, _, label in controller.calibration_sweep_waypoints
+                            if label.startswith(f"sampling servo {joint} ")]
+                assert max(observed) - min(observed) >= 24
+        moved = False
+        for _ in range(int(controller.calibration_sweep_duration * 10) + 100):
+            clock[0] += 0.1
+            controller.update()
+            controller.sample()
+            moved = moved or bus.positions != before
+            if not controller.calibration_sweep_active:
+                break
+        assert moved, mode
+        assert not controller.calibration_sweep_active
+        assert controller.state == "hold"
+        assert not controller.fault
+
+
+def test_calibration_rejects_too_narrow_motor_range_without_writes():
+    pair = profile()
+
+    class LimitedBus(FakeFollowerBus):
+        def read_position_limits(self):
+            return [(2000, 2096)] + [(0, 4095)] * 5
+
+    bus = LimitedBus(pair.follower_calibration.normalized_to_raw([0, 130, 38, 78, -8, 20]))
+    controller = FollowerController(pair, bus)
+    controller.connect()
+    controller.start_calibration_sweep("axis")
+    assert "insufficient reachable range" in controller.calibration_rejection
+    assert not bus.torque
+    assert not controller.write_times
+
+
+def test_calibration_cannot_start_when_motor_limits_cannot_be_read():
+    pair = profile()
+
+    class LimitedBus(FakeFollowerBus):
+        def read_position_limits(self):
+            raise RuntimeError("motor limits unavailable")
+
+    bus = LimitedBus(pair.follower_calibration.normalized_to_raw([0, 130, 38, 78, -8, 20]))
+    controller = FollowerController(pair, bus)
+    controller.connect()
+    controller.start_calibration_sweep("axis")
+    assert controller.calibration_rejection == "motor limits unavailable"
+    assert not bus.torque
     assert not controller.write_times
 
 

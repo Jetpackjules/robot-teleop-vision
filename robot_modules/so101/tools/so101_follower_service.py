@@ -69,6 +69,63 @@ def calibration_planning_pose(start: list[float]) -> tuple[list[float], list[flo
     return pose, turns
 
 
+def fit_calibration_to_motor_limits(start, waypoints, calibration, raw_limits):
+    """Translate observation ranges into the motor's readable position limits.
+
+    Preserve sample spacing instead of clipping every sample onto an end stop.
+    Recheck the complete changed route against the existing clearance gate.
+    Prefix/return poses describe the real starting arm and must stay unchanged.
+    """
+    if len(raw_limits) != 6 or any(not 0 <= low < high <= 4095 for low, high in raw_limits):
+        raise RuntimeError("invalid motor position limits; calibration was not started")
+    lower = calibration.raw_to_normalized([pair[0] for pair in raw_limits])
+    upper = calibration.raw_to_normalized([pair[1] for pair in raw_limits])
+    _, turns = calibration_planning_pose(start)
+
+    def preserve(label):
+        return label.startswith((
+            "raising tool", "returning to raised", "lowering along safe", "restoring starting",
+        ))
+
+    observations = [pose for pose, _, label in waypoints if not preserve(label)]
+    if not observations:
+        raise RuntimeError("calibration has no observation poses")
+    shifts = [0.0] * 6
+    for index in range(5):
+        # Leave two degrees inside the existing motor stops. Intersect with
+        # the model's joint range, expressed on this profile's encoder turn.
+        low, high = sorted((lower[index], upper[index]))
+        low += 2.0
+        high -= 2.0
+        model_bounds = sorted(
+            (math.degrees(value) - JOINT_OFFSETS_DEG[index]) / JOINT_DIRECTIONS[index]
+            + turns[index]
+            for value in JOINT_LIMITS_RAD[index]
+        )
+        low, high = max(low, model_bounds[0]), min(high, model_bounds[1])
+        minimum_shift = low - min(pose[index] for pose in observations)
+        maximum_shift = high - max(pose[index] for pose in observations)
+        if minimum_shift > maximum_shift:
+            raise RuntimeError(
+                f"motor ID {index + 1} has insufficient reachable range for this calibration sweep"
+            )
+        shifts[index] = max(minimum_shift, min(maximum_shift, 0.0))
+    adjusted = [
+        (list(pose) if preserve(label) else [v + s for v, s in zip(pose, shifts, strict=True)], seconds, label)
+        for pose, seconds, label in waypoints
+    ]
+    if any(abs(shift) > 1e-8 for shift in shifts):
+        previous = list(start)
+        for pose, _, label in adjusted:
+            previous_height = tool_clearance_metric(previous)
+            minimum = (previous_height - 0.0002
+                       if previous_height < CALIBRATION_SAFE_HEIGHT_M else CALIBRATION_SAFE_HEIGHT_M)
+            if _path_min_clearance(previous, pose, 36) < minimum:
+                raise RuntimeError(f"motor-limit-adjusted path is not clear at '{label}'")
+            previous = pose
+    return adjusted
+
+
 def tool_clearance_metric(normalized: list[float] | tuple[float, ...]) -> float:
     """Return the lowest full-link mesh vertex above the SO-101 base plane."""
     return rendered_minimum_height(normalized)
@@ -694,6 +751,7 @@ class FollowerBus(Protocol):
 
     def connect(self) -> None: ...
     def read_positions(self) -> list[int]: ...
+    def read_position_limits(self) -> list[tuple[int, int]]: ...
     def reseed_position_guard(self, positions: list[int]) -> None: ...
     def write_positions(self, positions: list[int]) -> None: ...
     def enable_torque(self) -> None: ...
@@ -745,6 +803,14 @@ class LeRobotFollowerBus:
     def read_positions(self) -> list[int]:
         values = self.bus.sync_read("Present_Position", normalize=False, num_retry=2)
         return [int(values[name]) for name in self.motor_names] + list(self.ignored_tail_positions)
+
+    def read_position_limits(self) -> list[tuple[int, int]]:
+        limits = [
+            (int(self.bus.read("Min_Position_Limit", name, normalize=False, num_retry=1)),
+             int(self.bus.read("Max_Position_Limit", name, normalize=False, num_retry=1)))
+            for name in self.motor_names
+        ]
+        return limits + [(0, 4095)] * len(self.ignored_tail_positions)
 
     def write_positions(self, positions: list[int]) -> None:
         physical_positions = positions[: len(self.motor_names)]
@@ -807,6 +873,9 @@ class FakeFollowerBus:
 
     def read_positions(self) -> list[int]:
         return list(self.positions)
+
+    def read_position_limits(self) -> list[tuple[int, int]]:
+        return [(0, 4095)] * 6
 
     def reseed_position_guard(self, _positions: list[int]) -> None:
         pass
@@ -1468,6 +1537,7 @@ class FollowerController:
 
         self.calibration_sweep_mode = mode if mode in ("base", "joints", "axis", "wrist", "claw") else "base"
         try:
+            raw_limits = self.bus.read_position_limits()
             planning_start, encoder_turns = calibration_planning_pose(self.calibration_sweep_start)
             if self.calibration_sweep_mode == "joints":
                 self.calibration_sweep_waypoints = build_joint_calibration_sweep_waypoints(
@@ -1497,6 +1567,10 @@ class FollowerController:
                 ([value + turn for value, turn in zip(pose, encoder_turns, strict=True)], seconds, label)
                 for pose, seconds, label in self.calibration_sweep_waypoints
             ]
+            self.calibration_sweep_waypoints = fit_calibration_to_motor_limits(
+                self.calibration_sweep_start, self.calibration_sweep_waypoints,
+                self.profile.follower_calibration, raw_limits,
+            )
             # A wrapped model pose must also be reachable in this profile's
             # actual encoder range. Never let normalized_to_raw silently clip
             # a calibration waypoint into a different physical pose.
@@ -1511,7 +1585,8 @@ class FollowerController:
                         raw = value / 180.0 * 2048.0 - calibration.homing_offset[index]
                         if calibration.drive_mode[index]:
                             raw = -raw
-                    if not math.isfinite(raw) or not 0 <= round(raw) <= 4095:
+                    low, high = raw_limits[index]
+                    if not math.isfinite(raw) or not low <= round(raw) <= high:
                         raise RuntimeError(
                             f"calibration pose '{label}' exceeds the encoder range for "
                             f"{self.profile.motor_names[index]}; check this arm's servo calibration"

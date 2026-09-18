@@ -42,7 +42,12 @@ def collect_registers(bus, motor_names: list[str]) -> list[dict]:
     finally:
         # Closing the serial handle directly also handles partial connection
         # failures and deliberately avoids disconnect's default torque write.
-        bus.port_handler.closePort()
+        original_error = sys.exc_info()[1]
+        try:
+            bus.port_handler.closePort()
+        except Exception:
+            if original_error is None:
+                raise
     return rows
 
 

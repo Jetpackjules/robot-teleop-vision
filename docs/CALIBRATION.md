@@ -73,6 +73,12 @@ required; do not bypass these checks to obtain a saved overlay.
 
 ## Typical rejection reasons
 
+- Calibration reads each motor's existing position limits before enabling
+  motion. Observation ranges are translated inside those limits with a small
+  margin, preserving sample spacing, then the adjusted route is checked for
+  modeled clearance. The hardware limits are never widened. This handles arms
+  whose valid encoder ranges differ from the original reference arm; it does
+  not replace correct motor calibration or checks for physical obstructions.
 - **Overlay moves but the physical arm does not**: stop the attempt and support
   the arm before stopping the launcher (shutdown releases torque). With the
   launcher stopped and motor power connected, run
