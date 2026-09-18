@@ -73,6 +73,15 @@ required; do not bypass these checks to obtain a saved overlay.
 
 ## Typical rejection reasons
 
+- **Overlay moves but the physical arm does not**: stop the attempt and support
+  the arm before stopping the launcher (shutdown releases torque). With the
+  launcher stopped and motor power connected, run
+  `.venv\Scripts\python.exe scripts/diagnose_so101_motors.py` on Windows. This
+  reads the configured follower's registers without enabling torque, sending
+  positions, or changing limits. It saves `.teleop/so101_motor_diagnostics.json`.
+  Goal/position, operating mode, hardware limits, and fault flags help separate
+  a rejected target from a stalled motor. Torque values are observed after
+  shutdown; zero then does not prove torque was off during the failed sweep.
 - **Could not reach the compact base-axis anchor pose**: the modeled approach
   does not meet the clearance threshold. Update and restart the full launcher
   if using an older follower: calibration now preserves profile angle turns
