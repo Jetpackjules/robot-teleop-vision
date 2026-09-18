@@ -6,6 +6,19 @@ from dataclasses import dataclass
 
 import numpy as np
 
+if __package__:
+    from .so101_arm_common import (
+        BASE_JOINT_OFFSET_DEG,
+        BASE_STRAIGHT_NORMALIZED_DEG as BASE_STRAIGHT_NORMALIZED_DEG,
+        JOINT_DIRECTIONS, JOINT_OFFSETS_DEG,
+    )
+else:
+    from so101_arm_common import (
+        BASE_JOINT_OFFSET_DEG,
+        BASE_STRAIGHT_NORMALIZED_DEG as BASE_STRAIGHT_NORMALIZED_DEG,
+        JOINT_DIRECTIONS, JOINT_OFFSETS_DEG,
+    )
+
 
 JOINT_ORIGINS = (
     ((0.0388353, -8.97657e-09, 0.0624), (math.pi, 0.0, -math.pi)),
@@ -22,13 +35,9 @@ JOINT_LIMITS_RAD = (
     (-math.pi, math.pi),
     (-2.74385, 2.84121),
 )
-JOINT_DIRECTIONS = (1.0, -1.0, 1.0, 1.0, 1.0)
 # The follower encoder reads -40.4296875 degrees when the shoulder pan is
 # physically straight ahead. Convert that calibrated servo value into URDF
 # joint zero before doing IK or rendering the chain.
-BASE_STRAIGHT_NORMALIZED_DEG = -40.4296875
-BASE_JOINT_OFFSET_DEG = -BASE_STRAIGHT_NORMALIZED_DEG
-JOINT_OFFSETS_DEG = (BASE_JOINT_OFFSET_DEG, 80.0, 0.0, -70.0, 0.0)
 
 # Rendered geometry follows the same normalized base direction as the follower.
 OVERLAY_JOINT_DIRECTIONS = (1.0, -1.0, 1.0, 1.0, 1.0)

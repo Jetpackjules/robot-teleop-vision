@@ -1541,6 +1541,11 @@ class FollowerController:
         self.calibration_sweep_mode = mode if mode in ("base", "joints", "axis", "wrist", "claw") else "base"
         try:
             raw_limits = self.bus.read_position_limits()
+            calibration = self.profile.follower_calibration
+            if calibration.coordinate_system == "lerobot_urdf" and raw_limits != list(zip(
+                calibration.start_pos, calibration.end_pos, strict=True,
+            )):
+                raise RuntimeError("hardware motor limits changed since this LeRobot profile was calibrated")
             planning_start, encoder_turns = calibration_planning_pose(self.calibration_sweep_start)
             if self.calibration_sweep_mode == "joints":
                 self.calibration_sweep_waypoints = build_joint_calibration_sweep_waypoints(
@@ -1579,15 +1584,7 @@ class FollowerController:
             # a calibration waypoint into a different physical pose.
             calibration = self.profile.follower_calibration
             for pose, _, label in self.calibration_sweep_waypoints:
-                for index, value in enumerate(pose):
-                    if calibration.calib_mode[index] == "LINEAR":
-                        raw = calibration.start_pos[index] + value / 100.0 * (
-                            calibration.end_pos[index] - calibration.start_pos[index]
-                        )
-                    else:
-                        raw = value / 180.0 * 2048.0 - calibration.homing_offset[index]
-                        if calibration.drive_mode[index]:
-                            raw = -raw
+                for index, raw in enumerate(calibration.normalized_to_raw_unclipped(pose)):
                     low, high = raw_limits[index]
                     if not math.isfinite(raw) or not low <= round(raw) <= high:
                         raise RuntimeError(

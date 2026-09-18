@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import math
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,12 @@ from typing import Any
 
 MOTOR_COUNT = 6
 DEFAULT_PROFILE = Path(__file__).with_name("so101_arm_pair.json")
+# Internal servo-space convention used by the existing planner and Godot model.
+# Modern LeRobot degrees are URDF joint angles and must be converted to it.
+JOINT_DIRECTIONS = (1.0, -1.0, 1.0, 1.0, 1.0)
+BASE_STRAIGHT_NORMALIZED_DEG = -40.4296875
+BASE_JOINT_OFFSET_DEG = -BASE_STRAIGHT_NORMALIZED_DEG
+JOINT_OFFSETS_DEG = (BASE_JOINT_OFFSET_DEG, 80.0, 0.0, -70.0, 0.0)
 
 
 class ArmProtocolError(ValueError):
@@ -24,6 +29,7 @@ class ArmCalibration:
     start_pos: tuple[int, ...]
     end_pos: tuple[int, ...]
     calib_mode: tuple[str, ...]
+    coordinate_system: str = "legacy"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ArmCalibration":
@@ -36,6 +42,19 @@ class ArmCalibration:
         }
         if any(len(values) != MOTOR_COUNT for values in fields.values()):
             raise ValueError("SO-101 calibration must contain six values per field")
+        coordinate_system = str(data.get("coordinate_system", "legacy"))
+        if coordinate_system not in ("legacy", "lerobot_urdf"):
+            raise ValueError(f"unsupported SO-101 coordinate system: {coordinate_system}")
+        if coordinate_system == "lerobot_urdf":
+            if fields["calib_mode"] != ("DEGREE",) * 5 + ("LINEAR",):
+                raise ValueError("LeRobot URDF calibration requires five degree joints and a linear gripper")
+            if any(fields["drive_mode"]):
+                raise ValueError("LeRobot URDF calibration currently requires non-inverted hardware calibration")
+            if any(not 0 <= low < high <= 4095 for low, high in zip(
+                fields["start_pos"], fields["end_pos"], strict=True,
+            )):
+                raise ValueError("LeRobot URDF calibration requires valid hardware ranges")
+        fields["coordinate_system"] = coordinate_system
         return cls(**fields)
 
     def raw_to_normalized(self, positions: list[int] | tuple[int, ...]) -> list[float]:
@@ -48,24 +67,41 @@ class ArmCalibration:
                     raise ValueError(f"zero calibration span for motor {index + 1}")
                 result.append((float(raw) - self.start_pos[index]) / span * 100.0)
                 continue
+            if self.coordinate_system == "lerobot_urdf":
+                # Firmware already applied Homing_Offset. This is LeRobot's
+                # DEGREES conversion, followed by URDF -> internal servo space.
+                midpoint = (self.start_pos[index] + self.end_pos[index]) / 2.0
+                joint_degrees = (float(raw) - midpoint) * 360.0 / 4095.0
+                result.append((joint_degrees - JOINT_OFFSETS_DEG[index]) / JOINT_DIRECTIONS[index])
+                continue
             directed = -float(raw) if self.drive_mode[index] else float(raw)
             result.append((directed + self.homing_offset[index]) / 2048.0 * 180.0)
         return result
 
     def normalized_to_raw(self, positions: list[float] | tuple[float, ...]) -> list[int]:
         require_positions(positions)
-        result: list[int] = []
+        bounded = [max(0.0, min(100.0, float(value))) if mode == "LINEAR" else value
+                   for value, mode in zip(positions, self.calib_mode, strict=True)]
+        return [max(0, min(4095, int(round(raw)))) for raw in self.normalized_to_raw_unclipped(bounded)]
+
+    def normalized_to_raw_unclipped(self, positions: list[float] | tuple[float, ...]) -> list[float]:
+        """Inverse without encoder clipping, for validating planned targets."""
+        require_positions(positions)
+        result: list[float] = []
         for index, value in enumerate(positions):
             if self.calib_mode[index] == "LINEAR":
-                calibrated_value = max(0.0, min(100.0, float(value)))
-                raw = self.start_pos[index] + calibrated_value / 100.0 * (
+                raw = self.start_pos[index] + float(value) / 100.0 * (
                     self.end_pos[index] - self.start_pos[index]
                 )
+            elif self.coordinate_system == "lerobot_urdf":
+                midpoint = (self.start_pos[index] + self.end_pos[index]) / 2.0
+                joint_degrees = float(value) * JOINT_DIRECTIONS[index] + JOINT_OFFSETS_DEG[index]
+                raw = midpoint + joint_degrees * 4095.0 / 360.0
             else:
                 raw = float(value) / 180.0 * 2048.0 - self.homing_offset[index]
                 if self.drive_mode[index]:
                     raw = -raw
-            result.append(max(0, min(4095, int(round(raw)))))
+            result.append(raw)
         return result
 
 

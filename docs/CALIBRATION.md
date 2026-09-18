@@ -73,6 +73,21 @@ required; do not bypass these checks to obtain a saved overlay.
 
 ## Typical rejection reasons
 
+- **Hardware LeRobot calibration copied into a legacy profile**: hardware
+  `Homing_Offset` values are already applied inside Feetech motors. Copying them
+  into the old software-offset formula produces incorrect joint angles and
+  targets. Profiles can explicitly select `coordinate_system: "lerobot_urdf"`
+  within `follower.calibration`. This uses [LeRobot's degree conversion](https://github.com/huggingface/lerobot/blob/main/src/lerobot/motors/motors_bus.py)
+  around the recorded range midpoint, then maps URDF angles into the existing
+  planner/model convention. Legacy profiles retain their existing conversion.
+  With the launcher stopped, first run the read-only motor diagnostic, then
+  `python scripts/repair_so101_profile_coordinates.py --apply`. This file-only
+  repair requires matching motor identities, offsets, and ranges in the saved
+  diagnostic, creates an exact backup, and changes only the follower's coordinate
+  convention. It does not recalibrate motors or modify camera alignment. Restart
+  the follower after applying it. Old saved robot poses/registration must be
+  revalidated under the corrected convention before reuse; simulation tests do
+  not prove the physical arm's calibration or workspace clearance.
 - The follower reads encoders throughout automatic motion. Sustained following
   error cancels the sweep and rebases the hold to the measured pose, even if
   ordinary teleoperation feedback settings are disabled. Loss of encoder data
