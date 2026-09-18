@@ -290,54 +290,63 @@ def fit_heading(
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("capture", type=Path)
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args()
-    payload = json.loads(args.capture.expanduser().read_text())
+def select_axis_evidence(payload: dict) -> dict:
+    """Try the preferred camera, then independently gated alternatives.
+
+    Full-image point count measures background coverage, not moving-arm quality.
+    A rejected camera must not veto valid evidence already captured by another.
+    Never pool their motion clouds or relax the direction/residual gates.
+    """
     frames = payload["frames"]
     if len(frames) < 5:
-        raise SystemExit("need at least five settled poses")
+        raise ValueError("need at least five settled poses")
     cameras = frames[0].get("full_camera_points", [])
-    try:
-        reference_index, reference_camera = select_reference_camera(payload, frames)
-    except ValueError as error:
-        raise SystemExit(str(error)) from error
-    # Open3D's RANSAC plane segmentation otherwise chooses a different table
-    # plane on identical replays, which rotates the fitted robot basis enough
-    # to make repeated calibration presses drift at the distal joints.
-    o3d.utility.random.seed(23)
-    normal, plane_offset, plane_details = plane_consensus(
-        frames,
-        [reference_index],
-    )
-    reference_clouds = dynamic_clouds(
-        frames,
-        normal,
-        plane_offset,
-        reference_index,
-    )
-    combined = fit_axis(
-        frames,
-        reference_clouds,
-        normal,
-        plane_offset,
-        5,
-    )
+    preferred_index, preferred_name = select_reference_camera(payload, frames)
+    attempts: list[dict] = []
+    for index in [preferred_index, *[i for i in range(len(cameras)) if i != preferred_index]]:
+        camera_name = str(cameras[index].get("name", ""))
+        try:
+            if any(
+                index >= len(frame.get("full_camera_points", []))
+                or str(frame["full_camera_points"][index].get("name", "")) != camera_name
+                for frame in frames
+            ):
+                raise ValueError("camera identity changed between captured poses")
+            o3d.utility.random.seed(23)
+            normal, plane_offset, plane_details = plane_consensus(frames, [index])
+            clouds = dynamic_clouds(frames, normal, plane_offset, index)
+            if any(len(cloud) < 25 for cloud in clouds):
+                raise ValueError("too few moving points in one or more poses")
+            fit = fit_axis(frames, clouds, normal, plane_offset, 5)
+            loss = float(fit["loss_m"])
+            accepted = fit["sign"] == -1 and math.isfinite(loss) and loss <= 0.012
+            attempts.append({"camera": camera_name, "sign": fit["sign"], "loss_m": loss,
+                             "accepted": accepted})
+            if accepted:
+                return {"normal": normal, "plane_offset": plane_offset,
+                        "plane_details": plane_details, "clouds": clouds, "axis_fit": fit,
+                        "reference_camera": camera_name,
+                        "camera_selection": {"preferred": preferred_name, "selected": camera_name,
+                                             "attempts": attempts}}
+        except (ValueError, RuntimeError, IndexError) as error:
+            attempts.append({"camera": camera_name, "accepted": False, "reason": str(error)})
+    raise ValueError("base-axis fit rejected in every captured camera: " + json.dumps(attempts))
+
+
+def solve(payload: dict) -> dict:
+    frames = payload["frames"]
+    evidence = select_axis_evidence(payload)
+    normal, plane_offset = evidence["normal"], evidence["plane_offset"]
+    plane_details, reference_clouds = evidence["plane_details"], evidence["clouds"]
+    combined, reference_camera = evidence["axis_fit"], evidence["reference_camera"]
     camera_fits = [
         {
-            "camera": cameras[reference_index]["name"],
+            "camera": reference_camera,
             **combined,
         }
     ]
     disagreement = 0.0
     wrong_sign = next(item for item in combined["alternatives"] if item["sign"] != combined["sign"])
-    if combined["sign"] != -1 or disagreement > 0.025 or combined["loss_m"] > 0.012:
-        raise SystemExit(
-            f"base-axis fit rejected: sign={combined['sign']} loss={combined['loss_m']:.4f} "
-            f"camera disagreement={disagreement:.4f}"
-        )
     base_projection = np.asarray(combined["base_projection"])
     heading = fit_heading(
         frames,
@@ -347,7 +356,7 @@ def main() -> int:
         combined["sign"],
         reference_clouds,
     )
-    result = {
+    return {
         "type": "so101_base_axis_fit",
         "method": "settled_shoulder_pan_revolute_axis",
         "normal": normal.tolist(),
@@ -359,10 +368,23 @@ def main() -> int:
         "reference_camera": reference_camera,
         "reference_camera_serial": reference_camera,
         "reference_camera_validation_required": True,
-        "wrong_sign_loss_ratio": float(wrong_sign["loss_m"] / combined["loss_m"]),
+        "camera_selection": evidence["camera_selection"],
+        "wrong_sign_loss_ratio": float(wrong_sign["loss_m"] / max(combined["loss_m"], 1e-12)),
         "preview_transform": heading,
         "saved": False,
     }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("capture", type=Path)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    payload = json.loads(args.capture.expanduser().read_text())
+    try:
+        result = solve(payload)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     encoded = json.dumps(result, indent=2)
     if args.output:
         args.output.expanduser().write_text(encoded + "\n")

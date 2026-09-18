@@ -109,22 +109,23 @@ class Observation:
     nominal_tip: np.ndarray
 
 
-def d455_snapshot(frame: dict) -> dict:
+def d455_snapshot(frame: dict, reference_camera: str = "D455") -> dict:
     for snapshot in frame.get("rgb_snapshots", []):
-        if "d455" in str(snapshot.get("name", "")).lower() and Path(str(snapshot.get("path", ""))).is_file():
+        if reference_camera.lower() in str(snapshot.get("name", "")).lower() and Path(str(snapshot.get("path", ""))).is_file():
             return snapshot
-    raise ValueError("capture frame has no saved native-D455 RGB image")
+    raise ValueError(f"capture frame has no saved RGB image for reference camera {reference_camera!r}")
 
 
 def group_frames(capture: dict) -> list[list[dict]]:
     frames: list[dict] = []
+    reference_camera = str(capture.get("reference_camera", "D455")).strip() or "D455"
     for value in capture.get("frames", []):
         if int(value.get("calibration_joint_index", -1)) != 5 or len(value.get("pose", [])) < 6:
             continue
         if len(value.get("claw_tip_positions_local", [])) != 2:
             continue
         value = dict(value)
-        value["_rgb"] = d455_snapshot(value)
+        value["_rgb"] = d455_snapshot(value, reference_camera)
         frames.append(value)
     groups: list[list[dict]] = []
     for frame in sorted(frames, key=lambda item: (float(item["pose"][4]), float(item["pose"][5]))):
@@ -873,7 +874,7 @@ def solve(capture: dict, debug_directory: Path) -> dict:
     return {
         "type": "so101_claw_visual_fit",
         "method": METHOD,
-        "reference_camera": "RealSense D455 native RGB",
+        "reference_camera": str(groups[0][0]["_rgb"]["name"]),
         "gripper_angle_samples_normalized": normalized,
         "gripper_angle_samples_degrees": degrees,
         "gripper_hinge_direction": int(

@@ -6,6 +6,13 @@ Every connected RealSense is discovered dynamically. The first enabled camera is
 
 Use overlapping static geometry, a flat support surface, and adequate depth texture. More cameras improve coverage only when their extrinsics are trustworthy; a bad auxiliary camera must not veto a strong reference-camera solve.
 
+Robot base fitting tries the capture-preferred camera first. If its motion fit
+fails, it evaluates the other captured cameras independently, retaining the same
+expected direction and 12 mm residual limit. The selected camera and rejected
+attempts are recorded in the base-fit JSON. Outward joint and RGB claw stages
+keep that validated reference, including on installations with two D435s.
+This selection does not modify camera-to-camera alignment.
+
 ## Robot calibration (module-owned)
 
 Core exposes generic start, refine, cancel, status, save, restore, and clear hooks. The selected Godot module decides which evidence, movements, kinematics, and transactional gates those hooks use. A robot without automatic calibration can omit them and provide a module-specific manual workflow.

@@ -662,6 +662,10 @@ func _can_resume_recent_pending_claw(
 
 
 func _resume_recent_pending_claw_calibration(force_editor_auto_move: bool) -> void:
+	var overlay := get_node_or_null(OVERLAY_PATH)
+	if overlay != null and overlay.has_method("get_registration_status"):
+		var registration: Dictionary = overlay.call("get_registration_status")
+		_automation_base_result = registration.get("base_axis_fit", {}).duplicate(true)
 	_automation_active = true
 	_automation_stage = "claw_capture"
 	_automation_force_editor_auto_move = force_editor_auto_move
@@ -1911,8 +1915,8 @@ func _depth_snapshot_for_renderer(renderer: Node3D) -> Dictionary:
 
 func _rgb_snapshot_for_renderer(renderer: Node3D, pose: Array) -> Dictionary:
 	var camera_name := _depth_renderer_name(renderer)
-	if "d455" not in camera_name.to_lower():
-		return {}
+	# Retain RGB from every available RealSense. The solver uses the camera
+	# validated by the base fit; installations may have D435s instead of a D455.
 	var image: Image = null
 	var raw_intrinsics := Vector4.ZERO
 	var raw_extrinsics := PackedFloat32Array()
@@ -1942,7 +1946,8 @@ func _rgb_snapshot_for_renderer(renderer: Node3D, pose: Array) -> Dictionary:
 		return {}
 	var opening := float(pose[5]) if pose.size() >= 6 else -1.0
 	var roll := float(pose[4]) if pose.size() >= 5 else -999.0
-	var filename := "claw_%d_view%02d_roll%+04d_open%03d.png" % [
+	var filename := "claw_%s_%d_view%02d_roll%+04d_open%03d.png" % [
+		camera_name.sha256_text().left(12),
 		int(_started_unix_ms),
 		maxi(1, _automation_claw_capture_attempt),
 		int(round(roll)),
@@ -2525,6 +2530,12 @@ func _save_debug_capture(frames: Array) -> void:
 
 
 func _reference_camera_for_frames(frames: Array) -> String:
+	# Once a base fit passes, keep its camera for every outward stage. Otherwise
+	# full-image point counts can silently switch back to a rejected background.
+	if _automation_active:
+		var validated_reference := str(_automation_base_result.get("reference_camera", "")).strip_edges()
+		if not validated_reference.is_empty():
+			return validated_reference
 	var requested := calibration_primary_camera_match.strip_edges().to_lower()
 	var coverage := {}
 	for frame_variant in frames:
@@ -4396,8 +4407,12 @@ func _validate_automated_claw_result(result: Dictionary) -> Dictionary:
 		]
 	):
 		return {"ok": false, "reason": "wrong claw fit type or method"}
-	if "d455" not in str(result.get("reference_camera", "")).to_lower():
-		return {"ok": false, "reason": "the fit did not use the reference D455"}
+	var reference_camera := str(result.get("reference_camera", ""))
+	if method == "d455_native_rgb_multiview_tip_fit":
+		if reference_camera.is_empty() or reference_camera != _reference_camera_for_frames(_frames):
+			return {"ok": false, "reason": "the RGB fit did not use the capture-selected reference camera"}
+	elif "d455" not in reference_camera.to_lower():
+		return {"ok": false, "reason": "the legacy depth fit did not use its reference D455"}
 	var normalized = result.get("gripper_angle_samples_normalized", null)
 	var degrees = result.get("gripper_angle_samples_degrees", null)
 	if (
@@ -4782,6 +4797,8 @@ func _automated_has_required_d455(
 	camera_results,
 	reference_camera: String = "",
 ) -> bool:
+	if reference_camera.is_empty() and _automation_active:
+		reference_camera = str(_automation_base_result.get("reference_camera", ""))
 	if not camera_results is Array:
 		return false
 	for camera_variant in camera_results:
@@ -5022,6 +5039,7 @@ func _write_automated_candidate_registration(base_result: Dictionary) -> bool:
 		return false
 	var payload := {
 		"type": "so101_robot_registration_candidate",
+		"reference_camera": str(base_result.get("reference_camera", "")),
 		"basis_x": _vector3_to_array(transform.basis.x),
 		"basis_y": _vector3_to_array(transform.basis.y),
 		"basis_z": _vector3_to_array(transform.basis.z),

@@ -30,6 +30,13 @@ class RegistrationProbe:
 	func clear_saved_registration() -> void:
 		clear_count += 1
 
+class RgbProbe:
+	extends Node3D
+	func get_color_image() -> Image:
+		return Image.create(4, 4, false, Image.FORMAT_RGB8)
+	func get_current_intrinsics() -> Vector4:
+		return Vector4(4, 4, 2, 2)
+
 var checks := 0
 var failures: Array[String] = []
 
@@ -128,6 +135,25 @@ func _run() -> void:
 	check(registration.clear_count == 1, "module clear reaches overlay")
 	check(clear_probe._state == "idle" and clear_probe._frames.is_empty() and not clear_probe._editor_sweep_requested, "clear stops capture and resets state")
 	check("Camera alignment was preserved" in clear_probe._status.message, "clear reports robot-only scope")
+	clear_probe._automation_active = true
+	clear_probe._automation_base_result = {"reference_camera": "RealSense D435 B"}
+	var camera_frames: Array = [{"full_camera_points": [
+		{"name": "RealSense D435 A", "points": [1, 2, 3]},
+		{"name": "RealSense D435 B", "points": [1]},
+	]}]
+	check(clear_probe._reference_camera_for_frames(camera_frames) == "RealSense D435 B", "validated camera survives higher background coverage")
+	check(not clear_probe._automated_has_required_d455([{"name": "RealSense D435 A"}]), "coverage requires selected camera")
+	check(clear_probe._automated_has_required_d455([{"name": "RealSense D435 B"}]), "D435 reference coverage accepted")
+	var snapshots: Array = []
+	for camera_name in ["RealSense D435 A", "RealSense D435 B"]:
+		var rgb := RgbProbe.new()
+		rgb.name = camera_name
+		clear_host.add_child(rgb)
+		snapshots.append(clear_probe._rgb_snapshot_for_renderer(rgb, [0, 0, 0, 0, 0, 5]))
+	check(not snapshots[0].is_empty() and not snapshots[1].is_empty(), "D435 RGB images are captured")
+	if not snapshots[0].is_empty() and not snapshots[1].is_empty():
+		check(snapshots[0].path != snapshots[1].path, "camera RGB images do not overwrite each other")
+	clear_probe._automation_active = false
 	robot_module._calibrator = null
 	robot_module.free()
 	clear_host.free()
