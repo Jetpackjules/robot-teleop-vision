@@ -17,6 +17,19 @@ class WireProbe:
 	func _emit_status(_force: bool) -> void:
 		pass
 
+class ClearProbe:
+	extends AckProbe
+	func _ready() -> void:
+		pass
+	func _process(_delta: float) -> void:
+		pass
+
+class RegistrationProbe:
+	extends Node3D
+	var clear_count := 0
+	func clear_saved_registration() -> void:
+		clear_count += 1
+
 var checks := 0
 var failures: Array[String] = []
 
@@ -70,7 +83,54 @@ func _run() -> void:
 	)
 	check(not solver_result.get("ok", true) and "could not start" in solver_result.status, "launch error is not evidence rejection")
 	OS.set_environment("ROBOT_TELEOP_SOLVER_PYTHON", configured_python)
+	# Exercise replacement of an existing candidate on Windows, where an open
+	# read handle prevents the atomic rename used between outward joint solves.
+	var candidate_path := solver.AUTOMATED_CANDIDATE_REGISTRATION_PATH
+	var candidate := FileAccess.open(candidate_path, FileAccess.WRITE)
+	candidate.store_string(JSON.stringify({"origin": [1, 2, 3], "saved": false}))
+	candidate.close()
+	for through_joint in [1, 2]:
+		solver._automation_solver_through_joint = through_joint
+		var mapping := {
+			"fitted_directions": [1, -1, 1, 1, 1, 1],
+			"fitted_offsets_degrees": [40, 80, through_joint, -70, 0, 0],
+		}
+		check(solver._update_automated_candidate_mapping(mapping), "joint-%d candidate replacement" % through_joint)
+		candidate = FileAccess.open(candidate_path, FileAccess.READ)
+		var staged: Dictionary = JSON.parse_string(candidate.get_as_text())
+		candidate.close()
+		check(staged.get("calibrated_through_joint", 0) == through_joint, "candidate advances to joint %d" % through_joint)
+		check(staged.origin == [1.0, 2.0, 3.0], "candidate preserves validated base")
+		check(not FileAccess.file_exists(candidate_path + ".pending"), "no pending candidate remains")
+	check(not solver._update_automated_candidate_mapping({}), "invalid mapping cannot overwrite candidate")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(candidate_path))
+	check(solver.has_method("clear_arm_position_calibration"), "module clear action has a calibrator implementation")
 	solver.free()
+	var clear_host := Node3D.new()
+	root.add_child(clear_host)
+	var anchor := Node3D.new()
+	anchor.name = "WorldLevelAnchor"
+	clear_host.add_child(anchor)
+	var registration := RegistrationProbe.new()
+	registration.name = "RobotOverlay"
+	anchor.add_child(registration)
+	var clear_probe := ClearProbe.new()
+	clear_host.add_child(clear_probe)
+	var robot_module := Module.new()
+	robot_module._calibrator = clear_probe
+	clear_probe._state = "solving"
+	robot_module.clear_calibration()
+	check(registration.clear_count == 0 and clear_probe._state == "solving", "clear does not race a solver")
+	clear_probe._state = "capturing"
+	clear_probe._editor_sweep_requested = true
+	clear_probe._frames = [{"test_frame": true}]
+	robot_module.clear_calibration()
+	check(registration.clear_count == 1, "module clear reaches overlay")
+	check(clear_probe._state == "idle" and clear_probe._frames.is_empty() and not clear_probe._editor_sweep_requested, "clear stops capture and resets state")
+	check("Camera alignment was preserved" in clear_probe._status.message, "clear reports robot-only scope")
+	robot_module._calibrator = null
+	robot_module.free()
+	clear_host.free()
 	var resolved := Transport.resolve(JSON.stringify(config()), "res://missing.json")
 	check(resolved.ports.command_port == 14248, "custom command port")
 	check(resolved.ports.telemetry_port == 14250, "custom runtime telemetry")

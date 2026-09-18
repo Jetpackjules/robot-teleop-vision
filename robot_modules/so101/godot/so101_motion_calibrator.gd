@@ -700,6 +700,27 @@ func cancel_arm_position_calibration() -> void:
 	if _state == "capturing":
 		_stop_editor_sweep("calibration cancelled")
 		_fail("Arm position calibration cancelled.")
+
+
+func clear_arm_position_calibration() -> void:
+	# Do not erase a registration that an in-flight solver could then restore.
+	if _state == "solving" or _solve_thread.is_started():
+		_set_status("solving", "Wait for the current solve to finish before clearing robot calibration.", 0.0, 0.0)
+		return
+	_stop_editor_sweep("robot calibration cleared")
+	if _automation_active:
+		_end_automation(false)
+	var overlay := get_node_or_null(OVERLAY_PATH)
+	if overlay == null or not overlay.has_method("clear_saved_registration"):
+		_fail("The robot overlay is unavailable; calibration was not cleared.")
+		return
+	overlay.call("clear_saved_registration")
+	_frames.clear()
+	_last_solution.clear()
+	_state = "idle"
+	_set_status("idle", "Robot position calibration cleared. Camera alignment was preserved.", 0.0, 0.0)
+
+
 func _start_editor_sweep() -> void:
 	if not _auto_move_this_capture or _state != "capturing":
 		return
@@ -4151,13 +4172,14 @@ func _finish_automated_stage(result: Dictionary) -> void:
 					% through_joint
 				)
 				return
+			# This checkpoint is already durable even if staging the next solve fails.
+			_automation_applied_through_joint = through_joint
 			if not _update_automated_candidate_mapping(result):
 				_fail_automation(
 					"The validated joint-%d mapping could not be staged for the next outward solve."
 					% through_joint
 				)
 				return
-			_automation_applied_through_joint = through_joint
 			_automation_latest_joint_result = result.duplicate(true)
 			_state = "complete"
 			_set_status(
@@ -4948,7 +4970,11 @@ func _update_automated_candidate_mapping(result: Dictionary) -> bool:
 	var source := FileAccess.open(path, FileAccess.READ)
 	if source == null:
 		return false
-	var parsed = JSON.parse_string(source.get_as_text())
+	var source_text := source.get_as_text()
+	# Windows cannot replace the candidate while our read handle is open.
+	# Close it before any validation return or the atomic pending-file rename.
+	source.close()
+	var parsed = JSON.parse_string(source_text)
 	if not parsed is Dictionary:
 		return false
 	var directions = result.get("fitted_directions", null)
