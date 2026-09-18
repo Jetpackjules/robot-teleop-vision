@@ -73,6 +73,14 @@ required; do not bypass these checks to obtain a saved overlay.
 
 ## Typical rejection reasons
 
+- **Could not reach the compact base-axis anchor pose**: the modeled approach
+  does not meet the clearance threshold. Update and restart the full launcher
+  if using an older follower: calibration now preserves profile angle turns
+  (for example, an elbow at 388 degrees approaches 420 degrees, equivalent to
+  60 degrees, instead of attempting a 328-degree movement). The overlay's
+  unregistered world position does not affect this check. Encoder-range and
+  modeled-clearance checks still apply; a physically familiar rest pose does
+  not imply a matching saved rest-pose file exists.
 - **Not enough frames**: the reference camera did not provide enough settled, distinct poses. Keep the relevant links visible and rerun.
 - **Geometrically indistinct path**: measured poses did not span enough angle to identify the intended axis.
 - **Hardware process faulted**: remove power/support the robot, inspect power/USB/mechanics, and clear the underlying fault before requesting another sweep.

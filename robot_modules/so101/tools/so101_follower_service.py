@@ -14,6 +14,9 @@ from typing import Protocol
 
 from so101_arm_common import ArmPairProfile, DEFAULT_PROFILE, limit_step, pose_is_close
 from so101_kinematics import (
+    JOINT_DIRECTIONS,
+    JOINT_LIMITS_RAD,
+    JOINT_OFFSETS_DEG,
     arm_pose,
     joint_rate_step,
     rendered_minimum_height,
@@ -45,6 +48,25 @@ REST_RETURN_GRIPPER_SPEED_PER_SECOND = 18.0
 REST_RETURN_CLEARANCE_TOLERANCE_M = 0.001
 REST_RETURN_MINIMUM_MODELED_HEIGHT_M = -0.002
 REST_RETURN_SETTLE_DEGREES = 0.40
+
+
+def calibration_planning_pose(start: list[float]) -> tuple[list[float], list[float]]:
+    """Use model-angle turns for planning, retaining the encoder's original turns.
+
+    A profile can report an elbow at 388 degrees rather than 28 degrees. Fixed
+    observation poses must then command 420 degrees rather than 60 degrees.
+    Do not clamp the starting pose or change the linear gripper coordinate.
+    """
+    pose = list(start)
+    turns = [0.0] * len(start)
+    for index, (direction, offset, limits) in enumerate(
+        zip(JOINT_DIRECTIONS, JOINT_OFFSETS_DEG, JOINT_LIMITS_RAD, strict=True)
+    ):
+        center = math.degrees((limits[0] + limits[1]) * 0.5)
+        angle = start[index] * direction + offset
+        turns[index] = 360.0 * round((angle - center) / 360.0) / direction
+        pose[index] -= turns[index]
+    return pose, turns
 
 
 def tool_clearance_metric(normalized: list[float] | tuple[float, ...]) -> float:
@@ -1446,30 +1468,54 @@ class FollowerController:
 
         self.calibration_sweep_mode = mode if mode in ("base", "joints", "axis", "wrist", "claw") else "base"
         try:
+            planning_start, encoder_turns = calibration_planning_pose(self.calibration_sweep_start)
             if self.calibration_sweep_mode == "joints":
                 self.calibration_sweep_waypoints = build_joint_calibration_sweep_waypoints(
-                    self.calibration_sweep_start,
+                    planning_start,
                     view_strategy_attempt,
                 )
             elif self.calibration_sweep_mode == "wrist":
                 self.calibration_sweep_waypoints = build_wrist_calibration_sweep_waypoints(
-                    self.calibration_sweep_start,
+                    planning_start,
                     view_strategy_attempt,
                 )
             elif self.calibration_sweep_mode == "claw":
                 self.calibration_sweep_waypoints = build_claw_calibration_sweep_waypoints(
-                    self.calibration_sweep_start,
+                    planning_start,
                     view_strategy_attempt,
                 )
             elif self.calibration_sweep_mode == "axis":
                 self.calibration_sweep_waypoints = build_base_axis_sweep_waypoints(
-                    self.calibration_sweep_start,
+                    planning_start,
                     view_strategy_attempt,
                 )
             else:
                 self.calibration_sweep_waypoints = build_calibration_sweep_waypoints(
-                    self.calibration_sweep_start
+                    planning_start
                 )
+            self.calibration_sweep_waypoints = [
+                ([value + turn for value, turn in zip(pose, encoder_turns, strict=True)], seconds, label)
+                for pose, seconds, label in self.calibration_sweep_waypoints
+            ]
+            # A wrapped model pose must also be reachable in this profile's
+            # actual encoder range. Never let normalized_to_raw silently clip
+            # a calibration waypoint into a different physical pose.
+            calibration = self.profile.follower_calibration
+            for pose, _, label in self.calibration_sweep_waypoints:
+                for index, value in enumerate(pose):
+                    if calibration.calib_mode[index] == "LINEAR":
+                        raw = calibration.start_pos[index] + value / 100.0 * (
+                            calibration.end_pos[index] - calibration.start_pos[index]
+                        )
+                    else:
+                        raw = value / 180.0 * 2048.0 - calibration.homing_offset[index]
+                        if calibration.drive_mode[index]:
+                            raw = -raw
+                    if not math.isfinite(raw) or not 0 <= round(raw) <= 4095:
+                        raise RuntimeError(
+                            f"calibration pose '{label}' exceeds the encoder range for "
+                            f"{self.profile.motor_names[index]}; check this arm's servo calibration"
+                        )
             self.calibration_sweep_duration = sum(item[1] for item in self.calibration_sweep_waypoints)
         except Exception as exc:
             self._reject_calibration_start(str(exc))

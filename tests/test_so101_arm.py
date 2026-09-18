@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import time
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -1246,6 +1247,91 @@ def test_base_axis_sweep_locks_downstream_servos_and_spans_sixty_degrees():
         for pose, _, label in waypoints
         if "base-axis" in label or "servo 0" in label
     )
+
+
+@pytest.mark.parametrize("drive_mode", [0, 1])
+def test_base_axis_sweep_accepts_reported_wrapped_start_without_long_elbow_rotation(drive_mode):
+    pair = profile()
+    # Reported Singapore startup encoders and angular coordinates. The gripper
+    # uses the fixture's linear calibration; its remote calibration is unknown.
+    raw = [2034, 988, 3070, 2404, 2060, 1388]
+    angular_ticks = [2217, 1470, 4416, 2284, 3728]
+    calibration = replace(
+        pair.follower_calibration,
+        homing_offset=tuple(
+            ticks - (-position if drive_mode else position)
+            for ticks, position in zip(angular_ticks, raw[:5], strict=True)
+        ) + (0,),
+        drive_mode=(drive_mode,) * 5 + (0,),
+    )
+    pair = replace(pair, follower_calibration=calibration)
+    bus = FakeFollowerBus(raw)
+    controller = FollowerController(pair, bus)
+    controller.connect()
+    initial = list(controller.follower_normalized)
+    with pytest.raises(RuntimeError, match="compact base-axis anchor"):
+        build_base_axis_sweep_waypoints(initial)
+
+    controller.start_calibration_sweep("axis")
+
+    assert controller.calibration_sweep_active, controller.calibration_rejection
+    anchor = next(pose for pose, _, label in controller.calibration_sweep_waypoints
+                  if label == "moving to base-axis anchor")
+    assert initial[2] == pytest.approx(388.125)
+    assert anchor[2] == pytest.approx(420.0)
+    assert abs(anchor[2] - initial[2]) < 32.0
+    previous = initial
+    for pose, _, _ in controller.calibration_sweep_waypoints:
+        assert follower_service._path_min_clearance(previous, pose, 60) >= CALIBRATION_SAFE_HEIGHT_M
+        assert calibration.raw_to_normalized(calibration.normalized_to_raw(pose)) == pytest.approx(pose, abs=0.06)
+        previous = pose
+
+
+@pytest.mark.parametrize("mode", ["base", "axis", "joints", "wrist", "claw"])
+def test_calibration_modes_preserve_profile_turns_and_physical_encoder_path(mode):
+    pair = profile()
+    initial = [0.0, 130.0, 38.0, 78.0, -8.0, 20.0]
+    raw = pair.follower_calibration.normalized_to_raw(initial)
+    turns = [-360.0, 360.0, 360.0, 0.0, -360.0, 0.0]
+    shifted_calibration = replace(
+        pair.follower_calibration,
+        homing_offset=tuple(offset + int(turn / 360.0 * 4096)
+                            for offset, turn in zip(pair.follower_calibration.homing_offset, turns, strict=True)),
+    )
+    ordinary = FollowerController(pair, FakeFollowerBus(raw))
+    shifted = FollowerController(replace(pair, follower_calibration=shifted_calibration), FakeFollowerBus(raw))
+    for controller in (ordinary, shifted):
+        controller.connect()
+        controller.start_calibration_sweep(mode)
+        assert controller.calibration_sweep_active, controller.calibration_rejection
+    assert len(ordinary.calibration_sweep_waypoints) == len(shifted.calibration_sweep_waypoints)
+    for (pose, seconds, label), (shifted_pose, shifted_seconds, shifted_label) in zip(
+        ordinary.calibration_sweep_waypoints, shifted.calibration_sweep_waypoints, strict=True
+    ):
+        assert shifted_pose == pytest.approx([value + turn for value, turn in zip(pose, turns, strict=True)])
+        assert shifted_seconds == seconds
+        assert shifted_label == label
+        assert shifted_calibration.normalized_to_raw(shifted_pose) == pair.follower_calibration.normalized_to_raw(pose)
+
+
+def test_calibration_rejects_unreachable_encoder_waypoint_before_enabling_torque():
+    pair = profile()
+    # This profile can represent the initial elbow, but cannot reach the
+    # 60-degree observation pose without clipping the raw target below zero.
+    calibration = replace(pair.follower_calibration, homing_offset=(-2048, -2048, 1000, -2048, -2048, 0))
+    pair = replace(pair, follower_calibration=calibration)
+    raw = calibration.normalized_to_raw([0, 130, 90, 78, -8, 20])
+    bus = FakeFollowerBus(raw)
+    controller = FollowerController(pair, bus)
+    controller.connect()
+
+    controller.start_calibration_sweep("axis")
+
+    assert not controller.calibration_sweep_active
+    assert "encoder range for elbow_flex" in controller.calibration_rejection
+    assert not bus.torque
+    assert bus.positions == raw
+    assert not controller.write_times
 
 
 def test_base_axis_retry_uses_interleaved_camera_views_without_moving_other_joints():
