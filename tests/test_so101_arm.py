@@ -1015,8 +1015,8 @@ def test_bounded_calibration_sweep_finishes_raised_and_holds():
         clock[0] += 1.0 / 30.0
         controller.update()
         observed_base_offsets.append(controller.applied_normalized[0] - initial_normalized[0])
+        controller.sample()
         if controller.calibration_pose_settled:
-            controller.sample()
             assert controller.follower_normalized == pytest.approx(controller.applied_normalized, abs=0.1)
             if not was_settled:
                 measured_calibration_poses.append(list(controller.follower_normalized))
@@ -1459,6 +1459,7 @@ def test_base_axis_command_reports_only_shoulder_pan_stage():
     for _ in range(steps):
         clock[0] += 1.0 / 30.0
         controller.update()
+        controller.sample()
         if controller.calibration_joint_index >= 0:
             observed.add(controller.calibration_joint_index)
     assert observed == {0}
@@ -1522,6 +1523,7 @@ def test_joint_calibration_command_reports_current_servo_stage():
     for _ in range(steps):
         clock[0] += 1.0 / 30.0
         controller.update()
+        controller.sample()
         if controller.calibration_joint_index >= 0:
             observed.add(controller.calibration_joint_index)
     assert observed == {1, 2, 3, 4}

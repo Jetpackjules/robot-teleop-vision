@@ -1100,7 +1100,10 @@ class FollowerController:
         if kind == "arm_feedback_settings":
             for key in self.feedback_settings:
                 self.feedback_settings[key] = bool(message[key])
-            if not self.feedback_settings["following_error_safety_enabled"]:
+            if (
+                not self.feedback_settings["following_error_safety_enabled"]
+                and self.state not in ("returning_rest", "calibrating")
+            ):
                 self.following_error_started_at = 0.0
                 self.following_error_stop = False
             self.status_message = "Arm feedback settings updated."
@@ -1619,6 +1622,9 @@ class FollowerController:
         self.calibration_pose_settled = False
         self.calibration_joint_index = -1
         self.calibration_sweep_started_at = self.now()
+        self.armed_at = self.now()
+        self.following_error_started_at = 0.0
+        self.following_error_stop = False
         self.calibration_sweep_progress = 0.0
         self.state = "calibrating"
         self.fault = ""
@@ -1837,6 +1843,12 @@ class FollowerController:
     def _update_calibration_sweep(self) -> None:
         if not self.calibration_sweep_active or self.calibration_sweep_start is None:
             return
+        # A timer must never carry an unobserved arm through the next poses.
+        # Without a fresh position, even a hold command could push farther into
+        # an obstruction, so use the existing torque-off fault path.
+        if self.now() - self.last_successful_read_at > 0.6:
+            self.fail("Calibration stopped: measured servo telemetry became stale.")
+            return
         if not self.calibration_sweep_waypoints or self.calibration_sweep_duration <= 0.0:
             self.stop_calibration_sweep("Automatic calibration stopped: no safe trajectory is available.")
             return
@@ -1852,7 +1864,10 @@ class FollowerController:
                 self.profile.max_step,
             )
             self._write_positions(self.profile.follower_calibration.normalized_to_raw(self.applied_normalized))
-            if max(abs(a - b) for a, b in zip(self.applied_normalized, self.target_normalized, strict=True)) <= 0.25:
+            if (
+                max(abs(a - b) for a, b in zip(self.applied_normalized, self.target_normalized, strict=True)) <= 0.25
+                and self._calibration_encoders_at_target()
+            ):
                 self.stop_calibration_sweep(
                     "Automatic calibration sweep complete; follower is holding its raised safe pose.",
                     completed=True,
@@ -1888,13 +1903,23 @@ class FollowerController:
             abs(a - b)
             for a, b in zip(self.applied_normalized, self.target_normalized, strict=True)
         ) <= 0.25
-        self.calibration_pose_settled = label.startswith("sampling") and at_target
-        # During each sampling dwell, stop issuing writes so a direct encoder
-        # read can be taken without colliding with synchronized servo traffic.
-        if not self.calibration_pose_settled:
+        sampling_dwell = label.startswith("sampling") and at_target
+        self.calibration_pose_settled = sampling_dwell and self._calibration_encoders_at_target()
+        # Keep the last goal during a sampling dwell. Encoder reads also run
+        # during motion; all bus operations are sequential in the service loop.
+        if not sampling_dwell:
             self._write_positions(self.profile.follower_calibration.normalized_to_raw(self.applied_normalized))
         self.status_message = (
             f"Automatic calibration: {label} | {self.calibration_sweep_progress * 100.0:.0f}%"
+        )
+
+    def _calibration_encoders_at_target(self) -> bool:
+        return self.now() - self.last_successful_read_at <= 0.25 and all(
+            abs(measured - commanded) <= min(8.0, threshold)
+            for measured, commanded, threshold in zip(
+                self.follower_normalized, self.target_normalized,
+                self.following_error_thresholds, strict=True,
+            )
         )
 
     def update(self) -> None:
@@ -2049,7 +2074,7 @@ class FollowerController:
 
     def _joint_following_error(self, index: int, measured: float, commanded: float) -> float:
         error = measured - commanded
-        if self.profile.follower_calibration.calib_mode[index] != "LINEAR":
+        if self.state != "calibrating" and self.profile.follower_calibration.calib_mode[index] != "LINEAR":
             while error > 180.0:
                 error -= 360.0
             while error < -180.0:
@@ -2068,9 +2093,9 @@ class FollowerController:
             )
         ]
         if (
-            self.state not in ("armed", "returning_rest")
+            self.state not in ("armed", "returning_rest", "calibrating")
             or (
-                self.state != "returning_rest"
+                self.state == "armed"
                 and not self.feedback_settings["following_error_safety_enabled"]
             )
             or self.now() - self.armed_at < 0.35
@@ -2092,7 +2117,7 @@ class FollowerController:
             return
         if self.now() - self.following_error_started_at < 0.35:
             return
-        if self.state == "returning_rest":
+        if self.state in ("returning_rest", "calibrating"):
             joint = max(violating, key=lambda index: abs(self.following_error_normalized[index]))
             self._stop_on_following_error(joint)
             return
@@ -2319,6 +2344,7 @@ class FollowerController:
         self.fault = f"hardware fault: {message}"
         self.status_message = "Follower hardware stopped; use Reconnect Arm Hardware."
         self.calibration_sweep_active = False
+        self.calibration_pose_settled = False
         self.rest_return_active = False
         self.rest_return_waypoints = []
 
@@ -2392,9 +2418,9 @@ def run_service(
                 # depicts the arm that actually moved, not merely its commanded goal.
                 # Read failures are contained and exposed as stale telemetry instead
                 # of crashing the safety-isolated follower process.
-                can_sample_calibration_pose = (
-                    controller.state == "calibrating" and controller.calibration_pose_settled
-                )
+                # Calibration needs encoder protection while travelling, not
+                # only after its commanded pose has reached a sampling dwell.
+                can_sample_calibration_pose = controller.state == "calibrating"
                 can_sample_armed = (
                     controller.state == "armed"
                     and controller.feedback_settings["measured_feedback_enabled"]

@@ -73,6 +73,11 @@ required; do not bypass these checks to obtain a saved overlay.
 
 ## Typical rejection reasons
 
+- The follower reads encoders throughout automatic motion. Sustained following
+  error cancels the sweep and rebases the hold to the measured pose, even if
+  ordinary teleoperation feedback settings are disabled. Loss of encoder data
+  for 0.6 seconds faults the sweep and attempts to disable torque. A sampling
+  pose or completed sweep requires fresh encoder agreement, not just a sent goal.
 - Calibration reads each motor's existing position limits before enabling
   motion. Observation ranges are translated inside those limits with a small
   margin, preserving sample spacing, then the adjusted route is checked for

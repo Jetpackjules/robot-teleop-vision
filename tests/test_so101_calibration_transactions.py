@@ -108,6 +108,7 @@ def test_duplicate_request_never_restarts_motion_including_after_termination(rig
         controller.receive(command(action="stop"))
     elif ending == "complete":
         rig.clock[0] += 1
+        controller.sample()
         controller.update()
     elif ending == "fault":
         controller.fail("simulated hardware failure")
@@ -347,6 +348,7 @@ def test_start_deadline_does_not_stop_already_running_calibration(rig, monkeypat
     assert rig.controller.status()["calibration_request_expires_unix_ms"] == 110_000
     wall_clock[0] = 120.0
     rig.clock[0] += 1
+    rig.controller.sample()
     rig.controller.update()
     assert rig.controller.calibration_request_state == "completed"
     assert rig.controller.calibration_rejection == ""
