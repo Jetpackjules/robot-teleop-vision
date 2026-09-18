@@ -127,6 +127,12 @@ jobs:
               throw "Native RealSense GDExtension smoke test failed with exit code $LASTEXITCODE."
           }
 
+      - name: Execute packaged markerless calibration model without cameras
+        shell: pwsh
+        run: |
+          & .\Godot_v4.6.3-stable_win64_console.exe --headless --path . --script tests/godot/markerless_runtime_probe.gd
+          if ($LASTEXITCODE -ne 0) { throw "Packaged markerless calibration failed." }
+
   windows-package:
     name: Windows packaged runtime
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')

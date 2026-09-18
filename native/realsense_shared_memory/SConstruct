@@ -2,7 +2,11 @@
 import os
 import shutil
 import subprocess
+import glob
 
+require_calibration = ARGUMENTS.pop(
+    "require_calibration", "yes" if os.name == "nt" or ARGUMENTS.get("platform") == "windows" else "no"
+) == "yes"
 env = SConscript("godot-cpp/SConstruct")
 
 env.Append(CPPPATH=["src"])
@@ -23,11 +27,18 @@ if is_windows:
         include_dir = os.path.join(opencv_dir, "include")
         if os.path.isdir(os.path.join(include_dir, "opencv2")):
             env.Append(CPPPATH=[include_dir])
-            lib_dir = os.path.join(opencv_dir, "x64", "vc17", "lib")
-            if not os.path.isdir(lib_dir):
-                lib_dir = os.path.join(opencv_dir, "lib")
+            lib_dir = next((path for path in [
+                os.path.join(opencv_dir, "x64", "vc17", "lib"),
+                os.path.join(opencv_dir, "x64", "vc16", "lib"),
+                os.path.join(opencv_dir, "lib", "x64"),
+                os.path.join(opencv_dir, "lib"),
+            ] if os.path.isdir(path)), "")
             env.Append(LIBPATH=[lib_dir])
-            env.Append(LIBS=["opencv_aruco", "opencv_calib3d", "opencv_features2d", "opencv_imgproc", "opencv_core"])
+            world_libs = [path for path in glob.glob(os.path.join(lib_dir, "opencv_world*.lib")) if not path.endswith("d.lib")]
+            if world_libs:
+                env.Append(LIBS=[os.path.splitext(os.path.basename(world_libs[0]))[0]])
+            else:
+                env.Append(LIBS=["opencv_aruco", "opencv_calib3d", "opencv_features2d", "opencv_imgproc", "opencv_core"])
             env.Append(CPPDEFINES=["REALSENSE_NATIVE_CALIBRATION_ENABLED"])
             opencv_enabled = True
             print("RealSense native calibration enabled from OpenCV SDK:", opencv_dir)
@@ -59,8 +70,10 @@ else:
     # and zlib level-1 directly for the latency-sensitive RGB-D stream.
     env.Append(LIBS=["jpeg", "z"])
 
-onnxruntime_include_dir = os.path.join("thirdparty", "onnxruntime", "include")
+onnxruntime_include_dir = os.environ.get("ONNXRUNTIME_INCLUDE_DIR", os.path.join("thirdparty", "onnxruntime", "include"))
 onnxruntime_c_api = os.path.join(onnxruntime_include_dir, "onnxruntime", "core", "session", "onnxruntime_c_api.h")
+if not os.path.exists(onnxruntime_c_api):
+    onnxruntime_c_api = os.path.join(onnxruntime_include_dir, "onnxruntime_c_api.h")
 if os.path.exists(onnxruntime_c_api):
     env.Append(CPPPATH=[onnxruntime_include_dir])
     env.Append(CPPDEFINES=["REALSENSE_FOUNDATION_STEREO_ENABLED"])
@@ -69,6 +82,7 @@ else:
     print("RealSense native Foundation Stereo disabled; ONNX Runtime C API header not found.")
 
 sdk_candidates = []
+realsense_enabled = False
 if os.environ.get("REALSENSE2_SDK_DIR"):
     sdk_candidates.append(os.environ["REALSENSE2_SDK_DIR"])
 sdk_candidates.extend([
@@ -91,6 +105,7 @@ if is_windows:
             env.Append(LIBPATH=[lib_dir])
             env.Append(LIBS=["realsense2"])
             env.Append(CPPDEFINES=["REALSENSE_DIRECT_ENABLED"])
+            realsense_enabled = True
             dll_src = os.path.join(bin_dir, "realsense2.dll")
             dll_dst = os.path.join("bin", "realsense2.dll")
             if os.path.exists(dll_src):
@@ -109,9 +124,14 @@ else:
         subprocess.check_call(["pkg-config", "--exists", "realsense2"])
         env.ParseConfig("pkg-config --cflags --libs realsense2")
         env.Append(CPPDEFINES=["REALSENSE_DIRECT_ENABLED"])
+        realsense_enabled = True
         print("RealSense direct capture enabled from pkg-config realsense2.")
     except (OSError, subprocess.CalledProcessError):
         print("RealSense direct capture SDK not found; building explicit stub.")
+
+if require_calibration:
+    if not (opencv_enabled and realsense_enabled and os.path.exists(onnxruntime_c_api)):
+        raise RuntimeError("Complete calibration build requires OpenCV, RealSense and ONNX Runtime C headers; refusing to build a stub.")
 
 sources = Glob("src/*.cpp")
 output_name = ARGUMENTS.get("output_name", "realsense_shared_memory")

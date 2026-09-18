@@ -15,6 +15,9 @@ __pycache__/
 dist/
 build/
 native/realsense_shared_memory/godot-cpp/
+native/realsense_shared_memory/.sconsign.dblite
+native/realsense_shared_memory/bin/*.exp
+native/realsense_shared_memory/bin/*.lib
 
 # Physical-device identity and calibration are deliberately local-only.
 robot_modules/*/local/

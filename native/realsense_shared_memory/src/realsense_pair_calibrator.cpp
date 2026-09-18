@@ -21,14 +21,23 @@
 
 #if defined(REALSENSE_DIRECT_ENABLED) && defined(REALSENSE_NATIVE_CALIBRATION_ENABLED)
 #include <librealsense2/rs.hpp>
+#if __has_include(<opencv2/objdetect/aruco_detector.hpp>)
+#include <opencv2/objdetect/aruco_detector.hpp>
+#define REALSENSE_MODERN_ARUCO
+#else
 #include <opencv2/aruco.hpp>
+#endif
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #endif
 
 #if defined(REALSENSE_FOUNDATION_STEREO_ENABLED)
+#if __has_include(<onnxruntime/core/session/onnxruntime_c_api.h>)
 #include <onnxruntime/core/session/onnxruntime_c_api.h>
+#else
+#include <onnxruntime_c_api.h>
+#endif
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -169,14 +178,22 @@ bool detect_marker_pose(
 ) {
     cv::Mat gray;
     cv::cvtColor(p_bgr, gray, cv::COLOR_BGR2GRAY);
+    std::vector<std::vector<cv::Point2f>> corners;
+    std::vector<int> ids;
+#ifdef REALSENSE_MODERN_ARUCO
+    cv::aruco::DetectorParameters parameters;
+    parameters.cornerRefinementMethod = cv::aruco::CORNER_REFINE_SUBPIX;
+    parameters.minMarkerPerimeterRate = 0.01;
+    parameters.maxMarkerPerimeterRate = 6.0;
+    cv::aruco::ArucoDetector(cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_100), parameters).detectMarkers(gray, corners, ids);
+#else
     cv::Ptr<cv::aruco::Dictionary> dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_100);
     cv::Ptr<cv::aruco::DetectorParameters> parameters = cv::aruco::DetectorParameters::create();
     parameters->cornerRefinementMethod = cv::aruco::CORNER_REFINE_SUBPIX;
     parameters->minMarkerPerimeterRate = 0.01;
     parameters->maxMarkerPerimeterRate = 6.0;
-    std::vector<std::vector<cv::Point2f>> corners;
-    std::vector<int> ids;
     cv::aruco::detectMarkers(gray, dictionary, corners, ids, parameters);
+#endif
     int selected = -1;
     double selected_area = 0.0;
     for (int index = 0; index < int(ids.size()); ++index) {
@@ -760,7 +777,7 @@ void balance_match_weights(
     constexpr int cells = columns * rows;
     std::array<int, cells> target_counts{};
     std::array<int, cells> reference_counts{};
-    auto cell_index = [](const cv::Point2d &p_pixel, int p_width, int p_height) {
+    auto cell_index = [columns, rows](const cv::Point2d &p_pixel, int p_width, int p_height) {
         const int x = std::clamp(int(p_pixel.x * columns / std::max(1, p_width)), 0, columns - 1);
         const int y = std::clamp(int(p_pixel.y * rows / std::max(1, p_height)), 0, rows - 1);
         return y * columns + x;
@@ -1342,7 +1359,7 @@ AlignmentScore alignment_score(
     std::unordered_map<VoxelKey, std::vector<int>, VoxelHash> target_grid;
     reference_grid.reserve(reference.size());
     target_grid.reserve(target.size());
-    auto add_to_grid = [](const std::vector<CloudSample> &p_cloud, auto &r_grid) {
+    auto add_to_grid = [search_radius](const std::vector<CloudSample> &p_cloud, auto &r_grid) {
         for (int index = 0; index < int(p_cloud.size()); ++index) {
             const cv::Vec3d &point = p_cloud[index].point;
             r_grid[VoxelKey{
@@ -1852,10 +1869,14 @@ bool mask_marker(cv::Mat &p_bgr, int p_marker_id, cv::Mat &r_mask) {
     dummy.ppy = 0.0f;
     cv::Mat gray;
     cv::cvtColor(p_bgr, gray, cv::COLOR_BGR2GRAY);
-    cv::Ptr<cv::aruco::Dictionary> dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_100);
     std::vector<std::vector<cv::Point2f>> found_corners;
     std::vector<int> ids;
+#ifdef REALSENSE_MODERN_ARUCO
+    cv::aruco::ArucoDetector(cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_100)).detectMarkers(gray, found_corners, ids);
+#else
+    cv::Ptr<cv::aruco::Dictionary> dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_100);
     cv::aruco::detectMarkers(gray, dictionary, found_corners, ids);
+#endif
     r_mask = cv::Mat::zeros(p_bgr.rows, p_bgr.cols, CV_8U);
     bool found = false;
     for (int index = 0; index < int(ids.size()); ++index) {
@@ -2248,11 +2269,55 @@ RealSensePairCalibrator::~RealSensePairCalibrator() {
 }
 
 void RealSensePairCalibrator::_bind_methods() {
+    ClassDB::bind_method(D_METHOD("validate_markerless_runtime", "model_path"), &RealSensePairCalibrator::validate_markerless_runtime);
     ClassDB::bind_method(D_METHOD("start", "options"), &RealSensePairCalibrator::start);
     ClassDB::bind_method(D_METHOD("cancel"), &RealSensePairCalibrator::cancel);
     ClassDB::bind_method(D_METHOD("is_running"), &RealSensePairCalibrator::is_running);
     ClassDB::bind_method(D_METHOD("get_status"), &RealSensePairCalibrator::get_status);
     ClassDB::bind_method(D_METHOD("get_result"), &RealSensePairCalibrator::get_result);
+}
+
+Dictionary RealSensePairCalibrator::validate_markerless_runtime(const String &p_model_path) const {
+    Dictionary check;
+    check["ok"] = false;
+#if defined(REALSENSE_DIRECT_ENABLED) && defined(REALSENSE_NATIVE_CALIBRATION_ENABLED) && defined(REALSENSE_FOUNDATION_STEREO_ENABLED)
+    CalibrationOrt runtime;
+    std::string error;
+    if (!runtime.load(error)) {
+        check["status"] = String(error.c_str());
+        return check;
+    }
+    const std::filesystem::path model_path(utf8(p_model_path));
+    if (!std::filesystem::is_regular_file(model_path)) {
+        check["status"] = "Packaged LightGlue model is missing";
+        return check;
+    }
+    OrtSessionOptions *options = nullptr;
+    OrtSession *session = nullptr;
+    OrtMemoryInfo *memory = nullptr;
+    OrtValue *input = nullptr;
+    OrtValue *outputs[3] = {nullptr, nullptr, nullptr};
+    const int64_t shape[] = {2, 1, 544, 960};
+    std::vector<float> pixels(2 * 544 * 960, 0.0f);
+    const char *input_names[] = {"images"};
+    const char *output_names[] = {"keypoints", "matches", "mscores"};
+    bool ok = runtime.check(runtime.api->CreateSessionOptions(&options), error);
+    if (ok) ok = runtime.check(runtime.api->SetIntraOpNumThreads(options, 4), error);
+    if (ok) ok = runtime.check(runtime.api->CreateSession(runtime.env, model_path.c_str(), options, &session), error);
+    if (ok) ok = runtime.check(runtime.api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory), error);
+    if (ok) ok = runtime.check(runtime.api->CreateTensorWithDataAsOrtValue(memory, pixels.data(), pixels.size() * sizeof(float), shape, 4, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input), error);
+    if (ok) ok = runtime.check(runtime.api->Run(session, nullptr, input_names, &input, 1, output_names, 3, outputs), error);
+    for (OrtValue *output : outputs) if (output) runtime.api->ReleaseValue(output);
+    if (input) runtime.api->ReleaseValue(input);
+    if (memory) runtime.api->ReleaseMemoryInfo(memory);
+    if (session) runtime.api->ReleaseSession(session);
+    if (options) runtime.api->ReleaseSessionOptions(options);
+    check["ok"] = ok;
+    check["status"] = ok ? String("Native markerless calibration and packaged model inference passed (no cameras opened)") : String(error.c_str());
+#else
+    check["status"] = "Extension lacks RealSense, OpenCV or ONNX Runtime calibration support";
+#endif
+    return check;
 }
 
 bool RealSensePairCalibrator::start(const Dictionary &p_options) {

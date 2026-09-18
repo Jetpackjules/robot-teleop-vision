@@ -152,8 +152,20 @@ func _initialize() -> void:
         "missing_classes": missing_classes,
         "missing_methods": missing_methods,
     }}
+    var calibration_error := ""
+    if OS.has_feature("windows") and missing_classes.is_empty():
+        var calibrator = ClassDB.instantiate("RealSensePairCalibrator")
+        if not calibrator.has_method("validate_markerless_runtime"):
+            calibration_error = "Stale Windows DLL: missing markerless runtime validation"
+        else:
+            var model_path := ProjectSettings.globalize_path("res://native/realsense_shared_memory/models/superpoint_lightglue_pipeline.onnx")
+            var check: Dictionary = calibrator.validate_markerless_runtime(model_path)
+            if not bool(check.get("ok", false)):
+                calibration_error = str(check.get("status", "Markerless runtime validation failed"))
+    payload["calibration_error"] = calibration_error
     print(RESULT_MARKER + JSON.stringify(payload))
-    quit(0 if missing_classes.is_empty() and missing_methods.is_empty() else 3)
+    var api_ok := missing_classes.is_empty() and missing_methods.is_empty()
+    quit(0 if api_ok and calibration_error.is_empty() else 3)
 """
 
 
@@ -173,6 +185,8 @@ def godot_extension_smoke_status(godot: Path, project_root: Path) -> tuple[bool,
                     "--headless",
                     "--path",
                     str(project_root),
+                    "--log-file",
+                    str(Path(temporary) / "godot.log"),
                     "--quit-after",
                     "120",
                     "--script",
@@ -209,6 +223,8 @@ def godot_extension_smoke_status(godot: Path, project_root: Path) -> tuple[bool,
             "loaded native extension is incompatible or stale; missing required methods: "
             + ", ".join(str(method) for method in missing)
         )
+    if payload.get("calibration_error"):
+        return False, "Windows markerless calibration: " + str(payload["calibration_error"])
     if result.returncode != 0:
         return False, f"Godot native-extension smoke check failed: {_godot_output_detail(result)}"
     return True, (

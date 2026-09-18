@@ -1,0 +1,8 @@
+{
+  "enabled_classes": [
+    "ArrayMesh", "FileAccess", "Image", "ImageTexture", "MeshInstance3D",
+    "OS", "Engine", "ClassDB", "RDShaderSource", "RDShaderSPIRV", "RDUniform", "RefCounted",
+    "RDPipelineSpecializationConstant", "RenderingDevice", "RenderingServer", "Shader", "ShaderMaterial",
+    "StandardMaterial3D", "Texture2D"
+  ]
+}

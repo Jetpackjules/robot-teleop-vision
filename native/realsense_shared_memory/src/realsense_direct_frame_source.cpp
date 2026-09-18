@@ -20,7 +20,11 @@
 #include <vector>
 
 #if defined(REALSENSE_FOUNDATION_STEREO_ENABLED)
+#if __has_include(<onnxruntime/core/session/onnxruntime_c_api.h>)
 #include <onnxruntime/core/session/onnxruntime_c_api.h>
+#else
+#include <onnxruntime_c_api.h>
+#endif
 #if defined(_WIN32)
 #include <windows.h>
 #else

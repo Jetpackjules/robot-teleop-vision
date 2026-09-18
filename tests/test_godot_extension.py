@@ -145,3 +145,23 @@ def test_godot_smoke_check_reports_a_missing_native_class(tmp_path: Path, monkey
     assert not ok
     assert "missing required classes" in detail
     assert "RealSensePairCalibrator" in detail
+
+
+@pytest.mark.parametrize("error", [
+    "Extension lacks RealSense, OpenCV or ONNX Runtime calibration support",
+    "Packaged LightGlue model is missing",
+])
+def test_godot_smoke_rejects_unusable_calibration_even_when_classes_exist(
+    tmp_path: Path, monkeypatch, error: str
+):
+    write_extension_index(tmp_path)
+    payload = {"missing_classes": [], "missing_methods": [], "calibration_error": error}
+    monkeypatch.setattr(
+        "robot_teleop.doctor.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 3, GODOT_SMOKE_MARKER + json.dumps(payload), ""
+        ),
+    )
+    ok, detail = godot_extension_smoke_status(Path("godot"), tmp_path)
+    assert not ok
+    assert error in detail

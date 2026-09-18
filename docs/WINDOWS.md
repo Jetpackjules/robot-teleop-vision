@@ -121,9 +121,36 @@ A release or manually dispatched CI run may publish `robot-teleop-vision-windows
 
 ## Native rebuild (maintainers only)
 
-To rebuild the extension, clone `godot-cpp` into `native/realsense_shared_memory/godot-cpp`, install SCons, set `REALSENSE2_SDK_DIR`, and run:
+The committed Windows binaries include camera calibration and the markerless
+model. For an existing source checkout, close the Godot editor and stop the
+launcher, run `git pull --ff-only`, then reopen Godot/restart the launcher. Do
+not leave Godot open during the update: Windows can lock the old DLL. No native
+build, extra model download, or Python package installation is needed for this
+calibration update. Site profiles and saved calibrations remain local.
+
+To rebuild, use MSVC x64 and Godot 4.5-compatible `godot-cpp` sources in
+`native/realsense_shared_memory/godot-cpp`. Install SCons and set
+`REALSENSE2_SDK_DIR` to the RealSense C++ SDK, `OPENCV_SDK_DIR` to the OpenCV
+4.13 SDK (headers plus the MSVC `opencv_world4130.lib`), and
+`ONNXRUNTIME_INCLUDE_DIR` to the matching ONNX Runtime C headers. Then run:
 
 ```powershell
 cd native\realsense_shared_memory
-scons platform=windows target=template_release
+scons platform=windows target=template_release arch=x86_64 build_profile=build_profile.json require_calibration=yes -j8
 ```
+
+Windows builds now reject missing calibration dependencies instead of silently
+shipping a stub. `require_calibration=no` is an explicit development-only opt-out.
+When updating dependencies, replace the matching runtime DLLs in `bin/` as well;
+do not mix the MSVC and MinGW OpenCV ABIs. See the native `DISTRIBUTION.md` for
+the bundled files and model provenance.
+
+Validate the actual native model execution without cameras or robot movement:
+
+```powershell
+godot --headless --path . --script tests/godot/markerless_runtime_probe.gd
+```
+
+The Windows CI job runs this same test, including rejection of a missing model.
+Doctor also executes the markerless runtime check. Physical camera coverage and
+the quality of an alignment still need checking on the robot PC.

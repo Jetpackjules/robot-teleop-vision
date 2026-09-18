@@ -7,3 +7,16 @@ windows.debug.x86_64 = "res://native/realsense_shared_memory/bin/realsense_share
 windows.release.x86_64 = "res://native/realsense_shared_memory/bin/realsense_shared_memory.dll"
 linux.debug.x86_64 = "res://native/realsense_shared_memory/bin/librealsense_shared_memory_color_authority.so"
 linux.release.x86_64 = "res://native/realsense_shared_memory/bin/librealsense_shared_memory_color_authority.so"
+
+[dependencies]
+windows.x86_64 = {
+"res://native/realsense_shared_memory/bin/realsense2.dll": "",
+"res://native/realsense_shared_memory/bin/opencv_world4130.dll": "",
+"res://native/realsense_shared_memory/bin/onnxruntime.dll": "",
+"res://native/realsense_shared_memory/bin/onnxruntime_providers_shared.dll": "",
+"res://native/realsense_shared_memory/bin/concrt140.dll": "",
+"res://native/realsense_shared_memory/bin/msvcp140.dll": "",
+"res://native/realsense_shared_memory/bin/msvcp140_1.dll": "",
+"res://native/realsense_shared_memory/bin/vcruntime140.dll": "",
+"res://native/realsense_shared_memory/bin/vcruntime140_1.dll": ""
+}

@@ -56,6 +56,8 @@ public:
     bool is_running() const;
     godot::String get_status() const;
     godot::Dictionary get_result() const;
+    // Loads the packaged model and executes a synthetic pair. Never opens cameras.
+    godot::Dictionary validate_markerless_runtime(const godot::String &p_model_path) const;
 
 protected:
     static void _bind_methods();
