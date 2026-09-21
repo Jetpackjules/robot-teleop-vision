@@ -1003,7 +1003,8 @@ def wrist_dynamic_clouds(
         ):
             raise ValueError(
                 f"camera {camera_index} found only {len(downsampled)} "
-                "wrist-motion points"
+                f"wrist-motion points in settled pose {frame_index + 1}; "
+                f"need at least {MINIMUM_WRIST_DYNAMIC_CONSTRUCTION_POINTS_PER_POSE}"
             )
         result.append(downsampled)
     return result
@@ -1116,6 +1117,41 @@ def direct_axis_collapse_camera_fit(
     return best
 
 
+def wrist_axis_view_rejection(result: dict) -> str | None:
+    """Apply the existing single-view evidence gates before ranking views."""
+    loss = float(result["collapse_loss_m"])
+    peak_ratio = float(result["loss_peak_ratio"])
+    direction_ratio = float(result["wrong_direction_loss_ratio"])
+    delta = float(result["delta"])
+    if not np.isfinite([loss, peak_ratio, direction_ratio, delta]).all() or loss <= 0.0:
+        return "wrist axis fit contains invalid scores"
+    if loss > 0.035:
+        return f"wrist axis collapse residual is too high ({loss})"
+    if (
+        min(result["dynamic_points_per_pose"])
+        < MINIMUM_REFERENCE_WRIST_DYNAMIC_POINTS_PER_POSE
+    ):
+        return (
+            "wrist motion is not dense in every settled pose "
+            f"(points={result['dynamic_points_per_pose']}, "
+            f"need {MINIMUM_REFERENCE_WRIST_DYNAMIC_POINTS_PER_POSE} in each)"
+        )
+    if (
+        peak_ratio < MINIMUM_REFERENCE_WRIST_AXIS_PEAK_RATIO
+        and abs(delta) > MAXIMUM_FIXED_POINT_DELTA_DEGREES
+    ):
+        return (
+            "wrist flex has a competing direct-axis solution "
+            f"(ratio={peak_ratio}, delta={delta})"
+        )
+    if direction_ratio < 1.12:
+        return (
+            "wrist-roll encoder direction is not decisive in the reference "
+            f"motion view (ratio={direction_ratio})"
+        )
+    return None
+
+
 def solve_wrist_flex_from_direct_axis_collapse(
     all_frames: list[dict],
     directions: list[float],
@@ -1130,97 +1166,69 @@ def solve_wrist_flex_from_direct_axis_collapse(
     candidate_minimum, candidate_maximum = wrist_flex_local_correction_bounds(
         float(offsets[joint_index])
     )
-    fits_by_group = []
+    usable_results = []
+    rejected_views = []
     all_camera_results: list[list[dict]] = [
         [] for _ in camera_indices
     ]
     for group_index, frames in enumerate(groups):
-        group_results = []
         for result_index, camera_index in enumerate(camera_indices):
-            fit = direct_axis_collapse_camera_fit(
-                frames,
-                camera_index,
-                joint_index,
-                float(directions[next_joint_index]),
-                candidate_minimum,
-                candidate_maximum,
-                directions,
-                offsets,
-                basis,
-                origin,
-            )
-            fit["camera"] = str(
-                frames[0]["full_camera_points"][camera_index]["name"]
-            )
-            fit["view_pan_degrees"] = float(
-                np.median([frame["pose"][0] for frame in frames])
-            )
-            fit["group_index"] = group_index
-            group_results.append(fit)
+            view = {
+                "camera": str(frames[0]["full_camera_points"][camera_index]["name"]),
+                "view_pan_degrees": float(np.median([frame["pose"][0] for frame in frames])),
+                "group_index": group_index,
+            }
+            try:
+                fit = direct_axis_collapse_camera_fit(
+                    frames,
+                    camera_index,
+                    joint_index,
+                    float(directions[next_joint_index]),
+                    candidate_minimum,
+                    candidate_maximum,
+                    directions,
+                    offsets,
+                    basis,
+                    origin,
+                )
+            except ValueError as error:
+                # Automatic retries retain earlier observation groups. One
+                # occluded/sparse group must not veto the later usable views.
+                rejected_views.append({**view, "reason": str(error)})
+                continue
+            fit.update(view)
             all_camera_results[result_index].append(fit)
-        fits_by_group.append(group_results)
+            rejection = wrist_axis_view_rejection(fit)
+            if rejection is not None:
+                rejected_views.append({**view, "reason": rejection})
+                continue
+            usable_results.append(fit)
 
-    best_loss = min(
-        result[0]["collapse_loss_m"] for result in fits_by_group
-    )
+    if not usable_results:
+        raise ValueError(
+            f"wrist_flex has no decisive {REFERENCE_CAMERA_SERIAL} direct-axis viewpoint; "
+            f"rejected views={rejected_views}"
+        )
+    best_loss = min(result["collapse_loss_m"] for result in usable_results)
     candidates = []
-    for group_results in fits_by_group:
-        result = group_results[0]
-        if (
-            min(result["dynamic_points_per_pose"])
-            < MINIMUM_REFERENCE_WRIST_DYNAMIC_POINTS_PER_POSE
-        ):
-            continue
+    for result in usable_results:
         direction_ratio = float(result["wrong_direction_loss_ratio"])
-        if direction_ratio < 1.12:
-            continue
         quality = (
             best_loss / result["collapse_loss_m"]
             + min(result["loss_peak_ratio"], 1.20)
             + min(direction_ratio, 1.25)
         )
         candidates.append((quality, result))
-    if not candidates:
-        raise ValueError(
-            "wrist_flex has no decisive D455 direct-axis viewpoint "
-            f"({[item['delta'] for item in all_camera_results[0]]})"
-        )
     _, selected_result = max(candidates, key=lambda item: item[0])
     camera_results = [selected_result]
     deltas = [result["delta"] for result in camera_results]
     disagreement = max(deltas) - min(deltas)
     consensus = float(np.mean(deltas))
-    losses = [result["collapse_loss_m"] for result in camera_results]
-    if max(losses) > 0.035:
-        raise ValueError(f"wrist axis collapse residual is too high ({losses})")
-    if any(
-        min(result["dynamic_points_per_pose"])
-        < MINIMUM_REFERENCE_WRIST_DYNAMIC_POINTS_PER_POSE
-        for result in camera_results
-    ):
-        raise ValueError("wrist motion is not dense in every settled pose")
     peak_ratios = [result["loss_peak_ratio"] for result in camera_results]
     shallow_fixed_point_basin = (
         max(peak_ratios) < MINIMUM_REFERENCE_WRIST_AXIS_PEAK_RATIO
         or min(peak_ratios) < 0.98
     )
-    if (
-        shallow_fixed_point_basin
-        and abs(consensus) > MAXIMUM_FIXED_POINT_DELTA_DEGREES
-    ):
-        raise ValueError(
-            "wrist flex has a competing direct-axis solution "
-            f"(ratios={peak_ratios}, deltas={deltas})"
-        )
-    direction_ratios = [
-        float(result["wrong_direction_loss_ratio"])
-        for result in camera_results
-    ]
-    if max(direction_ratios) < 1.12:
-        raise ValueError(
-            "wrist-roll encoder direction is not decisive in the D455 "
-            f"motion view (ratios={direction_ratios})"
-        )
     reference_frames = groups[int(selected_result["group_index"])]
     pivot, axis = predicted_next_axis(
         reference_frames[len(reference_frames) // 2],
@@ -1242,6 +1250,7 @@ def solve_wrist_flex_from_direct_axis_collapse(
         "next_axis": axis.tolist(),
         "camera_results": camera_results,
         "all_camera_view_results": all_camera_results,
+        "rejected_camera_views": rejected_views,
         "rotation_direction_observable": False,
         "preserved_next_joint_direction": float(directions[next_joint_index]),
         "reference_camera_serial": REFERENCE_CAMERA_SERIAL,
@@ -3344,12 +3353,13 @@ def solve_wrist_roll_direction_from_motion(
                     flex["camera_offset_disagreement_degrees"]
                 ),
                 "camera_results": flex["camera_results"],
+                "rejected_camera_views": flex.get("rejected_camera_views", []),
             }
         )
     if not candidates:
         raise ValueError(
             "wrist-roll encoder direction has no non-contradicting "
-            f"D455 motion view ({rejected})"
+            f"{REFERENCE_CAMERA_SERIAL} motion view ({rejected})"
         )
     candidates.sort(
         key=lambda result: result["combined_collapse_loss_m"]
@@ -3363,7 +3373,8 @@ def solve_wrist_roll_direction_from_motion(
         if ratio < MINIMUM_WRIST_ROLL_MESH_PEAK_RATIO:
             raise ValueError(
                 "wrist-roll encoder direction remains ambiguous in "
-                f"D455 motion ({[(item['fitted_direction'], item['combined_collapse_loss_m']) for item in candidates]})"
+                f"{REFERENCE_CAMERA_SERIAL} motion "
+                f"({[(item['fitted_direction'], item['combined_collapse_loss_m']) for item in candidates]})"
             )
     selected = dict(candidates[0])
     selected.update(
