@@ -1,4 +1,5 @@
 """Camera choice must follow usable motion evidence, including on dual-D435 sites."""
+import copy
 import sys
 from pathlib import Path
 
@@ -80,3 +81,24 @@ def test_rgb_groups_use_selected_d435_not_another_available_camera(tmp_path):
     assert claw.d455_snapshot(frames[0])["name"] == "D455"
     with pytest.raises(ValueError, match="no saved RGB image"):
         claw.group_frames({"frames": frames, "reference_camera": "missing"})
+
+
+def test_missing_rgb_in_one_sweep_does_not_veto_two_complete_sweeps(tmp_path):
+    path = tmp_path / "reference.png"
+    path.write_bytes(b"snapshot selection only")
+    frames = [{"calibration_joint_index": 5, "pose": [0, 0, 0, 0, roll, opening],
+               "claw_tip_positions_local": [[0, 0, 0], [1, 0, 0]],
+               "rgb_snapshots": [{"name": "D435 B", "path": str(path)}]}
+              for roll in [-20, 0, 20] for opening in [5, 25, 50, 75, 90]]
+    frames[0]["rgb_snapshots"][0]["path"] = str(tmp_path / "missing.png")
+    capture = {"frames": frames, "reference_camera": "D435 B"}
+    groups = claw.group_frames(capture)
+    assert len(groups) == 2
+    assert [group[0]["pose"][4] for group in groups] == [0, 20]
+
+    # Five frames at four opening states still cannot form the second view.
+    duplicate = copy.deepcopy(frames[6])
+    frames[5]["rgb_snapshots"] = []
+    frames.append(duplicate)
+    with pytest.raises(ValueError, match="fewer than two complete"):
+        claw.group_frames(capture)

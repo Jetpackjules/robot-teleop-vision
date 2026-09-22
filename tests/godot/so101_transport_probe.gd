@@ -73,6 +73,41 @@ func status(id: String = "current-request") -> Dictionary:
 		"state": "calibrating", "sent_unix_ms": Time.get_unix_time_from_system() * 1000.0}
 
 
+func claw_frames(snapshot: Dictionary) -> Array:
+	var frames: Array = []
+	for roll in [-20.0, 20.0]:
+		for opening in [5.0, 25.0, 50.0, 75.0, 90.0]:
+			frames.append({
+				"calibration_joint_index": 5,
+				"pose": [0, 0, 0, 0, roll, opening],
+				"full_camera_points": [{"name": snapshot.name, "points": [Vector3.ZERO]}],
+				"rgb_snapshots": [snapshot.duplicate(true)],
+			})
+	return frames
+
+
+func check_claw_rgb_views(calibrator: AckProbe, snapshot: Dictionary) -> void:
+	for camera_name in ["RealSense D435 A", "RealSense D435 B", "RealSense D455"]:
+		var reference_snapshot := snapshot.duplicate(true)
+		reference_snapshot.name = camera_name
+		calibrator._automation_base_result = {"reference_camera": camera_name}
+		var frames := claw_frames(reference_snapshot)
+		check(calibrator._claw_capture_coverage(frames).ready, camera_name + " claw motion complete")
+		check(calibrator._complete_automated_claw_view_count(frames) == 2, camera_name + " counts both saved RGB views")
+		check(camera_name in calibrator._claw_capture_coverage(frames).summary, "coverage reports actual reference camera")
+		var missing := frames.duplicate(true)
+		missing[0].rgb_snapshots[0].path = "user://missing-claw.png"
+		check(calibrator._complete_automated_claw_view_count(missing) == 1, "missing image prevents a complete view")
+		var wrong_camera := frames.duplicate(true)
+		for frame in wrong_camera:
+			frame.rgb_snapshots[0].name = "RealSense other-camera"
+		check(calibrator._complete_automated_claw_view_count(wrong_camera) == 0, "RGB from another camera cannot substitute")
+		var duplicates := frames.duplicate(true)
+		duplicates[0].rgb_snapshots = []
+		duplicates.append(frames[1].duplicate(true))
+		check(calibrator._complete_automated_claw_view_count(duplicates) == 1, "duplicate opening cannot replace missing RGB state")
+
+
 func _run() -> void:
 	var solver := AckProbe.new()
 	var configured_python := OS.get_environment("ROBOT_TELEOP_SOLVER_PYTHON")
@@ -153,6 +188,7 @@ func _run() -> void:
 	check(not snapshots[0].is_empty() and not snapshots[1].is_empty(), "D435 RGB images are captured")
 	if not snapshots[0].is_empty() and not snapshots[1].is_empty():
 		check(snapshots[0].path != snapshots[1].path, "camera RGB images do not overwrite each other")
+		check_claw_rgb_views(clear_probe, snapshots[1])
 	clear_probe._automation_active = false
 	robot_module._calibrator = null
 	robot_module.free()

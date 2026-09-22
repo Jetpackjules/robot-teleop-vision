@@ -119,13 +119,20 @@ def d455_snapshot(frame: dict, reference_camera: str = "D455") -> dict:
 def group_frames(capture: dict) -> list[list[dict]]:
     frames: list[dict] = []
     reference_camera = str(capture.get("reference_camera", "D455")).strip() or "D455"
+    missing_rgb: list[str] = []
     for value in capture.get("frames", []):
         if int(value.get("calibration_joint_index", -1)) != 5 or len(value.get("pose", [])) < 6:
             continue
         if len(value.get("claw_tip_positions_local", [])) != 2:
             continue
         value = dict(value)
-        value["_rgb"] = d455_snapshot(value, reference_camera)
+        try:
+            value["_rgb"] = d455_snapshot(value, reference_camera)
+        except ValueError as error:
+            # The capture retains all attempted sweeps. A missing snapshot in
+            # one must not veto two other complete reference-camera views.
+            missing_rgb.append(str(error))
+            continue
         frames.append(value)
     groups: list[list[dict]] = []
     for frame in sorted(frames, key=lambda item: (float(item["pose"][4]), float(item["pose"][5]))):
@@ -143,7 +150,11 @@ def group_frames(capture: dict) -> list[list[dict]]:
         if len(distinct) >= 5 and float(distinct[-1]["pose"][5]) - float(distinct[0]["pose"][5]) >= 70.0:
             complete.append(distinct[:5])
     if len(complete) < 2:
-        raise ValueError(f"fewer than two complete native-RGB wrist views ({len(complete)})")
+        detail = f"; {len(missing_rgb)} frames: {missing_rgb[0]}" if missing_rgb else ""
+        raise ValueError(
+            f"fewer than two complete native-RGB wrist views ({len(complete)}) "
+            f"for reference camera {reference_camera!r}{detail}"
+        )
     return complete
 
 

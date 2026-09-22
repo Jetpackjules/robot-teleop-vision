@@ -1129,7 +1129,7 @@ func _update_capture() -> void:
 			_start_solver()
 		else:
 			_fail_automation(
-				"D455 claw coverage produced only %d/2 complete RGB views after %d sweeps (%s)."
+				"Reference-camera claw coverage produced only %d/2 complete RGB views after %d sweeps (%s)."
 				% [
 					complete_view_count,
 					MAXIMUM_AUTOMATED_CLAW_CAPTURE_ATTEMPTS,
@@ -1325,7 +1325,7 @@ func _capture_frame() -> void:
 		if not snapshot.is_empty():
 			depth_snapshots.append(snapshot)
 		# Wrist roll must be validated against the real jaw silhouette, not only
-		# noisy depth or the custom camera bracket.  Retain native D455 RGB for
+		# noisy depth or the custom camera bracket. Retain RealSense RGB for
 		# both distal calibration modes so the wrist solver can lock the rigid
 		# fixed jaw before the articulated opening curve is considered.
 		if _capture_mode in ["wrist", "claw"]:
@@ -1629,6 +1629,9 @@ func _best_complete_automated_claw_view(frames: Array) -> Array:
 
 
 func _complete_automated_claw_view_count(frames: Array) -> int:
+	var reference_camera := _reference_camera_for_frames(frames)
+	if reference_camera.is_empty():
+		return 0
 	var groups: Array = []
 	for frame_variant in frames:
 		if not frame_variant is Dictionary:
@@ -1656,19 +1659,21 @@ func _complete_automated_claw_view_count(frames: Array) -> int:
 		var group := group_variant as Array
 		if not bool(_claw_capture_coverage(group).get("ready", false)):
 			continue
-		var rgb_states := 0
+		var rgb_frames: Array = []
 		for frame_variant in group:
 			if not frame_variant is Dictionary:
 				continue
 			for snapshot_variant in (frame_variant as Dictionary).get("rgb_snapshots", []):
 				if (
 					snapshot_variant is Dictionary
-					and "d455" in str((snapshot_variant as Dictionary).get("name", "")).to_lower()
+					and _automated_has_required_d455([snapshot_variant], reference_camera)
 					and FileAccess.file_exists(str((snapshot_variant as Dictionary).get("path", "")))
 				):
-					rgb_states += 1
+					rgb_frames.append(frame_variant)
 					break
-		if rgb_states >= 5:
+		# Require the same five distinct opening states and span in the saved
+		# RGB subset; duplicate images of one state cannot complete a view.
+		if bool(_claw_capture_coverage(rgb_frames).get("ready", false)):
 			complete += 1
 	return complete
 
@@ -1825,7 +1830,8 @@ func _wrist_roll_capture_coverage(frames: Array) -> Dictionary:
 
 func _claw_capture_coverage(frames: Array) -> Dictionary:
 	var openings: Array[float] = []
-	var d455_frames := 0
+	var reference_camera := _reference_camera_for_frames(frames)
+	var reference_frames := 0
 	for frame in frames:
 		if (
 			frame is Dictionary
@@ -1834,10 +1840,11 @@ func _claw_capture_coverage(frames: Array) -> Dictionary:
 			and (frame["pose"] as Array).size() >= 6
 		):
 			if _automated_has_required_d455(
-				frame.get("full_camera_points", null)
+				frame.get("full_camera_points", null),
+				reference_camera,
 			):
 				openings.append(float(frame["pose"][5]))
-				d455_frames += 1
+				reference_frames += 1
 	openings.sort()
 	var distinct: Array[float] = []
 	for opening in openings:
@@ -1849,14 +1856,15 @@ func _claw_capture_coverage(frames: Array) -> Dictionary:
 		else 0.0
 	)
 	return {
-		"ready": distinct.size() >= 5 and span >= 70.0 and d455_frames >= 5,
-		"summary": "%d/5 D455 states, %.1f/70 deg span" % [
+		"ready": distinct.size() >= 5 and span >= 70.0 and reference_frames >= 5,
+		"summary": "%d/5 %s states, %.1f/70 deg span" % [
 			distinct.size(),
+			reference_camera if not reference_camera.is_empty() else "reference-camera",
 			span,
 		],
 		"distinct_states": distinct.size(),
 		"span_degrees": span,
-		"d455_frames": d455_frames,
+		"d455_frames": reference_frames,
 	}
 
 
