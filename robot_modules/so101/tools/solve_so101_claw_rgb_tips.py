@@ -148,7 +148,10 @@ def group_frames(capture: dict) -> list[list[dict]]:
             if not distinct or float(frame["pose"][5]) - float(distinct[-1]["pose"][5]) >= 5.0:
                 distinct.append(frame)
         if len(distinct) >= 5 and float(distinct[-1]["pose"][5]) - float(distinct[0]["pose"][5]) >= 70.0:
-            complete.append(distinct[:5])
+            # Preserve both ends of the measured span when retries contributed
+            # extra states; taking the first five can silently lose full-open.
+            indices = np.linspace(0, len(distinct) - 1, 5).round().astype(int)
+            complete.append([distinct[index] for index in indices])
     if len(complete) < 2:
         detail = f"; {len(missing_rgb)} frames: {missing_rgb[0]}" if missing_rgb else ""
         raise ValueError(
@@ -424,17 +427,36 @@ def temporal_dark_moving_tip(
     return observed, confidence, labels == best_label
 
 
+def read_rgb_image(path: str) -> np.ndarray:
+    """Decode through Python file I/O, including non-ASCII Windows paths."""
+    try:
+        encoded = np.frombuffer(Path(path).read_bytes(), dtype=np.uint8)
+        image = cv2.imdecode(encoded, cv2.IMREAD_COLOR) if encoded.size else None
+    except (OSError, cv2.error) as error:
+        raise ValueError(f"could not decode RGB image {path!r}: {error}") from error
+    if image is None:
+        raise ValueError(f"could not decode RGB image {path!r}")
+    return image
+
+
 def extract_observations(
     groups: list[list[dict]],
     debug_directory: Path,
     hinge_direction: int = 1,
+    rejected_views: list[dict] | None = None,
 ) -> list[Observation]:
     debug_directory.mkdir(parents=True, exist_ok=True)
     observations: list[Observation] = []
+    if rejected_views is None:
+        rejected_views = []
     for view_index, group in enumerate(groups):
-        images = [cv2.imread(frame["_rgb"]["path"], cv2.IMREAD_COLOR) for frame in group]
-        if any(image is None for image in images):
-            raise ValueError("a saved D455 RGB frame could not be decoded")
+        try:
+            images = [read_rgb_image(frame["_rgb"]["path"]) for frame in group]
+            if len({image.shape for image in images}) != 1:
+                raise ValueError("RGB dimensions changed during this wrist view")
+        except ValueError as error:
+            rejected_views.append({"view": view_index + 1, "reason": str(error)})
+            continue
         changed = temporal_masks(images)
         for state_index, (frame, image) in enumerate(zip(group, images)):
             tips = terminal_tip_positions_local(frame)
@@ -483,7 +505,10 @@ def extract_observations(
                 cv2.line(canvas, tuple(np.round(hinge).astype(int)), tuple(np.round(search_prediction).astype(int)), (0, 180, 255), 1)
                 cv2.circle(canvas, tuple(np.round(search_prediction).astype(int)), 7, (0, 220, 255), 2)
                 cv2.circle(canvas, tuple(np.round(observed).astype(int)), 5, (255, 255, 0), -1)
-            cv2.imwrite(str(debug_directory / f"view{view_index + 1:02d}_state{state_index + 1:02d}_observed.png"), canvas)
+            saved, encoded = cv2.imencode(".png", canvas)
+            if saved:
+                debug_path = debug_directory / f"view{view_index + 1:02d}_state{state_index + 1:02d}_observed.png"
+                debug_path.write_bytes(encoded.tobytes())
     moving_counts = {
         view_index: sum(
             observation.tip_index == 1 and observation.view_key == view_index
@@ -498,8 +523,9 @@ def extract_observations(
     }
     if len(qualified_views) < 2:
         raise ValueError(
-            "moving fingertip was not independently visible in two D455 wrist views "
-            f"(counts={{{', '.join(f'{key + 1}: {value}' for key, value in moving_counts.items())}}})"
+            "moving fingertip was not independently visible in two reference-camera wrist views "
+            f"(counts={{{', '.join(f'{key + 1}: {value}' for key, value in moving_counts.items())}}}; "
+            f"rejected RGB views={rejected_views})"
         )
     # Fixed-jaw-only views cannot constrain the articulated jaw and are exactly
     # where the custom bracket tends to masquerade as a terminal edge. Retain
@@ -821,11 +847,19 @@ def solve(capture: dict, debug_directory: Path) -> dict:
     hypothesis_failures: list[str] = []
     for hinge_direction, label in ((1, "forward"), (-1, "reversed")):
         try:
+            rejected_views: list[dict] = []
             observations = extract_observations(
-                groups, debug_directory / label, hinge_direction
+                groups, debug_directory / label, hinge_direction,
+                rejected_views=rejected_views,
             )
             assembly, metrics = fit_assembly(observations, hinge_direction)
+            metrics["rejected_capture_views"] = rejected_views
             if bool(metrics.get("all_views_improved", False)):
+                if hinge_direction != 1:
+                    hypothesis_failures.append(
+                        "reversed gripper hinge fit cannot be applied by the stock overlay"
+                    )
+                    continue
                 candidates.append((assembly, metrics))
             else:
                 worst = sorted(
@@ -899,11 +933,15 @@ def solve(capture: dict, debug_directory: Path) -> dict:
         "baseline_tip_residual_px": metrics["baseline_median_px"],
         "maximum_tip_residual_px": metrics["maximum_candidate_px"],
         "all_views_improved": metrics["all_views_improved"],
-        "validation_view_count": len(groups),
-        "validation_pose_count": len(capture.get("frames", [])),
+        "validation_view_count": len(metrics["view_metrics"]),
+        "validation_pose_count": len({
+            (item["view"], item["opening"])
+            for item in metrics.get("observation_metrics", [])
+        }),
         "tip_observation_count": metrics["observation_count"],
         "view_metrics": metrics["view_metrics"],
         "rejected_outlier_views": metrics.get("rejected_outlier_views", []),
+        "rejected_capture_views": metrics.get("rejected_capture_views", []),
         "rejected_isolated_observations": metrics.get(
             "rejected_isolated_observations", []
         ),

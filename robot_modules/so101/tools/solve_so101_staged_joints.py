@@ -808,17 +808,23 @@ def solve_wrist_flex_from_roll_axis(
     joint_index = 3
     next_joint_index = 4
     groups = observation_groups(all_frames, next_joint_index)
+    camera_indices = reference_camera_indices(all_frames)
+    camera_count = len(all_frames[0].get("full_camera_points", []))
+    camera_indices += [index for index in range(camera_count) if index not in camera_indices]
+    if len(camera_indices) < 2:
+        raise ValueError("fixed-region wrist solving requires two camera clouds")
+    camera_indices = camera_indices[:2]
     candidate_minimum, candidate_maximum = wrist_flex_local_correction_bounds(
         float(offsets[joint_index])
     )
 
-    # Seed only the spatial crop from the primary D455. It must see the motion
+    # Seed only the spatial crop from the selected reference camera. It must see the motion
     # in every settled pose; the seed is not itself accepted as calibration.
     seed_candidates = []
     for group_index, frames in enumerate(groups):
         coarse = next_axis_camera_curve(
             frames,
-            0,
+            camera_indices[0],
             joint_index,
             np.arange(candidate_minimum, candidate_maximum + 0.0001, 2.5),
             float(directions[next_joint_index]),
@@ -832,7 +838,7 @@ def solve_wrist_flex_from_roll_axis(
         if seed["support"] >= 100 and seed["minimum_pose_support"] >= 5:
             seed_candidates.append(seed)
     if not seed_candidates:
-        raise ValueError("wrist roll is not sufficiently visible in the D455")
+        raise ValueError(f"wrist roll is not sufficiently visible in {REFERENCE_CAMERA_SERIAL}")
     seed = max(
         seed_candidates,
         key=lambda item: (
@@ -892,7 +898,7 @@ def solve_wrist_flex_from_roll_axis(
             expected["fixed_region_seed_delta"] = fixed_region_delta
             expected["group_index"] = group_index
             group_results.append(expected)
-            all_camera_results[camera_index].append(expected)
+            all_camera_results[result_index].append(expected)
         fits_by_group.append(group_results)
 
     # The transferred spatial crop is only meaningful at the same physical

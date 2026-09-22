@@ -164,3 +164,38 @@ def test_wrist_sign_can_use_later_valid_view_and_still_reject_wrong_direction(mo
     assert "not decisive" in result["rejected_candidates"]["1.0"]
     assert result["camera_results"][0]["group_index"] == 1
     assert "77 wrist-motion points" in result["rejected_camera_views"][0]["reason"]
+
+
+def test_fixed_region_solver_uses_both_cameras_with_selected_reference_first(monkeypatch):
+    monkeypatch.setattr(staged, "REFERENCE_CAMERA_SERIAL", "D435 B")
+    seed_calls = []
+    fit_calls = []
+    fit = {
+        "delta": 0.0,
+        "support": 150,
+        "minimum_pose_support": 10,
+        "median_residual_m": 0.005,
+        "support_peak_ratio": 1.2,
+    }
+
+    def coarse(_frames, camera_index, *_):
+        seed_calls.append(camera_index)
+        return [dict(fit)]
+
+    def refine(_frames, camera_index, *_):
+        fit_calls.append(camera_index)
+        return dict(fit)
+
+    monkeypatch.setattr(staged, "next_axis_camera_curve", coarse)
+    monkeypatch.setattr(staged, "best_axis_curve_result", lambda curve: curve[0])
+    monkeypatch.setattr(staged, "refine_fixed_region_axis_fit", refine)
+    monkeypatch.setattr(staged, "fixed_region_axis_camera_curve", lambda *_: [{"support": 50}])
+    monkeypatch.setattr(
+        staged, "predicted_next_axis", lambda *_: (np.zeros(3), np.array([0.0, 1.0, 0.0]))
+    )
+    result = staged.solve_wrist_flex_from_roll_axis(
+        motion_frames([110]), [1.0] * 6, [0.0] * 6, np.eye(3), np.zeros(3)
+    )
+    assert seed_calls == [1]
+    assert fit_calls == [1, 0]
+    assert [item["camera"] for item in result["camera_results"]] == ["D435 B", "D435 A"]

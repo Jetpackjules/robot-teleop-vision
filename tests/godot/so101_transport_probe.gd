@@ -27,8 +27,21 @@ class ClearProbe:
 class RegistrationProbe:
 	extends Node3D
 	var clear_count := 0
+	var saved_status := {"registration_source": "full_automated_motion_axis_calibration", "calibrated_through_joint": 4, "base_axis_fit": {"reference_camera": "RealSense D435 B"}}
+	func get_registration_status() -> Dictionary:
+		return saved_status.duplicate(true)
 	func clear_saved_registration() -> void:
 		clear_count += 1
+
+class ClawStartProbe:
+	extends ClearProbe
+	func start_claw_visual_calibration(_force_editor_auto_move: bool = false) -> void:
+		_state = "capturing"
+
+class SaveProbeOverlay:
+	extends "res://robot_modules/so101/godot/so101_robot_overlay.gd"
+	func _save_registration() -> bool:
+		return true
 
 class RgbProbe:
 	extends Node3D
@@ -36,6 +49,16 @@ class RgbProbe:
 		return Image.create(4, 4, false, Image.FORMAT_RGB8)
 	func get_current_intrinsics() -> Vector4:
 		return Vector4(4, 4, 2, 2)
+
+class IncompleteRawRgbProbe:
+	extends RgbProbe
+	var valid_raw := false
+	func get_raw_color_image() -> Image:
+		return Image.create(8, 8, false, Image.FORMAT_RGB8)
+	func get_raw_color_intrinsics() -> Vector4:
+		return Vector4(8, 8, 4, 4) if valid_raw else Vector4.ZERO
+	func get_depth_to_raw_color_extrinsics() -> PackedFloat32Array:
+		return PackedFloat32Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0])
 
 var checks := 0
 var failures: Array[String] = []
@@ -106,6 +129,17 @@ func check_claw_rgb_views(calibrator: AckProbe, snapshot: Dictionary) -> void:
 		duplicates[0].rgb_snapshots = []
 		duplicates.append(frames[1].duplicate(true))
 		check(calibrator._complete_automated_claw_view_count(duplicates) == 1, "duplicate opening cannot replace missing RGB state")
+		var with_rgb: Dictionary = frames[0].duplicate(true)
+		with_rgb.camera_points = [{"points": [Vector3.ZERO]}]
+		var without_rgb := with_rgb.duplicate(true)
+		without_rgb.rgb_snapshots = []
+		without_rgb.camera_points[0].points.append(Vector3.ONE)
+		calibrator._automation_claw_accumulated_frames = [with_rgb.duplicate(true)]
+		calibrator._merge_automated_claw_capture_frames([without_rgb])
+		check(not calibrator._automation_claw_accumulated_frames[0].rgb_snapshots.is_empty(), "better depth cannot erase usable RGB")
+		calibrator._automation_claw_accumulated_frames = [without_rgb.duplicate(true)]
+		calibrator._merge_automated_claw_capture_frames([with_rgb])
+		check(not calibrator._automation_claw_accumulated_frames[0].rgb_snapshots.is_empty(), "RGB retry repairs a depth-only state")
 
 
 func _run() -> void:
@@ -189,6 +223,31 @@ func _run() -> void:
 	if not snapshots[0].is_empty() and not snapshots[1].is_empty():
 		check(snapshots[0].path != snapshots[1].path, "camera RGB images do not overwrite each other")
 		check_claw_rgb_views(clear_probe, snapshots[1])
+	var claw_start := ClawStartProbe.new()
+	clear_host.add_child(claw_start)
+	claw_start.start_distal_claw_tip_calibration(true)
+	check(claw_start._reference_camera_for_frames(camera_frames) == "RealSense D435 B", "claw-only restart retains saved base camera")
+	claw_start.free()
+	var raw_rgb := IncompleteRawRgbProbe.new()
+	clear_host.add_child(raw_rgb)
+	var fallback_rgb := clear_probe._rgb_snapshot_for_renderer(raw_rgb, [0, 0, 0, 0, 0, 5])
+	check(not fallback_rgb.is_empty() and not fallback_rgb.get("uses_raw_color", true), "incomplete raw metadata uses calibrated aligned RGB")
+	raw_rgb.valid_raw = true
+	var native_rgb := clear_probe._rgb_snapshot_for_renderer(raw_rgb, [0, 0, 0, 0, 0, 5])
+	check(native_rgb.get("uses_raw_color", false) and native_rgb.get("width", 0) == 8, "complete raw RGB remains preferred")
+	clear_probe._automation_base_result = {"reference_camera": "RealSense D435 B"}
+	var claw_fit := {"type": "so101_claw_visual_fit", "method": "d455_native_rgb_multiview_tip_fit", "reference_camera": "RealSense D435 B", "gripper_angle_samples_normalized": [5, 25, 50, 75, 90], "gripper_angle_samples_degrees": [-10, 15, 40, 65, 80], "validation_view_count": 2, "all_views_improved": true, "median_tip_residual_px": 1.0, "confidence": 0.95}
+	check(clear_probe._validate_automated_claw_result(claw_fit).ok, "renderable RGB result accepted")
+	claw_fit.gripper_hinge_direction = -1
+	check(not clear_probe._validate_automated_claw_result(claw_fit).ok, "unsupported reversed hinge cannot be saved as a valid stock overlay")
+	claw_fit.gripper_mount_correction_local = [0, 0, 0]
+	claw_fit.gripper_visual_correction_rpy_degrees = [0, 0, 0]
+	claw_fit.gripper_visual_correction_translation_local = [0, 0, 0]
+	var saved_overlay := SaveProbeOverlay.new()
+	check(not saved_overlay.apply_automated_claw_calibration(claw_fit, 0.0), "overlay itself rejects unsupported hinge transaction")
+	claw_fit.gripper_hinge_direction = 1
+	check(saved_overlay.apply_automated_claw_calibration(claw_fit, 0.0), "supported stock-jaw transaction still applies")
+	saved_overlay.free()
 	clear_probe._automation_active = false
 	robot_module._calibrator = null
 	robot_module.free()

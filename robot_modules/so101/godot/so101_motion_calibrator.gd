@@ -566,6 +566,7 @@ func start_distal_claw_tip_calibration(force_editor_auto_move: bool = false) -> 
 	):
 		_fail("Claw-only calibration requires a validated base-through-wrist registration.")
 		return
+	_automation_base_result = registration.get("base_axis_fit", {}).duplicate(true)
 	_automation_active = true
 	_automation_stage = "claw_capture"
 	_automation_force_editor_auto_move = force_editor_auto_move
@@ -1552,6 +1553,7 @@ func _merge_automated_joint_capture_frames(incoming: Array) -> void:
 
 
 func _merge_automated_claw_capture_frames(incoming: Array) -> void:
+	var reference_camera := _reference_camera_for_frames(_automation_claw_accumulated_frames + incoming)
 	for candidate_variant in incoming:
 		if not candidate_variant is Dictionary:
 			continue
@@ -1581,13 +1583,30 @@ func _merge_automated_claw_capture_frames(incoming: Array) -> void:
 				break
 		if duplicate_index < 0:
 			_automation_claw_accumulated_frames.append(candidate.duplicate(true))
-		elif (
-			_capture_frame_motion_quality(candidate)
-			> _capture_frame_motion_quality(
-				_automation_claw_accumulated_frames[duplicate_index]
-			)
+		else:
+			var existing: Dictionary = _automation_claw_accumulated_frames[duplicate_index]
+			var candidate_rgb := _claw_frame_has_reference_rgb(candidate, reference_camera)
+			var existing_rgb := _claw_frame_has_reference_rgb(existing, reference_camera)
+			# The final solver needs RGB. More depth points cannot compensate
+			# for losing the reference-camera image of this opening state.
+			if (
+				(candidate_rgb and not existing_rgb)
+				or (candidate_rgb == existing_rgb and _capture_frame_motion_quality(candidate) > _capture_frame_motion_quality(existing))
+			):
+				_automation_claw_accumulated_frames[duplicate_index] = candidate.duplicate(true)
+
+
+func _claw_frame_has_reference_rgb(frame: Dictionary, reference_camera: String) -> bool:
+	if reference_camera.is_empty():
+		return false
+	for snapshot in frame.get("rgb_snapshots", []):
+		if (
+			snapshot is Dictionary
+			and _automated_has_required_d455([snapshot], reference_camera)
+			and FileAccess.file_exists(str(snapshot.get("path", "")))
 		):
-			_automation_claw_accumulated_frames[duplicate_index] = candidate.duplicate(true)
+			return true
+	return false
 
 
 func _best_complete_automated_claw_view(frames: Array) -> Array:
@@ -1661,16 +1680,8 @@ func _complete_automated_claw_view_count(frames: Array) -> int:
 			continue
 		var rgb_frames: Array = []
 		for frame_variant in group:
-			if not frame_variant is Dictionary:
-				continue
-			for snapshot_variant in (frame_variant as Dictionary).get("rgb_snapshots", []):
-				if (
-					snapshot_variant is Dictionary
-					and _automated_has_required_d455([snapshot_variant], reference_camera)
-					and FileAccess.file_exists(str((snapshot_variant as Dictionary).get("path", "")))
-				):
-					rgb_frames.append(frame_variant)
-					break
+			if frame_variant is Dictionary and _claw_frame_has_reference_rgb(frame_variant, reference_camera):
+				rgb_frames.append(frame_variant)
 		# Require the same five distinct opening states and span in the saved
 		# RGB subset; duplicate images of one state cannot complete a view.
 		if bool(_claw_capture_coverage(rgb_frames).get("ready", false)):
@@ -1929,12 +1940,20 @@ func _rgb_snapshot_for_renderer(renderer: Node3D, pose: Array) -> Dictionary:
 	var raw_intrinsics := Vector4.ZERO
 	var raw_extrinsics := PackedFloat32Array()
 	var uses_raw_color := false
-	if renderer.has_method("get_raw_color_image"):
+	if (
+		renderer.has_method("get_raw_color_image")
+		and renderer.has_method("get_raw_color_intrinsics")
+		and renderer.has_method("get_depth_to_raw_color_extrinsics")
+	):
 		image = renderer.call("get_raw_color_image") as Image
 		if image != null and not image.is_empty():
-			uses_raw_color = true
 			raw_intrinsics = renderer.call("get_raw_color_intrinsics") as Vector4
 			raw_extrinsics = renderer.call("get_depth_to_raw_color_extrinsics") as PackedFloat32Array
+			uses_raw_color = raw_intrinsics.x > 0.0 and raw_intrinsics.y > 0.0 and raw_extrinsics.size() == 12
+			if not uses_raw_color:
+				# Startup may expose raw pixels before their calibration metadata.
+				# Use the aligned image with its own intrinsics until raw is ready.
+				image = null
 	if image == null or image.is_empty():
 		if renderer.has_method("get_color_image"):
 			image = renderer.call("get_color_image") as Image
@@ -4406,6 +4425,8 @@ func _validate_automated_base_result(result: Dictionary) -> Dictionary:
 
 
 func _validate_automated_claw_result(result: Dictionary) -> Dictionary:
+	if float(result.get("gripper_hinge_direction", 1)) != 1.0:
+		return {"ok": false, "reason": "reversed gripper hinge fit cannot be applied by the stock overlay"}
 	var method := str(result.get("method", ""))
 	if (
 		str(result.get("type", "")) != "so101_claw_visual_fit"

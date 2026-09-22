@@ -2080,6 +2080,10 @@ func apply_automated_claw_calibration(
 	result: Dictionary,
 	calibration_started_unix_ms: float,
 ) -> bool:
+	# The stock jaw transform has one opening direction. Never save a solver
+	# hypothesis whose mirrored motion this renderer would silently ignore.
+	if float(result.get("gripper_hinge_direction", 1)) != 1.0:
+		return false
 	var method := str(result.get("method", ""))
 	if (
 		str(result.get("type", "")) != "so101_claw_visual_fit"
