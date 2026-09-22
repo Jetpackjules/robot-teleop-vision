@@ -2297,11 +2297,9 @@ func apply_automated_claw_calibration(
 	return false
 
 
-## Completes a full automatic transaction when all three D455 claw views are
-## optically ambiguous.  The arm through wrist has already been freshly
-## validated at this point.  Never replace a known-good jaw mapping with a
-## non-monotonic image fit: validate the currently installed mapping and retain
-## every one of its values unchanged while recording the explicit fallback.
+## Retains the installed curve after the fresh claw fit fails. Shape and bounds
+## checks below do not establish optical accuracy on this arm: the installed
+## curve can be the bundled default. Record that it was not revalidated.
 func finalize_automated_claw_with_validated_prior(
 	calibration_started_unix_ms: float,
 	optical_failure: Dictionary = {},
@@ -2370,13 +2368,14 @@ func finalize_automated_claw_with_validated_prior(
 	refined.erase("claw_calibration_pending")
 	refined["claw_calibration"] = {
 		"method": (
-			"preserved_validated_prior_claw_curve_after_three_ambiguous_d455_views"
+			"retained_existing_claw_curve_after_rejected_fit"
 		),
 		"fallback": true,
-		"optical_attempts": 3,
+		"validated_in_current_run": false,
+		"optical_attempts": int(optical_failure.get("capture_attempts", 0)),
 		"reason": str(optical_failure.get(
 			"status",
-			optical_failure.get("reason", "D455 moving-jaw evidence was ambiguous"),
+			optical_failure.get("reason", "new claw fit rejected"),
 		)),
 	}
 	_registration_status["joint_refinement"] = refined

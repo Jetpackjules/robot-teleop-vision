@@ -965,6 +965,8 @@ class FollowerController:
         self.rest_return_duration = 0.0
         self.rest_return_progress = 0.0
         self.rest_return_reason = ""
+        self.rest_return_request_id = ""
+        self._seen_rest_return_request_ids: set[str] = set()
         self.idle_return_enabled = False
         self.idle_return_timeout_seconds = 600.0
         self.last_operator_activity_at = self.now()
@@ -1007,6 +1009,12 @@ class FollowerController:
             self.restart_hardware()
             return
         if kind == "arm_return_to_rest":
+            request_id = str(message.get("rest_return_request_id", ""))
+            if request_id and request_id in self._seen_rest_return_request_ids:
+                return
+            self.rest_return_request_id = request_id
+            if request_id:
+                self._seen_rest_return_request_ids.add(request_id)
             self.last_operator_activity_at = self.now()
             self.idle_return_attempted = False
             self.start_rest_return("operator")
@@ -2294,6 +2302,7 @@ class FollowerController:
             "rest_return_active": self.rest_return_active,
             "rest_return_progress": self.rest_return_progress,
             "rest_return_reason": self.rest_return_reason,
+            "rest_return_request_id": self.rest_return_request_id,
             "idle_return_enabled": self.idle_return_enabled,
             "idle_return_timeout_seconds": self.idle_return_timeout_seconds,
             "idle_seconds": max(0.0, self.now() - self.last_operator_activity_at),

@@ -170,6 +170,11 @@ var _editor_sweep_requested := false
 var _editor_sweep_requested_msec := 0
 var _editor_sweep_acknowledged := false
 var _calibration_request_id := ""
+var _rest_return_status: Dictionary = {}
+var _rest_return_request_id := ""
+var _rest_return_requested_msec := 0
+var _rest_return_tracking := false
+var _rest_return_acknowledged := false
 var _preflight_sequences: Dictionary = {}
 var _preflight_ready_samples := 0
 var _next_preflight_msec := 0
@@ -835,21 +840,69 @@ func _connect_arm_command_peer() -> Error:
 
 
 func return_arm_to_rest_pose() -> bool:
+	if _rest_return_tracking:
+		return true # Do not resend a motion command while awaiting its outcome.
+	if _automation_active or _state in ["capturing", "solving"]:
+		_rest_return_status = {"message": "Return to rest is unavailable while calibration is running."}
+		return false
+	var overlay := get_node_or_null(OVERLAY_PATH)
+	if overlay == null or not overlay.has_method("get_latest_status"):
+		_rest_return_status = {"message": "Return to rest needs connected follower telemetry."}
+		return false
+	var follower: Dictionary = overlay.call("get_latest_status")
+	var error_message := _follower_telemetry_error(overlay, follower)
+	var age_msec := Time.get_unix_time_from_system() * 1000.0 - float(follower.get("sent_unix_ms", 0.0))
+	if not error_message.is_empty() or age_msec < -1000.0 or age_msec > 1000.0:
+		_rest_return_status = {"message": error_message if not error_message.is_empty() else "Return to rest needs fresh follower telemetry. Check that robot-teleop is running."}
+		return false
 	if not _arm_command_udp.is_socket_connected():
 		if _connect_arm_command_peer() != OK:
+			_rest_return_status = {"message": "Could not connect to the configured follower command port."}
 			return false
+	_rest_return_request_id = Crypto.new().generate_random_bytes(16).hex_encode()
 	var error := _arm_command_udp.put_packet(JSON.stringify({
 		"type": "arm_return_to_rest",
 		"control_session": "godot-editor-rest-return",
+		"rest_return_request_id": _rest_return_request_id,
 	}).to_utf8_buffer())
+	_rest_return_tracking = error == OK
+	_rest_return_acknowledged = false
+	_rest_return_requested_msec = Time.get_ticks_msec()
+	_rest_return_status = {"message": "Return to rest requested; waiting for the follower response." if error == OK else "Could not send the return-to-rest request."}
 	return error == OK
+
+
+func _update_rest_return_status(follower: Dictionary, now_msec: int) -> void:
+	if not _rest_return_tracking:
+		return
+	var age_msec := Time.get_unix_time_from_system() * 1000.0 - float(follower.get("sent_unix_ms", 0.0))
+	var fresh := age_msec >= -1000.0 and age_msec <= 1000.0
+	if fresh and str(follower.get("rest_return_request_id", "")) == _rest_return_request_id:
+		_rest_return_acknowledged = true
+		_rest_return_tracking = bool(follower.get("rest_return_active", false))
+		_rest_return_status = {
+			"message": str(follower.get("message", "Follower replied without a rest-pose status.")),
+			"active": _rest_return_tracking,
+			"progress": float(follower.get("rest_return_progress", 0.0)),
+		}
+	elif _rest_return_acknowledged:
+		_rest_return_status = {"message": "Return-to-rest feedback is unavailable; the arm's current motion state is unknown. Check the follower terminal."}
+	elif now_msec - _rest_return_requested_msec >= 3000:
+		_rest_return_tracking = false
+		_rest_return_status = {"message": "No matching return-to-rest response. Restart robot-teleop from the updated checkout and check its terminal. The command was not resent."}
+		if fresh and not follower.has("rest_return_request_id"):
+			_rest_return_status.message += " Last follower message: " + str(follower.get("message", "unavailable"))
 
 
 func get_calibration_status() -> Dictionary:
 	var status := _status.duplicate(true)
+	var overlay := get_node_or_null(OVERLAY_PATH)
+	if overlay != null and overlay.has_method("get_latest_status"):
+		_update_rest_return_status(overlay.call("get_latest_status"), Time.get_ticks_msec())
+	if not _rest_return_status.is_empty():
+		status["rest_return"] = _rest_return_status.duplicate(true)
 	if _state != "complete":
 		return status
-	var overlay := get_node_or_null(OVERLAY_PATH)
 	if overlay == null or not overlay.has_method("get_registration_status"):
 		return status
 	var registration: Dictionary = overlay.call("get_registration_status")
@@ -4359,6 +4412,8 @@ func _finish_automated_stage(result: Dictionary) -> void:
 
 func _finish_with_validated_prior_claw(optical_failure: Dictionary) -> bool:
 	var overlay := get_node_or_null(OVERLAY_PATH)
+	var failure_details := optical_failure.duplicate(true)
+	failure_details["capture_attempts"] = _automation_claw_capture_attempt
 	if (
 		overlay == null
 		or not overlay.has_method(
@@ -4367,7 +4422,7 @@ func _finish_with_validated_prior_claw(optical_failure: Dictionary) -> bool:
 		or not bool(overlay.call(
 			"finalize_automated_claw_with_validated_prior",
 			_started_unix_ms,
-			optical_failure,
+			failure_details,
 		))
 	):
 		return false
@@ -4380,8 +4435,9 @@ func _finish_with_validated_prior_claw(optical_failure: Dictionary) -> bool:
 		"complete",
 		(
 			"Automatic base and arm calibration through wrist validated and saved. "
-			+ "The existing validated five-state claw curve was retained because "
-			+ "all five D455 jaw views were optically ambiguous."
+			+ "The existing claw curve was retained, but was not revalidated by this run. "
+			+ "Check the claw overlay at closed, halfway, and open positions. "
+			+ "Claw fit details: " + str(optical_failure.get("status", optical_failure.get("reason", "new claw fit rejected")))
 		),
 		1.0,
 		0.85,
@@ -5308,6 +5364,8 @@ func _trusted_search_limit_reached(rotation_degrees: float, translation_m: float
 
 
 func _set_status(state: String, message: String, progress: float, confidence: float) -> void:
+	_rest_return_status.clear()
+	_rest_return_tracking = false
 	_status = {
 		"type": STATUS_TYPE,
 		"state": state,

@@ -943,6 +943,7 @@ func _return_robot_to_rest_pose() -> void:
 		robot_position_calibration_status = "Could not send the return-to-rest request."
 	else:
 		robot_position_calibration_status = "Return-to-rest requested; Hold can interrupt it."
+	_update_robot_position_calibration_status()
 	if Engine.is_editor_hint():
 		notify_property_list_changed()
 
@@ -991,6 +992,9 @@ func _update_robot_position_calibration_status() -> void:
 		int(status.get("frames", 0)),
 		float(status.get("confidence", 0.0)) * 100.0,
 	]
+	var rest_status: Dictionary = status.get("rest_return", {})
+	if not rest_status.is_empty():
+		next_status = str(rest_status.get("message", "")) + "\nCalibration: " + next_status
 	if next_status != robot_position_calibration_status:
 		robot_position_calibration_status = next_status
 		if Engine.is_editor_hint():

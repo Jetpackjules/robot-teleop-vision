@@ -46,4 +46,4 @@ def test_claw_stage_uses_measured_gripper_tolerance_and_bounded_retry() -> None:
     assert "_best_complete_automated_claw_view" in source
     assert "_finish_with_validated_prior_claw" in source
     assert "finalize_automated_claw_with_validated_prior" in source
-    assert "all five D455 jaw views were optically ambiguous" in source
+    assert "was not revalidated by this run" in source

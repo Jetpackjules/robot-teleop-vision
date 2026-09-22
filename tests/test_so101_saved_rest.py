@@ -160,6 +160,33 @@ def test_changed_limits_and_changed_saved_pose_reject_before_any_motor_write(pai
     assert bus.writes == [] and not bus.torque
 
 
+def test_missing_rest_pose_reports_request_and_requires_no_motor_write(pair):
+    bus = RecordedBus(pair, RAISED)
+    controller = FollowerController(pair, bus, rest_pose_path=rest_pose_path(pair))
+    controller.connect()
+    controller.receive({"type": "arm_return_to_rest", "rest_return_request_id": "missing-pose"})
+    status = controller.status()
+    assert status["rest_return_request_id"] == "missing-pose"
+    assert "no rest pose is saved" in status["message"]
+    assert not status["rest_return_active"] and not bus.writes and not bus.torque
+
+
+def test_duplicate_completed_rest_request_cannot_restart_motion(pair):
+    save_rest_pose(pair, FOLDED_RAW, apply=True)
+    bus = RecordedBus(pair, pair.follower_calibration.raw_to_normalized(FOLDED_RAW))
+    controller = FollowerController(pair, bus)
+    controller.connect()
+    request = {"type": "arm_return_to_rest", "rest_return_request_id": "at-rest"}
+    controller.receive(request)
+    assert "already at the saved rest" in controller.status()["message"]
+    assert controller.status()["rest_return_request_id"] == "at-rest"
+    count = len(bus.writes)
+    controller.hold("operator stopped")
+    controller.receive(request)
+    assert len(bus.writes) == count
+    assert controller.status()["message"] == "operator stopped"
+
+
 def test_mesh_route_still_rejects_endpoints_below_floor(pair):
     rest = pair.follower_calibration.raw_to_normalized(FOLDED_RAW)
     with pytest.raises(RuntimeError, match="endpoint is below"):

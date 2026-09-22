@@ -27,6 +27,9 @@ class ClearProbe:
 class RegistrationProbe:
 	extends Node3D
 	var clear_count := 0
+	var follower_status: Dictionary = {}
+	func get_latest_status() -> Dictionary:
+		return follower_status.duplicate(true)
 	var saved_status := {"registration_source": "full_automated_motion_axis_calibration", "calibrated_through_joint": 4, "base_axis_fit": {"reference_camera": "RealSense D435 B"}}
 	func get_registration_status() -> Dictionary:
 		return saved_status.duplicate(true)
@@ -42,6 +45,8 @@ class SaveProbeOverlay:
 	extends "res://robot_modules/so101/godot/so101_robot_overlay.gd"
 	func _save_registration() -> bool:
 		return true
+	func _read_registration_payload() -> Dictionary:
+		return {}
 
 class RgbProbe:
 	extends Node3D
@@ -204,6 +209,60 @@ func _run() -> void:
 	check(registration.clear_count == 1, "module clear reaches overlay")
 	check(clear_probe._state == "idle" and clear_probe._frames.is_empty() and not clear_probe._editor_sweep_requested, "clear stops capture and resets state")
 	check("Camera alignment was preserved" in clear_probe._status.message, "clear reports robot-only scope")
+	check(not clear_probe.return_arm_to_rest_pose(), "rest request requires follower telemetry")
+	check("No connected follower" in clear_probe.get_calibration_status().rest_return.message, "disconnected rest reason reaches inspector status")
+	registration.follower_status = status()
+	registration.follower_status.sent_unix_ms -= 2000
+	check(not clear_probe.return_arm_to_rest_pose(), "stale telemetry cannot initiate rest motion")
+	registration.follower_status = status()
+	var rest_receiver := PacketPeerUDP.new()
+	check(rest_receiver.bind(0, "127.0.0.1") == OK, "isolated rest command receiver")
+	clear_probe.follower_command_port = rest_receiver.get_local_port()
+	clear_probe._state = "complete"
+	clear_probe._status = {"state": "complete", "message": "saved calibration", "confidence": 0.85}
+	check(clear_probe.return_arm_to_rest_pose(), "rest button sends request with fresh telemetry")
+	check(clear_probe.return_arm_to_rest_pose(), "second press waits for existing request")
+	await create_timer(0.05).timeout
+	check(rest_receiver.get_available_packet_count() == 1, "rest command never automatically repeated")
+	var rest_command: Dictionary = JSON.parse_string(rest_receiver.get_packet().get_string_from_utf8())
+	check(rest_command.type == "arm_return_to_rest" and not str(rest_command.rest_return_request_id).is_empty(), "rest command carries correlation ID")
+	registration.follower_status.rest_return_request_id = "previous-request"
+	registration.follower_status.message = "old rejection"
+	check("waiting for" in clear_probe.get_calibration_status().rest_return.message, "prior rejection cannot acknowledge new rest request")
+	registration.follower_status.rest_return_request_id = rest_command.rest_return_request_id
+	registration.follower_status.rest_return_active = false
+	registration.follower_status.message = "Return to rest unavailable: no rest pose is saved."
+	var rest_result := clear_probe.get_calibration_status()
+	check("no rest pose is saved" in rest_result.rest_return.message, "missing rest file reason remains visible")
+	check(rest_result.state == "complete" and rest_result.message == "saved calibration", "rest action preserves calibration result")
+	check(clear_probe.return_arm_to_rest_pose(), "operator can retry after rejection")
+	registration.follower_status.rest_return_request_id = clear_probe._rest_return_request_id
+	registration.follower_status.rest_return_active = true
+	registration.follower_status.rest_return_progress = 0.4
+	registration.follower_status.message = "Return to rest: moving slowly | 40%"
+	check(clear_probe.get_calibration_status().rest_return.active, "rest progress is shown")
+	registration.follower_status.sent_unix_ms -= 2000
+	check("unknown" in clear_probe.get_calibration_status().rest_return.message, "stale rest feedback never claims completion")
+	registration.follower_status.sent_unix_ms = Time.get_unix_time_from_system() * 1000.0
+	registration.follower_status.rest_return_active = false
+	registration.follower_status.message = "Return to rest complete; follower is holding the saved encoder pose."
+	check("complete; follower" in clear_probe.get_calibration_status().rest_return.message, "measured completion reaches inspector")
+	clear_probe._rest_return_tracking = true
+	clear_probe._rest_return_acknowledged = false
+	clear_probe._rest_return_request_id = "lost-packet"
+	clear_probe._update_rest_return_status(registration.follower_status, clear_probe._rest_return_requested_msec + 3001)
+	check("not resent" in clear_probe.get_calibration_status().rest_return.message, "unacknowledged rest request has actionable timeout")
+	clear_probe._rest_return_tracking = true
+	registration.follower_status.erase("rest_return_request_id")
+	clear_probe._update_rest_return_status(registration.follower_status, clear_probe._rest_return_requested_msec + 3001)
+	check("Last follower message" in clear_probe.get_calibration_status().rest_return.message, "old follower service still exposes last diagnostic")
+	clear_probe._set_status("capturing", "new calibration", 0.0, 0.0)
+	clear_probe._state = "capturing"
+	check(not clear_probe.get_calibration_status().has("rest_return"), "new calibration clears old rest action report")
+	check(not clear_probe.return_arm_to_rest_pose(), "rest does not interrupt in-flight calibration")
+	clear_probe._state = "idle"
+	clear_probe._arm_command_udp.close()
+	rest_receiver.close()
 	clear_probe._automation_active = true
 	clear_probe._automation_base_result = {"reference_camera": "RealSense D435 B"}
 	var camera_frames: Array = [{"full_camera_points": [
@@ -247,6 +306,12 @@ func _run() -> void:
 	check(not saved_overlay.apply_automated_claw_calibration(claw_fit, 0.0), "overlay itself rejects unsupported hinge transaction")
 	claw_fit.gripper_hinge_direction = 1
 	check(saved_overlay.apply_automated_claw_calibration(claw_fit, 0.0), "supported stock-jaw transaction still applies")
+	var retained_degrees := saved_overlay.gripper_angle_samples_degrees.duplicate()
+	saved_overlay._registration_status = {"registration_source": "full_automated_motion_axis_calibration", "calibrated_through_joint": 4, "joint_refinement": {"claw_calibration_pending": true}}
+	check(saved_overlay.finalize_automated_claw_with_validated_prior(0.0, {"reason": "unreadable RGB", "capture_attempts": 5}), "failed claw fit retains prior mapping")
+	var retained: Dictionary = saved_overlay._registration_status.joint_refinement.claw_calibration
+	check(retained.fallback and not retained.validated_in_current_run and retained.optical_attempts == 5, "fallback records actual attempts without claiming fresh validation")
+	check(retained.reason == "unreadable RGB" and saved_overlay.gripper_angle_samples_degrees == retained_degrees, "fallback retains exact curve and failure reason")
 	saved_overlay.free()
 	clear_probe._automation_active = false
 	robot_module._calibrator = null
