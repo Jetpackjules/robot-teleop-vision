@@ -266,6 +266,7 @@ def valid_d455_prior_wrist_zero():
         "fixed_point_delta_degrees": 0.0,
         "moving_jaw_orientation_check": True,
         "model_convention_orientation_check": True,
+        "model_to_joint_zero_degrees": 0.0,
         "coupling_converged": True,
         "reference_camera_validation_required": True,
         "reference_camera_serial": staged.REFERENCE_CAMERA_SERIAL,
@@ -287,6 +288,16 @@ def valid_d455_prior_wrist_zero():
             }
         ],
     }
+
+
+@pytest.mark.parametrize("old_offset", [None, 90.0])
+def test_old_quarter_turn_wrist_evidence_cannot_be_retained(old_offset):
+    evidence = valid_d455_prior_wrist_zero()
+    if old_offset is None:
+        evidence.pop("model_to_joint_zero_degrees")
+    else:
+        evidence["model_to_joint_zero_degrees"] = old_offset
+    assert not staged.validated_prior_wrist_zero_evidence(evidence)
 
 
 def test_validated_prior_wrist_zero_accepts_strong_d455_intrinsic_zero():

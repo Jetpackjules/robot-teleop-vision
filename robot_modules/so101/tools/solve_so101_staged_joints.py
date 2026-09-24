@@ -88,10 +88,10 @@ MINIMUM_WRIST_ROLL_MULTIANGLE_POSES_PER_VIEWPOINT = 5
 # three-view consensus solely on 0.1 mm of sensor-edge noise.
 MAXIMUM_WRIST_ROLL_MOVING_JAW_LOSS_M = 0.0225
 MAXIMUM_AUTOMATIC_WRIST_ROLL_CORRECTION_DEGREES = 120.0
-# The stock SO-101 GLB's gripper surface zero is a quarter turn behind the
-# articulated overlay convention. Depth fitting is performed in the mesh
-# convention, then converted once to the joint convention used by Godot.
-WRIST_ROLL_MODEL_TO_JOINT_ZERO_DEGREES = 90.0
+# posed_mesh and Godot use the same GLB coordinates and URDF joint origins.
+# The fitted offset is already a Godot joint offset. Keep the diagnostic field
+# to distinguish historical fits that incorrectly added a quarter turn.
+WRIST_ROLL_MODEL_TO_JOINT_ZERO_DEGREES = 0.0
 # The D455's edge noise and the printed bracket surface are not perfectly
 # coincident. This narrow shell removes bracket returns without reaching the
 # distal fixed jaw, whose fitted region starts more than 55 mm away.
@@ -2904,7 +2904,7 @@ def solve_wrist_roll_zero_from_stock_gripper(
         for frame in dedicated_frames
     ):
         raise ValueError(
-            "wrist-roll sign/zero requires the reference D455 camera"
+            f"wrist-roll sign/zero requires reference camera {REFERENCE_CAMERA_SERIAL}"
         )
 
     o3d.utility.random.seed(51)
@@ -3108,7 +3108,7 @@ def solve_wrist_roll_zero_from_stock_gripper(
             for result in direction_results
         ]
         raise ValueError(
-            "wrist-roll sign/zero has no unambiguous D455 solution "
+            f"wrist-roll sign/zero has no unambiguous {REFERENCE_CAMERA_SERIAL} solution "
             f"({diagnostics})"
         )
     valid_directions.sort(
@@ -3648,6 +3648,7 @@ def validated_prior_wrist_zero_evidence(prior: dict) -> bool:
         return False
     if not (
         common_fixed_point
+        and float(prior.get("model_to_joint_zero_degrees", math.inf)) == 0.0
         and bool(prior.get("model_convention_orientation_check", False))
         and bool(prior.get("coupling_converged", False))
         and bool(prior.get("reference_camera_validation_required", False))

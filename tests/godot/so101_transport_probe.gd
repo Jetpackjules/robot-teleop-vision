@@ -147,7 +147,29 @@ func check_claw_rgb_views(calibrator: AckProbe, snapshot: Dictionary) -> void:
 		check(not calibrator._automation_claw_accumulated_frames[0].rgb_snapshots.is_empty(), "RGB retry repairs a depth-only state")
 
 
+func check_wrist_solver_coordinate_parity() -> void:
+	var cases: Array = JSON.parse_string(FileAccess.get_file_as_string("res://wrist_pose_cases.json"))
+	check(cases.size() == 12, "all wrist coordinate cases loaded")
+	var model := Overlay.new()
+	for item in cases:
+		model.joint_angle_directions = PackedFloat32Array(item.directions)
+		model.joint_angle_offsets_degrees = PackedFloat32Array(item.offsets)
+		var raw := PackedVector3Array()
+		for point in item.raw_points:
+			raw.append(Vector3(point[0], point[1], point[2]))
+		model._link_surface_points = {"gripper_link": raw}
+		model._link_surface_points_maximum_per_link = 220
+		var posed: PackedVector3Array = model.get_pose_mesh_points_local(item.pose)["gripper_link"]
+		check(posed.size() == item.expected_points.size(), "solver/Godot gripper point count")
+		for index in range(posed.size()):
+			var expected: Array = item.expected_points[index]
+			check(posed[index].distance_to(Vector3(expected[0], expected[1], expected[2])) < 0.000001,
+				"solver wrist offset maps directly to Godot gripper coordinates")
+	model.free()
+
+
 func _run() -> void:
+	check_wrist_solver_coordinate_parity()
 	var solver := AckProbe.new()
 	var configured_python := OS.get_environment("ROBOT_TELEOP_SOLVER_PYTHON")
 	check(solver._solver_python_executable() == configured_python, "explicit solver Python")

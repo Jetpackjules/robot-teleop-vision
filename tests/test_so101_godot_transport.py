@@ -34,6 +34,31 @@ def test_godot_transport_and_calibration_transactions_without_hardware(tmp_path)
     godot = find_godot(os.environ.get("ROBOT_TELEOP_TEST_GODOT", ""))
     if godot is None:
         pytest.skip("Install Godot or set ROBOT_TELEOP_TEST_GODOT for executable GDScript tests")
+    # Check the actual solver and Godot transforms agree, including nonzero
+    # wrist offsets and both encoder directions. No additional mesh-to-joint
+    # quarter turn is needed when a fitted offset is applied to the overlay.
+    import numpy as np
+
+    sys.path.insert(0, str(ROOT / "robot_modules/so101/tools"))
+    import solve_so101_staged_joints as staged
+
+    raw_points = [[0.021, -0.014, -0.07], [-0.015, 0.026, -0.09], [0.003, 0.009, -0.04]]
+    wrist_cases = []
+    for direction in [-1.0, 1.0]:
+        for offset in [0.0, -45.0]:
+            for roll in [-100.0, 0.0, 45.0]:
+                pose = [-40.0, 130.0, 38.0, 78.0, roll, 25.0]
+                directions = [1.0, -1.0, 1.0, 1.0, direction, 1.0]
+                offsets = [40.4296875, 80.0, 0.0, -70.0, offset, 0.0]
+                wrist_cases.append({
+                    "pose": pose, "directions": directions, "offsets": offsets,
+                    "raw_points": raw_points,
+                    "expected_points": staged.posed_mesh(
+                        np.array(raw_points), {"pose": pose}, 4, 0, directions,
+                        offsets, np.eye(3), np.zeros(3),
+                    ).tolist(),
+                })
+    (tmp_path / "wrist_pose_cases.json").write_text(json.dumps(wrist_cases), encoding="utf-8")
     # Copy scripts only: no native extension, Main scene, physical profiles,
     # saved registration or application user-data is loaded by this project.
     scripts = tmp_path / "robot_modules/so101/godot"

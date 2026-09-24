@@ -67,6 +67,13 @@ export function parseLeaderCalibration(data) {
   calibration.calib_mode.forEach((mode, index) => {
     if (mode === "LINEAR" && calibration.start_pos[index] === calibration.end_pos[index]) throw new Error("Calibration has a zero linear span");
   });
+  calibration.coordinate_system = raw.coordinate_system ?? "legacy";
+  if (!["legacy", "lerobot_urdf"].includes(calibration.coordinate_system)) throw new Error("Unsupported calibration coordinate system");
+  if (calibration.coordinate_system === "lerobot_urdf") {
+    if (calibration.calib_mode.some((mode, index) => mode !== (index === 5 ? "LINEAR" : "DEGREE"))) throw new Error("LeRobot URDF calibration requires five degree joints and a linear gripper");
+    if (calibration.drive_mode.some(value => value !== 0)) throw new Error("LeRobot URDF calibration requires non-inverted hardware calibration");
+    if (calibration.start_pos.some((low, index) => low < 0 || low >= calibration.end_pos[index] || calibration.end_pos[index] > 4095)) throw new Error("LeRobot URDF calibration requires valid hardware ranges");
+  }
   return calibration;
 }
 
@@ -79,6 +86,13 @@ export function normalizeLeaderPositions(positions, calibration) {
   const values = positions.map((raw, index) => {
     if (calibration.calib_mode[index] === "LINEAR") {
       return (raw - calibration.start_pos[index]) / (calibration.end_pos[index] - calibration.start_pos[index]) * 100;
+    }
+    if (calibration.coordinate_system === "lerobot_urdf") {
+      const midpoint = (calibration.start_pos[index] + calibration.end_pos[index]) / 2;
+      const jointDegrees = (raw - midpoint) * 360 / 4095;
+      const directions = [1, -1, 1, 1, 1];
+      const offsets = [40.4296875, 80, 0, -70, 0];
+      return (jointDegrees - offsets[index]) / directions[index];
     }
     const directed = calibration.drive_mode[index] ? -raw : raw;
     return (directed + calibration.homing_offset[index]) / 2048 * 180;
