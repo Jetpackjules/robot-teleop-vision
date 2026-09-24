@@ -3734,13 +3734,13 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
-    capture = json.loads(args.capture.expanduser().read_text())
+    capture = json.loads(args.capture.expanduser().read_text(encoding="utf-8-sig"))
     REFERENCE_CAMERA_SERIAL = str(
         capture.get("reference_camera", REFERENCE_CAMERA_SERIAL)
     ).strip() or REFERENCE_CAMERA_SERIAL
-    registration = json.loads(args.registration.expanduser().read_text())
+    registration = json.loads(args.registration.expanduser().read_text(encoding="utf-8-sig"))
     parent = (
-        json.loads(args.parent_transform.expanduser().read_text())
+        json.loads(args.parent_transform.expanduser().read_text(encoding="utf-8-sig"))
         if args.parent_transform
         else None
     )
@@ -3759,7 +3759,7 @@ def main() -> int:
     if not compatible_capture:
         raise SystemExit("capture is not a staged joint sweep")
     if args.base_fit:
-        base_fit = json.loads(args.base_fit.expanduser().read_text())
+        base_fit = json.loads(args.base_fit.expanduser().read_text(encoding="utf-8-sig"))
         preview = base_fit.get("preview_transform", {})
         basis, origin = compose_registration_with_parent(preview, None)
     else:
@@ -3841,7 +3841,7 @@ def main() -> int:
     # than writing a result that the transaction state machine cannot parse.
     encoded = json.dumps(result, indent=2, allow_nan=False)
     if args.output:
-        args.output.expanduser().write_text(encoded + "\n")
+        args.output.expanduser().write_text(encoded + "\n", encoding="utf-8")
     print(encoded)
     return 0
 

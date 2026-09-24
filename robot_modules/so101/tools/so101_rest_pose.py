@@ -66,7 +66,7 @@ def load_rest_pose(profile: ArmPairProfile, path: Path | None = None) -> dict:
             path = DEFAULT_REST_POSE  # Existing installations retain their saved pose.
     if not path.exists():
         raise RuntimeError(f"no rest pose is saved at {path}; use scripts/save_so101_rest_pose.py")
-    return validate_rest_pose(profile, json.loads(path.read_text(encoding="utf-8")))
+    return validate_rest_pose(profile, json.loads(path.read_text(encoding="utf-8-sig")))
 
 
 def save_rest_pose(profile: ArmPairProfile, raw: list[int], *, apply: bool = False) -> dict:

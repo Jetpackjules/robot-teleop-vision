@@ -298,12 +298,12 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     try:
-        capture = json.loads(arguments.capture.read_text())
+        capture = json.loads(arguments.capture.read_text(encoding="utf-8-sig"))
         result = solve(capture)
     except Exception as error:
         print(f"SO-101 claw fit rejected: {error}")
         return 1
-    arguments.output.write_text(json.dumps(result, indent=2) + "\n")
+    arguments.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(
         "SO101_CLAW_FIT_OK "
         f"residual={result['median_residual_m'] * 1000.0:.1f}mm "

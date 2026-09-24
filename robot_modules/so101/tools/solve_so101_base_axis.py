@@ -380,14 +380,14 @@ def main() -> int:
     parser.add_argument("capture", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    payload = json.loads(args.capture.expanduser().read_text())
+    payload = json.loads(args.capture.expanduser().read_text(encoding="utf-8-sig"))
     try:
         result = solve(payload)
     except ValueError as error:
         raise SystemExit(str(error)) from error
     encoded = json.dumps(result, indent=2)
     if args.output:
-        args.output.expanduser().write_text(encoded + "\n")
+        args.output.expanduser().write_text(encoded + "\n", encoding="utf-8")
     print(encoded)
     return 0
 

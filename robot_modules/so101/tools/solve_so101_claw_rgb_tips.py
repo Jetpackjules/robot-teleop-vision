@@ -969,11 +969,11 @@ def main() -> int:
     arguments = parser.parse_args()
     debug = arguments.debug_directory or arguments.output.with_suffix("").with_name(arguments.output.stem + "_rgb_debug")
     try:
-        result = solve(json.loads(arguments.capture.read_text()), debug)
+        result = solve(json.loads(arguments.capture.read_text(encoding="utf-8-sig")), debug)
     except Exception as error:
         print(f"SO-101 native-RGB claw fit rejected: {error}")
         return 1
-    arguments.output.write_text(json.dumps(result, indent=2) + "\n")
+    arguments.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(
         "SO101_CLAW_RGB_TIP_FIT_OK "
         f"baseline={result['baseline_tip_residual_px']:.2f}px "

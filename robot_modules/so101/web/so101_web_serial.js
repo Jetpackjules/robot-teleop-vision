@@ -6,6 +6,7 @@ const PRESENT_POSITION_ADDRESS = 56;
 const POSITION_BYTES = 2;
 const TARGET_HZ = 30;
 const SERIAL_RESPONSE_TIMEOUT_MS = 100;
+const MAX_LEADER_SAMPLE_AGE_MS = 250;
 const KEYBOARD_CODES = new Set([
   "KeyW", "KeyA", "KeyS", "KeyD", "KeyR", "KeyF", "KeyQ", "KeyE",
   "KeyI", "KeyJ", "KeyK", "KeyL",
@@ -60,10 +61,14 @@ export class So101ArmController extends EventTarget {
     super();
     this.port = null;
     this.reader = null;
+    this.leaderWriter = null;
     this.reading = false;
     this.rxBuffer = new Uint8Array(0);
     this.responses = new Map();
     this.lastLeaderPositions = null;
+    this.lastLeaderReadTimes = new Map();
+    this.leaderGeneration = 0;
+    this.leaderReadFault = false;
     this.socket = null;
     this.socketReconnectTimer = 0;
     this.socketHeartbeatTimer = 0;
@@ -321,10 +326,17 @@ export class So101ArmController extends EventTarget {
 
   async openLeader(port) {
     if (this.port === port && this.latest.leaderConnected) return;
-    await this.disconnectLeader(false);
+    const disconnecting = this.disconnectLeader(this.port !== null);
+    const generation = this.leaderGeneration;
+    await disconnecting;
+    if (generation !== this.leaderGeneration) return;
     this.latest.leaderState = "opening";
     this.emitStatus();
     await port.open({ baudRate: BAUD_RATE, bufferSize: 4096 });
+    if (generation !== this.leaderGeneration) {
+      try { await port.close(); } catch (_) {}
+      return;
+    }
     window.clearTimeout(this.serialReconnectTimer);
     this.serialReconnectTimer = 0;
     this.port = port;
@@ -332,43 +344,68 @@ export class So101ArmController extends EventTarget {
     this.latest.leaderConnected = true;
     this.latest.controlMode = "leader";
     this.latest.leaderState = "reading motors 1-6";
-    this.readPump().catch((error) => this.serialFailed(error));
+    this.readPump().catch((error) => {
+      if (this.port === port && generation === this.leaderGeneration) return this.serialFailed(error);
+    });
     this.scheduleLoop(0);
     this.emitStatus();
   }
 
   async disconnectLeader(sendHold = true) {
+    this.leaderGeneration += 1;
     window.clearTimeout(this.loopTimer);
     this.loopTimer = 0;
     this.reading = false;
-    if (sendHold) this.hold();
-    if (this.reader) {
-      try { await this.reader.cancel(); } catch (_) {}
-      try { this.reader.releaseLock(); } catch (_) {}
-      this.reader = null;
-    }
-    if (this.port) {
-      try { await this.port.close(); } catch (_) {}
-    }
+    const reader = this.reader;
+    const writer = this.leaderWriter;
+    const port = this.port;
+    this.reader = null;
+    this.leaderWriter = null;
     this.port = null;
+    this.rxBuffer = new Uint8Array(0);
+    this.responses.clear();
+    this.lastLeaderPositions = null;
+    this.lastLeaderReadTimes.clear();
+    this.leaderReadFault = false;
+    this.sendTimes = [];
     this.latest.leaderConnected = false;
+    this.latest.leaderPositions = null;
+    this.latest.leaderHz = 0;
     if (this.latest.controlMode === "leader") this.latest.controlMode = "none";
     this.latest.leaderState = "not connected";
+    if (sendHold) this.hold();
     this.emitStatus();
+    if (reader) {
+      try { await reader.cancel(); } catch (_) {}
+      try { reader.releaseLock(); } catch (_) {}
+    }
+    if (writer) {
+      try { await writer.abort(); } catch (_) {}
+      try { writer.releaseLock(); } catch (_) {}
+    }
+    if (port) {
+      try { await port.close(); } catch (_) {}
+    }
   }
 
   async readPump() {
     if (!this.port || !this.port.readable) throw new Error("leader serial stream is unavailable");
-    const reader = this.port.readable.getReader();
+    const port = this.port;
+    const generation = this.leaderGeneration;
+    const current = () => this.port === port && this.leaderGeneration === generation && this.reading;
+    const reader = port.readable.getReader();
     this.reader = reader;
     try {
-      while (this.reading) {
+      while (current()) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (!current()) break;
+        if (done) throw new Error("leader serial stream ended");
         if (!value || !value.length) continue;
         this.rxBuffer = appendBytes(this.rxBuffer, value);
         this.parsePackets();
       }
+    } catch (error) {
+      if (current()) throw error;
     } finally {
       try { reader.releaseLock(); } catch (_) {}
       if (this.reader === reader) this.reader = null;
@@ -412,26 +449,45 @@ export class So101ArmController extends EventTarget {
 
   async pollLeader() {
     if (!this.port || !this.latest.leaderConnected) return;
+    const port = this.port;
+    const generation = this.leaderGeneration;
+    const current = () => this.port === port && this.leaderGeneration === generation && this.latest.leaderConnected;
     const started = performance.now();
     this.responses.clear();
     try {
-      const writer = this.port.writable.getWriter();
+      const writer = port.writable.getWriter();
+      this.leaderWriter = writer;
       try {
         await writer.write(makeSyncReadPacket());
       } finally {
         writer.releaseLock();
+        if (this.leaderWriter === writer) this.leaderWriter = null;
       }
       // MediaPipe inference shares the browser main thread. Bytes still arrive while
       // inference runs, so allow its callback to drain them before declaring a partial read.
       const deadline = performance.now() + SERIAL_RESPONSE_TIMEOUT_MS;
-      while (this.responses.size < MOTOR_IDS.length && performance.now() < deadline) {
+      while (current() && this.responses.size < MOTOR_IDS.length && performance.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
-      if (this.responses.size === MOTOR_IDS.length || (this.responses.size >= 5 && this.lastLeaderPositions)) {
-        const positions = MOTOR_IDS.map((id, index) => (
-          this.responses.has(id) ? this.responses.get(id) : this.lastLeaderPositions[index]
-        ));
-        this.lastLeaderPositions = positions;
+      if (!current()) return;
+      const sampleTime = performance.now();
+      if (this.responses.size === MOTOR_IDS.length) {
+        this.lastLeaderPositions = MOTOR_IDS.map(id => this.responses.get(id));
+      }
+      // A brief partial reply can bridge a dropped packet, but each cached
+      // motor reading expires independently. Never keep old data alive just
+      // because five other motors are still answering.
+      for (const [id, value] of this.responses) {
+        this.lastLeaderReadTimes.set(id, sampleTime);
+        if (this.lastLeaderPositions) this.lastLeaderPositions[id - 1] = value;
+      }
+      const staleIds = MOTOR_IDS.filter(id => (
+        !this.lastLeaderReadTimes.has(id)
+        || sampleTime - this.lastLeaderReadTimes.get(id) > MAX_LEADER_SAMPLE_AGE_MS
+      ));
+      if (this.responses.size >= 5 && this.lastLeaderPositions && !staleIds.length) {
+        const positions = [...this.lastLeaderPositions];
+        this.leaderReadFault = false;
         const now = Date.now();
         this.latest.leaderPositions = positions;
         this.latest.leaderState = this.responses.size === MOTOR_IDS.length
@@ -442,13 +498,22 @@ export class So101ArmController extends EventTarget {
         this.latest.leaderHz = this.sendTimes.length;
         this.send({ type: "arm_command", seq: this.seq++, sent_unix_ms: now, positions });
       } else {
-        this.latest.leaderState = `partial read ${this.responses.size}/6`;
+        if (this.lastLeaderPositions && staleIds.length) {
+          this.latest.leaderState = `stale leader encoder ${staleIds.join(', ')}; waiting for fresh readings`;
+          // Leader input is ignored during calibration/rest returns. A stale
+          // background reader must not interrupt those independent actions.
+          if (!this.leaderReadFault && this.latest.armed && this.latest.controlMode === "leader") this.hold();
+          this.leaderReadFault = true;
+        } else {
+          this.latest.leaderState = `partial read ${this.responses.size}/6`;
+        }
       }
       this.emitStatus();
     } catch (error) {
-      await this.serialFailed(error);
+      if (current()) await this.serialFailed(error);
       return;
     }
+    if (!current()) return;
     const period = 1000 / TARGET_HZ;
     this.lastLoopMs = performance.now() - started;
     this.scheduleLoop(Math.max(0, period - this.lastLoopMs));
@@ -457,6 +522,10 @@ export class So101ArmController extends EventTarget {
   enableArm() {
     const source = this.latest.keyboardConnected ? "keyboard" : "leader";
     if (source === "leader" && !this.latest.leaderConnected) throw new Error("Connect the leader arm or enable keyboard control first");
+    if (source === "leader" && (!this.lastLeaderPositions || this.leaderReadFault || MOTOR_IDS.some(id => (
+      !this.lastLeaderReadTimes.has(id)
+      || performance.now() - this.lastLeaderReadTimes.get(id) > MAX_LEADER_SAMPLE_AGE_MS
+    )))) throw new Error("Wait for fresh readings from all six leader encoders before enabling the arm");
     if (!this.latest.serverConnected) throw new Error("Arm control server is not connected");
     if (source === "keyboard") this.sendKeyboardIntent();
     this.send({ type: "arm_enable", source });

@@ -126,7 +126,7 @@ class ArmPairProfile:
     @classmethod
     def load(cls, path: str | Path = DEFAULT_PROFILE) -> "ArmPairProfile":
         profile_path = Path(path).expanduser().resolve()
-        data = json.loads(profile_path.read_text(encoding="utf-8"))
+        data = json.loads(profile_path.read_text(encoding="utf-8-sig"))
         leader = data["leader"]
         follower = data["follower"]
         motor_names = tuple(str(v) for v in data["motor_names"])
