@@ -901,6 +901,7 @@ class FollowerController:
         self.leader_normalized: list[float] | None = None
         self.leader_enable_normalized: list[float] | None = None
         self.follower_enable_normalized: list[float] | None = None
+        self.leader_limited_joints: list[int] = []
         self.target_normalized: list[float] | None = None
         self.applied_normalized: list[float] | None = None
         self.follower_raw: list[int] = [0] * 6
@@ -1132,6 +1133,8 @@ class FollowerController:
             for index, mode in enumerate(self.profile.follower_calibration.calib_mode):
                 if mode == "LINEAR":
                     self.target_normalized[index] = max(0.0, min(100.0, self.target_normalized[index]))
+            if self.state == "armed" and self.control_source == "leader":
+                self._bound_leader_target()
             self.last_command_at = self.now()
             received_ms = int(time.time() * 1000)
             self.command_latency_ms = max(0.0, received_ms - int(message.get("sent_unix_ms", received_ms)))
@@ -1303,6 +1306,46 @@ class FollowerController:
         self.leader_wrapped_normalized = list(wrapped)
         return unwrapped
 
+    def _bound_leader_target(self) -> None:
+        calibration = self.profile.follower_calibration
+        if (
+            calibration.coordinate_system != "lerobot_urdf"
+            or self.target_normalized is None
+            or self.follower_enable_normalized is None
+        ):
+            return
+        # Relative leader control can exhaust the follower's remaining travel
+        # even while the leader is within its own limits. Clamp in raw space
+        # because shoulder-lift has an inverted internal angular convention.
+        requested_raw = calibration.normalized_to_raw_unclipped(self.target_normalized)
+        bounded_raw = list(requested_raw)
+        limited: list[int] = []
+        for index in range(5):
+            low, high = calibration.start_pos[index], calibration.end_pos[index]
+            bounded_raw[index] = max(low, min(high, requested_raw[index]))
+            if bounded_raw[index] <= low + 1e-7 or bounded_raw[index] >= high - 1e-7:
+                limited.append(index + 1)
+        bounded = calibration.raw_to_normalized(bounded_raw)
+        for index in range(5):
+            if abs(bounded_raw[index] - requested_raw[index]) > 1e-7:
+                # Discard only the unavailable travel. Reversing the leader
+                # then immediately moves away from the limit, without having
+                # to unwind an unreachable target or re-enable the whole arm.
+                self.follower_enable_normalized[index] += bounded[index] - self.target_normalized[index]
+                self.target_normalized[index] = bounded[index]
+        if limited != self.leader_limited_joints:
+            if limited:
+                joints = ", ".join(
+                    f"{self.profile.motor_names[joint - 1]} (servo {joint})" for joint in limited
+                )
+                self.status_message = (
+                    f"Follower at calibrated limit: {joints}. "
+                    "Reverse the leader joint to move away; other joints remain enabled."
+                )
+            else:
+                self.status_message = "Leader control is armed."
+        self.leader_limited_joints = limited
+
     def enable(self, source: str = "leader") -> None:
         if self.state == "fault":
             self.fault = "enable rejected: restart follower service after fault"
@@ -1315,6 +1358,7 @@ class FollowerController:
             return
         self.follower_raw = self._read_positions()
         self.follower_normalized = self.profile.follower_calibration.raw_to_normalized(self.follower_raw)
+        self.leader_limited_joints = []
         if source == "keyboard":
             if self.latest_input_source != "keyboard":
                 self._reject("keyboard data is unavailable")
@@ -1376,6 +1420,7 @@ class FollowerController:
         self.status_message = "Leader control is armed."
 
     def hold(self, reason: str) -> None:
+        self.leader_limited_joints = []
         if self.calibration_sweep_active or self.calibration_request_state == "planning":
             self.stop_calibration_sweep(reason)
         if self.rest_return_active:
@@ -2239,6 +2284,7 @@ class FollowerController:
         self._write_positions(self.follower_raw)
 
     def _clear_motion_inputs(self) -> None:
+        self.leader_limited_joints = []
         self.keyboard_linear = [0.0, 0.0, 0.0]
         self.keyboard_angular = [0.0, 0.0, 0.0]
         self.keyboard_gripper = 0.0
@@ -2308,6 +2354,7 @@ class FollowerController:
             "idle_seconds": max(0.0, self.now() - self.last_operator_activity_at),
             "leader_raw": self.leader_raw,
             "leader_normalized": self.leader_normalized,
+            "leader_limited_joints": list(self.leader_limited_joints),
             "target_normalized": self.target_normalized,
             "applied_normalized": self.applied_normalized,
             "follower_raw": self.follower_raw,
