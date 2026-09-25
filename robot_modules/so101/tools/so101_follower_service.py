@@ -1124,11 +1124,12 @@ class FollowerController:
             self.leader_normalized = self._unwrap_leader(wrapped_normalized)
             if self.leader_enable_normalized is not None and self.follower_enable_normalized is not None:
                 self.target_normalized = [
-                    follower_zero + leader_now - leader_zero
-                    for follower_zero, leader_now, leader_zero in zip(
+                    follower_zero + direction * (leader_now - leader_zero)
+                    for follower_zero, leader_now, leader_zero, direction in zip(
                         self.follower_enable_normalized,
                         self.leader_normalized,
                         self.leader_enable_normalized,
+                        self.profile.leader_joint_directions,
                         strict=True,
                     )
                 ]
@@ -2359,6 +2360,7 @@ class FollowerController:
             "leader_raw": self.leader_raw,
             "leader_normalized": self.leader_normalized,
             "leader_limited_joints": list(self.leader_limited_joints),
+            "leader_joint_directions": list(self.profile.leader_joint_directions),
             "target_normalized": self.target_normalized,
             "applied_normalized": self.applied_normalized,
             "follower_raw": self.follower_raw,
@@ -2463,6 +2465,7 @@ class FollowerController:
                 "applied_normalized": self.applied_normalized,
                 "following_error_normalized": self.following_error_normalized,
                 "leader_limited_joints": self.leader_limited_joints,
+                "leader_joint_directions": list(self.profile.leader_joint_directions),
                 "follower_coordinate_system": self.profile.follower_calibration.coordinate_system,
                 "leader_coordinate_system": self.profile.leader_calibration.coordinate_system,
                 "follower_raw_limits": list(zip(
@@ -2530,6 +2533,7 @@ def run_service(
             controller.state = "hold"
             controller.status_message = "Follower is holding its startup pose."
         print(f"SO-101 follower connected read-only: {profile.follower_port}", flush=True)
+        print(f"SO-101 leader joint directions (motors 1-6): {list(profile.leader_joint_directions)}", flush=True)
         period = 1.0 / max(1.0, hz)
         feedback_period = 1.0 / max(1.0, feedback_hz)
         next_tick = time.monotonic()

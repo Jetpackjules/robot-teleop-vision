@@ -21,6 +21,41 @@ Calibration files live in Godot `user://`. A module lists only the durable filen
 
 ## SO-101 reference workflow
 
+### Physical leader motion directions
+
+Physical leader control currently tracks changes relative to each arm's pose at
+Enable. A starting-pose difference is therefore retained. This is separate from
+a joint moving in the opposite direction: matching initial poses cannot fix a
+reversed response.
+
+An arm-pair profile may specify `"leader_joint_directions": [1, -1, -1, 1, 1, 1]`
+to reverse only shoulder lift (motor 2) and elbow flex (motor 3) during physical
+leader control. Use this only when those joints have been observed to move
+oppositely; it is not a universal SO-101 or LeRobot default. Missing settings
+keep all six directions at `+1`.
+
+With the launcher stopped, update the configured local profile from the repo root:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/set_so101_leader_directions.py --invert 2 3 --apply
+```
+
+The command prints the selected profile, makes a backup, and changes only this
+mapping. Omit `--apply` for a preview; use `--reset --apply` to restore all normal
+directions. `--profile PATH` selects an explicit arm-pair JSON instead of the
+active local configuration. Re-running the command is safe: it sets the signs,
+never toggles them. It makes no motor connection or hardware-calibration writes.
+
+Restart the complete Python launcher/follower after applying the setting. The
+startup log prints the six active directions. Test a small movement of each
+affected joint away from its limits before normal use. Direction changes apply
+to motion after Enable, preserving the initial hold, motion rate limits, travel
+limits, and stall detection. They do not change keyboard control, saved rest
+poses, or the camera/overlay calibration; a reversed wrist overlay needs its own
+visual-calibration diagnosis.
+
+### Automatic visual calibration
+
 The SO-101 module's **Calibrate Full Arm** button performs a transactional outward solve:
 
 1. Preflight fresh D455 depth, telemetry, and a modeled-clearance-safe sweep.

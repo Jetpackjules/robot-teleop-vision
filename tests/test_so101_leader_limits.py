@@ -47,8 +47,8 @@ class LimitedBus(FakeFollowerBus):
         super().write_positions(reached)
 
 
-def make_controller(tmp_path, joint, direction, *, blocked=False):
-    pair = calibrated_pair()
+def make_controller(tmp_path, joint, direction, *, blocked=False, directions=(1, 1, 1, 1, 1, 1)):
+    pair = replace(calibrated_pair(), leader_joint_directions=directions)
     limits = list(zip(pair.follower_calibration.start_pos, pair.follower_calibration.end_pos))
     start = [round((low + high) / 2) for low, high in limits]
     if not blocked:
@@ -76,13 +76,14 @@ def make_controller(tmp_path, joint, direction, *, blocked=False):
 
 @pytest.mark.parametrize("joint", range(5))
 @pytest.mark.parametrize("direction", [-1, 1])
-def test_leader_limit_keeps_other_joints_moving_and_reverses_without_dead_zone(tmp_path, joint, direction):
-    controller, bus, leader, send = make_controller(tmp_path, joint, direction)
+@pytest.mark.parametrize("directions", [(1, 1, 1, 1, 1, 1), (1, -1, -1, 1, 1, 1)])
+def test_leader_limit_keeps_other_joints_moving_and_reverses_without_dead_zone(tmp_path, joint, direction, directions):
+    controller, bus, leader, send = make_controller(tmp_path, joint, direction, directions=directions)
     other = 4 if joint == 0 else 0
     other_start = bus.positions[other]
     for step in range(1, 31):
         moved = list(leader)
-        moved[joint] += direction * 12 * step
+        moved[joint] += direction * directions[joint] * 12 * step
         moved[other] += 3 * step
         send(step, moved)
         controller.update()
@@ -99,7 +100,7 @@ def test_leader_limit_keeps_other_joints_moving_and_reverses_without_dead_zone(t
 
     # Reversing just three ticks must work even after the leader travelled
     # hundreds of ticks beyond the follower's available travel.
-    moved[joint] -= direction * 3
+    moved[joint] -= direction * directions[joint] * 3
     send(31, moved)
     controller.update()
     controller.sample()
@@ -109,11 +110,12 @@ def test_leader_limit_keeps_other_joints_moving_and_reverses_without_dead_zone(t
 
 
 @pytest.mark.parametrize("joint", [1, 2])
-def test_in_range_motor_stall_still_holds_arm(tmp_path, joint):
-    controller, bus, leader, send = make_controller(tmp_path, joint, 1, blocked=True)
+@pytest.mark.parametrize("directions", [(1, 1, 1, 1, 1, 1), (1, -1, -1, 1, 1, 1)])
+def test_in_range_motor_stall_still_holds_arm(tmp_path, joint, directions):
+    controller, bus, leader, send = make_controller(tmp_path, joint, 1, blocked=True, directions=directions)
     for step in range(1, 31):
         moved = list(leader)
-        moved[joint] += 12 * step
+        moved[joint] += directions[joint] * 12 * step
         send(step, moved)
         controller.update()
         controller.sample()

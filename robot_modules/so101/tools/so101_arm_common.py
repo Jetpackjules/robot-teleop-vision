@@ -122,6 +122,9 @@ class ArmPairProfile:
     start_pose_tolerance: tuple[float, ...]
     max_step: tuple[float, ...]
     editor_status_port: int = 4252
+    # Per-pair signs for relative physical-leader motion, not motor firmware
+    # or the follower's calibrated model/overlay coordinate system.
+    leader_joint_directions: tuple[int, ...] = (1, 1, 1, 1, 1, 1)
 
     @classmethod
     def load(cls, path: str | Path = DEFAULT_PROFILE) -> "ArmPairProfile":
@@ -134,6 +137,10 @@ class ArmPairProfile:
         max_step = tuple(float(v) for v in data["max_step"])
         if len(motor_names) != MOTOR_COUNT or len(tolerances) != MOTOR_COUNT or len(max_step) != MOTOR_COUNT:
             raise ValueError("SO-101 profile arrays must contain six values")
+        directions = data.get("leader_joint_directions", [1] * MOTOR_COUNT)
+        if (not isinstance(directions, list) or len(directions) != MOTOR_COUNT
+                or any(type(value) is not int or value not in (-1, 1) for value in directions)):
+            raise ValueError("leader_joint_directions must contain six integers, each +1 or -1")
         return cls(
             path=profile_path,
             leader_serial=str(leader["serial"]),
@@ -150,6 +157,7 @@ class ArmPairProfile:
             start_pose_tolerance=tolerances,
             max_step=max_step,
             editor_status_port=int(data.get("editor_status_port", 4252)),
+            leader_joint_directions=tuple(directions),
         )
 
     def map_leader_to_follower(self, leader_raw: list[int]) -> tuple[list[float], list[int]]:
