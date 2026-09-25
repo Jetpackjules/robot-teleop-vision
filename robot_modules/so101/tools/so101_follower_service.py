@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import signal
 import socket
 import sys
 import time
+import traceback
 from collections import deque
 from pathlib import Path
 from typing import Protocol
@@ -884,10 +886,12 @@ class FollowerController:
         bus: FollowerBus,
         now=time.monotonic,
         rest_pose_path: Path | None = None,
+        fault_report_path: Path | None = None,
     ):
         self.profile = profile
         self.bus = bus
         self.now = now
+        self.fault_report_path = fault_report_path
         self.state = "disconnected"
         self.fault = ""
         self.status_message = "Follower service is starting."
@@ -2390,13 +2394,19 @@ class FollowerController:
         }
 
     def fail(self, message: str) -> None:
+        # Retain the first failure until recovery; later errors while already
+        # faulted must not erase the pose/exception that actually stopped motion.
+        new_fault = self.state != "fault"
+        state_before_fault = self.state
+        torque_before_fault = self.torque_enabled
+        torque_disable_error = ""
         if self.calibration_request_state in ("planning", "running"):
             self.calibration_request_state = "fault"
         try:
             if self.bus.connected:
                 self.bus.disable_torque()
-        except Exception:
-            pass
+        except Exception as exc:
+            torque_disable_error = str(exc)
         self.torque_enabled = False
         self.gripper_torque_enabled = False
         self.state = "fault"
@@ -2407,6 +2417,68 @@ class FollowerController:
         self.calibration_pose_settled = False
         self.rest_return_active = False
         self.rest_return_waypoints = []
+        if new_fault:
+            self._record_fault(message, state_before_fault, torque_before_fault, torque_disable_error)
+
+    def _record_fault(
+        self, message: str, state_before_fault: str, torque_before_fault: bool,
+        torque_disable_error: str,
+    ) -> None:
+        # Run only after the existing torque shutdown. Neither broken console
+        # pipes nor a read-only diagnostics directory may interrupt the stop.
+        def log(line: str) -> None:
+            try:
+                print(line, file=sys.stderr, flush=True)
+            except (OSError, ValueError):
+                pass
+
+        log(f"SO-101 follower fault: {message}")
+        if torque_disable_error:
+            log(f"SO-101 torque-disable error: {torque_disable_error}")
+        if self.fault_report_path is None:
+            return
+        temporary = self.fault_report_path.with_suffix(f".{os.getpid()}.tmp")
+        try:
+            trace = traceback.format_exc()
+            # Avoid status(), which performs forward kinematics and may itself
+            # be the failing operation. Preserve the last raw/control values.
+            report = {
+                "type": "so101_follower_fault", "version": 1,
+                "time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "process_id": os.getpid(), "parent_process_id": os.getppid(),
+                "python_executable": sys.executable,
+                "profile_path": str(self.profile.path),
+                "error": message,
+                "traceback": "" if trace.strip() == "NoneType: None" else trace,
+                "state_before_fault": state_before_fault,
+                "torque_enabled_before_fault": torque_before_fault,
+                "torque_disable_error": torque_disable_error,
+                "control_source": self.control_source,
+                "last_seq": self.last_seq,
+                "leader_raw": self.leader_raw,
+                "leader_normalized": self.leader_normalized,
+                "follower_raw": self.follower_raw,
+                "follower_normalized": self.follower_normalized,
+                "target_normalized": self.target_normalized,
+                "applied_normalized": self.applied_normalized,
+                "following_error_normalized": self.following_error_normalized,
+                "leader_limited_joints": self.leader_limited_joints,
+                "follower_coordinate_system": self.profile.follower_calibration.coordinate_system,
+                "leader_coordinate_system": self.profile.leader_calibration.coordinate_system,
+                "follower_raw_limits": list(zip(
+                    self.profile.follower_calibration.start_pos, self.profile.follower_calibration.end_pos,
+                )),
+            }
+            self.fault_report_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+            temporary.replace(self.fault_report_path)
+            log(f"SO-101 fault report saved: {self.fault_report_path}")
+        except Exception as exc:
+            log(f"SO-101 fault report could not be saved: {exc}")
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _reject(self, reason: str) -> None:
         self.state = "ready" if self.bus.connected else "disconnected"
@@ -2425,7 +2497,10 @@ def run_service(
     feedback_hz: float,
     hold_on_connect: bool = False,
 ) -> int:
-    controller = FollowerController(profile, bus)
+    controller = FollowerController(
+        profile, bus,
+        fault_report_path=Path(__file__).resolve().parents[3] / ".teleop/so101_follower_fault.json",
+    )
     command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     command_socket.bind(("127.0.0.1", command_port))
     command_socket.setblocking(False)
@@ -2536,6 +2611,9 @@ def run_service(
                 time.sleep(delay)
             else:
                 next_tick = time.monotonic()
+    except Exception as exc:
+        controller.fail(f"Follower service exiting: {exc}")
+        raise
     finally:
         try:
             bus.close(disable_torque=True)
