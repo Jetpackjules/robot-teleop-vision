@@ -26,10 +26,13 @@ def set_directions(profile_path: Path, invert: list[int], *, apply: bool = False
     payload = json.loads(original)
     current = ArmPairProfile.load(profile_path)
     directions = [-1 if joint in invert else 1 for joint in range(1, 7)]
+    fingerprint = current.direction_calibration_fingerprint()
     result = {"profile": str(profile_path), "directions": directions, "changed": False, "backup": None}
-    if not apply or list(current.leader_joint_directions) == directions:
+    if not apply or (list(current.leader_joint_directions) == directions
+                     and current.leader_directions_calibration_fingerprint == fingerprint):
         return result
     payload["leader_joint_directions"] = directions
+    payload["leader_directions_calibration_fingerprint"] = fingerprint
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=profile_path.parent,

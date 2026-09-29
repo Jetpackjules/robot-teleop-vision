@@ -28,8 +28,8 @@ Enable. A starting-pose difference is therefore retained. This is separate from
 a joint moving in the opposite direction: matching initial poses cannot fix a
 reversed response.
 
-An arm-pair profile may specify `"leader_joint_directions": [1, -1, -1, 1, 1, 1]`
-to reverse only shoulder lift (motor 2) and elbow flex (motor 3) during physical
+An arm-pair profile may specify `"leader_joint_directions": [1, -1, 1, 1, 1, 1]`
+to reverse only shoulder lift (motor 2) during physical
 leader control. Use this only when those joints have been observed to move
 oppositely; it is not a universal SO-101 or LeRobot default. Missing settings
 keep all six directions at `+1`.
@@ -37,7 +37,7 @@ keep all six directions at `+1`.
 With the launcher stopped, update the configured local profile from the repo root:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/set_so101_leader_directions.py --invert 2 3 --apply
+.\.venv\Scripts\python.exe scripts/set_so101_leader_directions.py --invert 2 --apply
 ```
 
 The command prints the selected profile, makes a backup, and changes only this
@@ -45,6 +45,16 @@ mapping. Omit `--apply` for a preview; use `--reset --apply` to restore all norm
 directions. `--profile PATH` selects an explicit arm-pair JSON instead of the
 active local configuration. Re-running the command is safe: it sets the signs,
 never toggles them. It makes no motor connection or hardware-calibration writes.
+
+Use only IDs whose reversed response you have observed; the example is not a
+default for every SO-101. Mixed `legacy` leader and `lerobot_urdf` follower
+conventions can themselves reverse shoulder lift, without any inverted motor
+mounting. The launcher and Web UI Setup now show the active profile, conventions
+and direction settings, and flag mixed conventions. Existing mappings are
+preserved: changing conventions and keeping a compensating inversion can reverse
+the joint a second time. The direction helper records the calibration context;
+subsequent arm/calibration changes produce a setup warning until directions are
+checked and saved again. Older profiles remain supported without rewriting them.
 
 Restart the complete Python launcher/follower after applying the setting. The
 startup log prints the six active directions. Test a small movement of each
@@ -158,18 +168,29 @@ required; do not bypass these checks to obtain a saved overlay.
   unregistered world position does not affect this check. Encoder-range and
   modeled-clearance checks still apply; a physically familiar rest pose does
   not imply a matching saved rest-pose file exists.
-- **Return to Rest** uses a separate per-arm encoder pose. Save six previously
+- **Return to Rest** uses a separate per-arm encoder pose. Place the arm in the
+  desired rest pose and stop motion with Hold, then choose **Save Current Pose
+  as Rest** in Godot's Robot Module inspector or Web UI Setup. The follower reads
+  fresh encoders and saves without motor writes or changing torque. Saving is
+  refused during motion/calibration, on read failures, changed hardware limits,
+  or invalid modeled clearance; the previous file is preserved. Both interfaces
+  acknowledge the save or display a rejection/timeout. An older follower service
+  must be updated and restarted before this action is available.
+  Alternatively, save six previously
   observed, operator-confirmed raw encoder readings with
   `.venv\Scripts\python.exe scripts/save_so101_rest_pose.py --raw R1 R2 R3 R4 R5 R6 --apply`.
   Replace each `R` value with that arm's reading; there is no universal raw pose.
   This file-only command validates the corrected profile, ranges and stock mesh
   floor clearance, then backs up and saves `so101_rest_pose.json` beside the
   configured arm profile. It does not connect to motors or change cameras or
-  visual registration. The updated follower reloads the file on the next Return
+  visual registration. Web UI reports missing/invalid rest poses before Return
+  can be pressed and detects a CLI save within two seconds while stopped.
+  The updated follower reloads the file on the next Return
   to Rest request, rejects a changed arm/calibration, and checks live hardware
   limits and the complete planned route before enabling motion. Restart the
   launcher once after updating its Python code; support the arm before shutdown
-  releases torque. Godot can stay open for this Python-only update.
+  releases torque. Reload updated Godot scripts and refresh the Web UI for the
+  new save controls; existing saved poses remain usable.
   Rest-return floor checks use unsimplified mesh support vertices at measured
   joint angles, avoiding empty bounding-box corners near the claw. Other
   calibration/teleoperation clearance checks remain unchanged. The check models

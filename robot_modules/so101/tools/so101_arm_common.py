@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +126,7 @@ class ArmPairProfile:
     # Per-pair signs for relative physical-leader motion, not motor firmware
     # or the follower's calibrated model/overlay coordinate system.
     leader_joint_directions: tuple[int, ...] = (1, 1, 1, 1, 1, 1)
+    leader_directions_calibration_fingerprint: str = ""
 
     @classmethod
     def load(cls, path: str | Path = DEFAULT_PROFILE) -> "ArmPairProfile":
@@ -158,7 +160,34 @@ class ArmPairProfile:
             max_step=max_step,
             editor_status_port=int(data.get("editor_status_port", 4252)),
             leader_joint_directions=tuple(directions),
+            leader_directions_calibration_fingerprint=str(data.get("leader_directions_calibration_fingerprint", "")),
         )
+
+    def direction_calibration_fingerprint(self) -> str:
+        """Identify the calibration context in which directions were set."""
+        context = {
+            "leader": [self.leader_serial, asdict(self.leader_calibration)],
+            "follower": [self.follower_serial, asdict(self.follower_calibration)],
+            "motors": self.motor_names,
+        }
+        return hashlib.sha256(json.dumps(context, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def setup_warnings(self) -> list[str]:
+        warnings = []
+        if self.leader_calibration.coordinate_system != self.follower_calibration.coordinate_system:
+            warnings.append(
+                "Leader and follower use different coordinate conventions "
+                f"({self.leader_calibration.coordinate_system} / {self.follower_calibration.coordinate_system}). "
+                "This can reverse shoulder-lift motion. Existing direction settings are retained; "
+                "check physical joint directions after changing either calibration."
+            )
+        fingerprint = self.leader_directions_calibration_fingerprint
+        if fingerprint and fingerprint != self.direction_calibration_fingerprint():
+            warnings.append(
+                "The arm identity or calibration changed after leader directions were saved. "
+                "Recheck physical joint directions before enabling leader control."
+            )
+        return warnings
 
     def map_leader_to_follower(self, leader_raw: list[int]) -> tuple[list[float], list[int]]:
         normalized = self.leader_calibration.raw_to_normalized(leader_raw)
@@ -310,6 +339,12 @@ def validate_browser_arm_message(data: Any, *, now_ms: int | None = None) -> dic
             "enabled": enabled,
             "timeout_seconds": float(timeout_seconds),
         }
+    if kind == "arm_save_rest_pose":
+        request_id = data.get("rest_save_request_id")
+        if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+            raise ArmProtocolError("rest_save_request_id must contain 1 to 128 characters")
+        # The follower reads its own encoders; browser positions/paths are never used.
+        return {"type": kind, "rest_save_request_id": request_id}
     if kind in (
         "arm_hold",
         "arm_release_torque",

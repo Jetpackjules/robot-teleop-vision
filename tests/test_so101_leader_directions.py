@@ -130,12 +130,29 @@ def test_file_only_update_preserves_calibrations_connections_and_bom_backup(tmp_
     assert result["changed"] is True
     assert Path(result["backup"]).read_bytes() == original
     payload["leader_joint_directions"] = DIRECTIONS
+    payload["leader_directions_calibration_fingerprint"] = ArmPairProfile.load(path).direction_calibration_fingerprint()
     assert json.loads(path.read_text(encoding="utf-8")) == payload
     assert ArmPairProfile.load(path).leader_joint_directions == tuple(DIRECTIONS)
     assert set_directions(path, [2, 3], apply=True)["changed"] is False
     assert len(list(tmp_path.glob("*.bak"))) == 1  # Re-running never toggles the signs.
     assert set_directions(path, [], apply=True)["changed"] is True
     assert ArmPairProfile.load(path).leader_joint_directions == (1,) * 6
+
+
+def test_direction_context_warns_after_calibration_change_without_rewriting_override(tmp_path):
+    path = write_profile(tmp_path, [1] * 6)
+    set_directions(path, [2], apply=True)
+    assert ArmPairProfile.load(path).setup_warnings() == []
+    payload = json.loads(path.read_text())
+    payload["leader"]["calibration"]["coordinate_system"] = "legacy"
+    path.write_text(json.dumps(payload))
+    pair = ArmPairProfile.load(path)
+    assert pair.leader_joint_directions == (1, -1, 1, 1, 1, 1)
+    warnings = pair.setup_warnings()
+    assert any("different coordinate conventions" in warning for warning in warnings)
+    assert any("changed after leader directions" in warning for warning in warnings)
+    set_directions(path, [2], apply=True)
+    assert len(ArmPairProfile.load(path).setup_warnings()) == 1  # Mixed conventions still visible.
 
 
 def test_direction_command_uses_active_config_profile(tmp_path):

@@ -77,9 +77,13 @@ const SETTINGS_MARKUP = `
   <button id="so101-enable" class="primary" type="button" disabled>Enable Arm</button>
   <button id="so101-hold" class="hold" type="button">Hold Arm</button>
   <button id="so101-return-rest" type="button">Return Arm to Rest Pose</button>
+  <p id="so101-rest-status" class="helper-text" role="status"></p>
 `;
 
 const SETUP_MARKUP = `
+  <button id="so101-save-rest" type="button">Save Current Pose as Rest</button>
+  <p class="helper-text">Place the arm in your chosen rest pose, press Hold, then save. This records the physical pose without moving the arm.</p>
+  <p id="so101-setup-warnings" class="helper-text" role="status"></p>
   <label class="toggle-row" title="Opt-in: modeled checks cannot detect a person or loose object in the path."><span>Auto-return to rest after 10 min</span><input id="so101-idle-return-enabled" type="checkbox"></label>
   <button id="so101-restart" type="button">Reconnect Arm Hardware</button>
   <details class="advanced-disclosure">
@@ -258,8 +262,21 @@ class So101WebModule {
     element("so101-restart").disabled = !arm.serverConnected || arm.restartRequested;
     element("so101-restart").textContent = arm.restartRequested ? "Reconnecting Arm…" : "Reconnect Arm Hardware";
     const returningRest = status.rest_return_active === true;
-    element("so101-return-rest").disabled = !arm.serverConnected || !arm.followerConnected || returningRest || ["fault", "restarting", "calibrating"].includes(arm.state);
+    element("so101-return-rest").disabled = !arm.serverConnected || !arm.followerConnected || status.rest_pose_available === false || returningRest || ["fault", "restarting", "calibrating", "unresponsive"].includes(arm.state);
     element("so101-return-rest").textContent = returningRest ? `Returning to Rest ${Math.round(Number(status.rest_return_progress || 0) * 100)}%` : "Return Arm to Rest Pose";
+    const pendingSave = window.so101ArmController?.restSaveRequestId;
+    const waitingSave = pendingSave && status.rest_save_request_id !== pendingSave && Date.now() < window.so101ArmController.restSavePendingUntil;
+    element("so101-save-rest").disabled = !arm.serverConnected || !arm.followerConnected || status.rest_pose_save_supported !== true || returningRest || waitingSave || !["ready", "hold"].includes(arm.state);
+    const saveMessage = pendingSave && status.rest_save_request_id === pendingSave ? status.rest_save_message : "";
+    element("so101-rest-status").textContent = saveMessage || window.so101ArmController?.restSaveError || (waitingSave
+      ? "Saving current pose; waiting for the follower response." : status.rest_pose_available === false
+      ? `Rest pose unavailable. Use Save Current Pose as Rest in Setup. ${status.rest_pose_fault || ""}`
+      : status.rest_pose_available === true ? "Rest pose saved for this arm." : "Waiting for rest-pose status.");
+    const warnings = Array.isArray(status.setup_warnings) ? status.setup_warnings : [];
+    element("so101-setup-warnings").textContent = [
+      ...warnings,
+      ...(arm.followerConnected && status.rest_pose_save_supported !== true ? ["Restart the updated Python launcher to save a rest pose here."] : []),
+    ].join("\n");
     const writing = status.state === "armed" || status.state === "calibrating";
     const lastWrite = writing ? (status.last_write_age_ms == null ? "--" : `${Math.round(status.last_write_age_ms)}ms ago`) : `${status.state || "idle"} (motion writes paused)`;
     element("so101-health").textContent = [
@@ -269,6 +286,9 @@ class So101WebModule {
       `Last write ${lastWrite} | safety stops ${status.following_error_trip_count || 0} | restart #${status.restart_count || 0}`,
       `Status ${status.message || "--"}`,
       `Fault ${arm.fault || "none"}`,
+      `Profile ${status.profile_path || "--"}`,
+      `Coordinates: leader ${status.leader_coordinate_system || "--"} / follower ${status.follower_coordinate_system || "--"}`,
+      `Leader directions (motors 1–6): ${(status.leader_joint_directions || []).join(", ") || "--"}`,
     ].join("\n");
     const capturing = calibration.state === "capturing";
     const solving = calibration.state === "solving";
@@ -313,6 +333,10 @@ class So101WebModule {
     });
     element("so101-enable").addEventListener("click", () => { try { window.so101ArmController.enableArm(); } catch (error) { this.reportError(error); } });
     element("so101-hold").addEventListener("click", () => window.so101ArmController?.hold());
+    element("so101-save-rest").addEventListener("click", () => {
+      if (!window.confirm("Save the arm's current physical pose as its rest pose? Any previous saved rest pose will be backed up.")) return;
+      try { window.so101ArmController.saveCurrentRestPose(); } catch (error) { this.reportError(error); }
+    });
     element("so101-return-rest").addEventListener("click", () => {
       if (!window.confirm("Return the physical arm to its saved rest pose now?\n\nClear the workspace and stay ready to press Hold Arm or remove power.")) return;
       try { window.so101ArmController.returnToRest(); } catch (error) { this.reportError(error); }

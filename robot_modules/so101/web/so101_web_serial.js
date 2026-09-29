@@ -550,6 +550,25 @@ export class So101ArmController extends EventTarget {
     this.emitStatus();
   }
 
+  saveCurrentRestPose() {
+    if (!this.latest.serverConnected) throw new Error("Arm control server is not connected");
+    if (this.latest.status?.rest_pose_save_supported !== true) throw new Error("Restart the updated Python launcher before saving a rest pose here");
+    if (!["ready", "hold"].includes(this.latest.state)) throw new Error("Press Hold before saving a rest pose");
+    const requestId = crypto.randomUUID();
+    if (!this.send({ type: "arm_save_rest_pose", rest_save_request_id: requestId })) {
+      throw new Error("Could not send save-rest-pose request");
+    }
+    this.restSaveRequestId = requestId;
+    this.restSavePendingUntil = Date.now() + 3000;
+    this.restSaveError = "";
+    this.emitStatus();
+    window.setTimeout(() => {
+      if (this.restSaveRequestId !== requestId || this.latest.status?.rest_save_request_id === requestId) return;
+      this.restSaveError = "No save-rest-pose response. Check the follower terminal; the request was not resent.";
+      this.emitStatus();
+    }, 3000);
+  }
+
   setIdleReturn(enabled, timeoutSeconds = 600) {
     this.idleReturnEnabled = enabled === true;
     this.idleReturnTimeoutSeconds = timeoutSeconds;

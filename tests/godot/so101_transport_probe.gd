@@ -283,6 +283,27 @@ func _run() -> void:
 	check(not clear_probe.get_calibration_status().has("rest_return"), "new calibration clears old rest action report")
 	check(not clear_probe.return_arm_to_rest_pose(), "rest does not interrupt in-flight calibration")
 	clear_probe._state = "idle"
+	registration.follower_status = status()
+	check(not clear_probe.save_current_arm_rest_pose(), "old follower cannot silently ignore rest save")
+	registration.follower_status.rest_pose_save_supported = true
+	registration.follower_status.state = "armed"
+	check(not clear_probe.save_current_arm_rest_pose(), "rest save requires stopped follower")
+	registration.follower_status.state = "hold"
+	while rest_receiver.get_available_packet_count() > 0:
+		rest_receiver.get_packet()
+	check(robot_module.save_current_rest_pose(), "module save action reaches calibrator")
+	check(clear_probe.save_current_arm_rest_pose(), "duplicate save press waits for outcome")
+	await create_timer(0.05).timeout
+	check(rest_receiver.get_available_packet_count() == 1, "save request never automatically repeated")
+	var save_command: Dictionary = JSON.parse_string(rest_receiver.get_packet().get_string_from_utf8())
+	check(save_command.type == "arm_save_rest_pose" and not str(save_command.rest_save_request_id).is_empty(), "save action has unique acknowledgement ID")
+	registration.follower_status.rest_save_request_id = "previous-save"
+	registration.follower_status.rest_save_message = "previous result"
+	check("waiting for" in clear_probe.get_calibration_status().rest_return.message, "old save acknowledgement ignored")
+	registration.follower_status.rest_save_request_id = save_command.rest_save_request_id
+	registration.follower_status.rest_save_message = "Current physical pose saved as rest."
+	check("saved as rest" in clear_probe.get_calibration_status().rest_return.message, "save acknowledgement reaches inspector")
+	check(not clear_probe._rest_return_tracking, "save completion ends tracking")
 	clear_probe._arm_command_udp.close()
 	rest_receiver.close()
 	clear_probe._automation_active = true

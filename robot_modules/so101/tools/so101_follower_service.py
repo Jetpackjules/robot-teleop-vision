@@ -27,7 +27,7 @@ from so101_kinematics import (
     tool_rate_step,
     wrist_frame_twist,
 )
-from so101_rest_pose import load_rest_pose
+from so101_rest_pose import load_rest_pose, save_rest_pose
 
 CALIBRATION_BROAD_SEGMENT_SECONDS = 2.40
 CALIBRATION_SAMPLE_DWELL_SECONDS = 0.60
@@ -959,6 +959,11 @@ class FollowerController:
         self.rest_pose: dict | None = None
         self.rest_pose_path = rest_pose_path
         self.rest_pose_fault = ""
+        self.rest_save_request_id = ""
+        self.rest_save_state = "idle"
+        self.rest_save_message = ""
+        self._seen_rest_save_request_ids: set[str] = set()
+        self._next_rest_pose_refresh_at = 0.0
         try:
             self.rest_pose = load_rest_pose(profile, rest_pose_path)
         except Exception as exc:
@@ -1009,6 +1014,18 @@ class FollowerController:
 
     def receive(self, message: dict) -> None:
         kind = message.get("type")
+        if kind == "arm_save_rest_pose":
+            request_id = message.get("rest_save_request_id")
+            if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+                return
+            if request_id in self._seen_rest_save_request_ids:
+                return
+            self._seen_rest_save_request_ids.add(request_id)
+            self.rest_save_request_id = request_id
+            self.last_operator_activity_at = self.now()
+            self.idle_return_attempted = False
+            self.save_current_rest_pose()
+            return
         if kind == "arm_restart":
             self.last_operator_activity_at = self.now()
             self.restart_hardware()
@@ -1716,15 +1733,43 @@ class FollowerController:
             self.fault = ""
         self.status_message = reason
 
-    def start_rest_return(self, reason: str = "operator") -> None:
-        if self.rest_return_active:
-            return  # A repeated button press must not replace an active route.
+    def refresh_rest_pose(self) -> None:
         try:
             self.rest_pose = load_rest_pose(self.profile, self.rest_pose_path)
             self.rest_pose_fault = ""
         except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
             self.rest_pose = None
             self.rest_pose_fault = str(exc)
+
+    def save_current_rest_pose(self) -> None:
+        """Read the physical pose and persist it; never write motors or enable torque."""
+        self.rest_save_state = "rejected"
+        try:
+            if not self.bus.connected:
+                raise RuntimeError("connect the follower first")
+            if self.state not in ("ready", "hold") or self.calibration_sweep_active or self.rest_return_active:
+                raise RuntimeError("stop motion with Hold before saving a rest pose")
+            calibration = self.profile.follower_calibration
+            if self.bus.read_position_limits() != list(zip(calibration.start_pos, calibration.end_pos, strict=True)):
+                raise RuntimeError("hardware motor limits changed since this profile was calibrated")
+            # Read again now, even if the last published status looked fresh.
+            raw = self._read_positions()
+            result = save_rest_pose(self.profile, raw, apply=True, path=self.rest_pose_path)
+            self.refresh_rest_pose()
+            if self.rest_pose is None:
+                raise RuntimeError(self.rest_pose_fault)
+            self.rest_save_state = "saved"
+            self.rest_save_message = "Current physical pose saved as rest. Return to Rest is ready."
+            if result["backup"]:
+                self.rest_save_message += " Previous rest pose backed up."
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+            self.rest_save_message = f"Rest pose was not saved: {exc}"
+        self.status_message = self.rest_save_message
+
+    def start_rest_return(self, reason: str = "operator") -> None:
+        if self.rest_return_active:
+            return  # A repeated button press must not replace an active route.
+        self.refresh_rest_pose()
         if self.rest_pose is None:
             self.status_message = f"Return to rest unavailable: {self.rest_pose_fault or 'no rest pose is saved'}."
             return
@@ -2312,6 +2357,10 @@ class FollowerController:
         return len(times)
 
     def status(self) -> dict:
+        # Notice CLI saves/deletions without a restart, but never replace an active route.
+        if self.state in ("ready", "hold") and not self.rest_return_active and self.now() >= self._next_rest_pose_refresh_at:
+            self.refresh_rest_pose()
+            self._next_rest_pose_refresh_at = self.now() + 2.0
         elapsed = max(0.001, self.now() - self.started_at)
         age_ms = None if self.last_command_at == 0 else max(0.0, (self.now() - self.last_command_at) * 1000.0)
         last_write_age_ms = None if self.last_successful_write_at == 0 else max(0.0, (self.now() - self.last_successful_write_at) * 1000.0)
@@ -2350,6 +2399,10 @@ class FollowerController:
             "calibration_request_expires_unix_ms": self.calibration_request_expires_unix_ms,
             "rest_pose_available": self.rest_pose is not None,
             "rest_pose_fault": self.rest_pose_fault,
+            "rest_pose_save_supported": True,
+            "rest_save_request_id": self.rest_save_request_id,
+            "rest_save_state": self.rest_save_state,
+            "rest_save_message": self.rest_save_message,
             "rest_return_active": self.rest_return_active,
             "rest_return_progress": self.rest_return_progress,
             "rest_return_reason": self.rest_return_reason,
@@ -2361,6 +2414,10 @@ class FollowerController:
             "leader_normalized": self.leader_normalized,
             "leader_limited_joints": list(self.leader_limited_joints),
             "leader_joint_directions": list(self.profile.leader_joint_directions),
+            "profile_path": str(self.profile.path),
+            "leader_coordinate_system": self.profile.leader_calibration.coordinate_system,
+            "follower_coordinate_system": self.profile.follower_calibration.coordinate_system,
+            "setup_warnings": self.profile.setup_warnings(),
             "target_normalized": self.target_normalized,
             "applied_normalized": self.applied_normalized,
             "follower_raw": self.follower_raw,
@@ -2534,6 +2591,12 @@ def run_service(
             controller.status_message = "Follower is holding its startup pose."
         print(f"SO-101 follower connected read-only: {profile.follower_port}", flush=True)
         print(f"SO-101 leader joint directions (motors 1-6): {list(profile.leader_joint_directions)}", flush=True)
+        # Keep redirected Windows consoles with legacy encodings usable too.
+        print(f"SO-101 active profile: {ascii(profile.path.as_posix())}", flush=True)
+        for warning in profile.setup_warnings():
+            print(f"SO-101 setup: {warning}", flush=True)
+        if controller.rest_pose is None:
+            print(f"SO-101 rest setup: {ascii(controller.rest_pose_fault)}", flush=True)
         period = 1.0 / max(1.0, hz)
         feedback_period = 1.0 / max(1.0, feedback_hz)
         next_tick = time.monotonic()

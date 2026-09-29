@@ -136,6 +136,13 @@ func return_to_rest() -> bool:
 	)
 
 
+func save_current_rest_pose() -> bool:
+	return bool(
+		_hardware_enabled and is_instance_valid(_calibrator)
+		and _calibrator.call("save_current_arm_rest_pose")
+	)
+
+
 func clear_calibration() -> void:
 	if is_instance_valid(_calibrator):
 		_calibrator.call("clear_arm_position_calibration")

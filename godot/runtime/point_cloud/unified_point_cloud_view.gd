@@ -220,6 +220,7 @@ const DORMANT_OAKD_PROPERTIES := [
 @export_tool_button("Refine Robot Calibration") var refine_robot_joint_alignment_action: Callable = _start_robot_joint_refinement
 ## Sends the selected module's guarded rest request, when supported.
 @export_tool_button("Return Robot to Rest Pose") var return_robot_to_rest_action: Callable = _return_robot_to_rest_pose
+@export_tool_button("Save Current Pose as Rest") var save_robot_rest_action: Callable = _save_current_robot_rest_pose
 ## Saves the current calibrated position as an explicit user checkpoint. This checkpoint never constrains a new calibration.
 @export_tool_button("Save Robot Position Calibration") var save_robot_position_action: Callable = _save_robot_position_checkpoint
 ## Replaces the current robot position with the checkpoint most recently saved above.
@@ -943,6 +944,17 @@ func _return_robot_to_rest_pose() -> void:
 		robot_position_calibration_status = "Could not send the return-to-rest request."
 	else:
 		robot_position_calibration_status = "Return-to-rest requested; Hold can interrupt it."
+	_update_robot_position_calibration_status()
+	if Engine.is_editor_hint():
+		notify_property_list_changed()
+
+
+func _save_current_robot_rest_pose() -> void:
+	var module := _active_robot_module()
+	if module == null or not module.has_method("save_current_rest_pose"):
+		robot_position_calibration_status = "The selected robot cannot save a rest pose."
+		return
+	module.call("save_current_rest_pose")
 	_update_robot_position_calibration_status()
 	if Engine.is_editor_hint():
 		notify_property_list_changed()

@@ -65,11 +65,12 @@ def load_rest_pose(profile: ArmPairProfile, path: Path | None = None) -> dict:
         if not path.exists() and DEFAULT_REST_POSE.exists():
             path = DEFAULT_REST_POSE  # Existing installations retain their saved pose.
     if not path.exists():
-        raise RuntimeError(f"no rest pose is saved at {path}; use scripts/save_so101_rest_pose.py")
+        raise RuntimeError(f"no rest pose is saved at {path}; use Save Current Pose as Rest or scripts/save_so101_rest_pose.py")
     return validate_rest_pose(profile, json.loads(path.read_text(encoding="utf-8-sig")))
 
 
-def save_rest_pose(profile: ArmPairProfile, raw: list[int], *, apply: bool = False) -> dict:
+def save_rest_pose(profile: ArmPairProfile, raw: list[int], *, apply: bool = False,
+                   path: Path | None = None) -> dict:
     if profile.follower_calibration.coordinate_system != "lerobot_urdf":
         raise ValueError("Repair the follower coordinate convention before saving a new encoder rest pose")
     payload = {
@@ -91,7 +92,7 @@ def save_rest_pose(profile: ArmPairProfile, raw: list[int], *, apply: bool = Fal
     height = rest_mesh_minimum_height(payload["normalized_positions"])
     if height < -0.002:
         raise ValueError(f"Rest mesh is below the modeled base plane ({height * 1000:.1f} mm)")
-    path = rest_pose_path(profile)
+    path = path if path is not None else rest_pose_path(profile)
     result = {"path": str(path), "height_m": height, "saved": False, "backup": None}
     if not apply:
         return result

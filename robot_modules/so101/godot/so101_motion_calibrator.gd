@@ -175,6 +175,7 @@ var _rest_return_request_id := ""
 var _rest_return_requested_msec := 0
 var _rest_return_tracking := false
 var _rest_return_acknowledged := false
+var _rest_action_saves_pose := false
 var _preflight_sequences: Dictionary = {}
 var _preflight_ready_samples := 0
 var _next_preflight_msec := 0
@@ -840,35 +841,52 @@ func _connect_arm_command_peer() -> Error:
 
 
 func return_arm_to_rest_pose() -> bool:
+	return _request_rest_action(false)
+
+
+func save_current_arm_rest_pose() -> bool:
+	return _request_rest_action(true)
+
+
+func _request_rest_action(save_pose: bool) -> bool:
 	if _rest_return_tracking:
-		return true # Do not resend a motion command while awaiting its outcome.
+		return save_pose == _rest_action_saves_pose # Wait for the same action; never resend it.
+	var action := "Save rest pose" if save_pose else "Return to rest"
 	if _automation_active or _state in ["capturing", "solving"]:
-		_rest_return_status = {"message": "Return to rest is unavailable while calibration is running."}
+		_rest_return_status = {"message": action + " is unavailable while calibration is running."}
 		return false
 	var overlay := get_node_or_null(OVERLAY_PATH)
 	if overlay == null or not overlay.has_method("get_latest_status"):
-		_rest_return_status = {"message": "Return to rest needs connected follower telemetry."}
+		_rest_return_status = {"message": action + " needs connected follower telemetry."}
 		return false
 	var follower: Dictionary = overlay.call("get_latest_status")
 	var error_message := _follower_telemetry_error(overlay, follower)
 	var age_msec := Time.get_unix_time_from_system() * 1000.0 - float(follower.get("sent_unix_ms", 0.0))
 	if not error_message.is_empty() or age_msec < -1000.0 or age_msec > 1000.0:
-		_rest_return_status = {"message": error_message if not error_message.is_empty() else "Return to rest needs fresh follower telemetry. Check that robot-teleop is running."}
+		_rest_return_status = {"message": error_message if not error_message.is_empty() else action + " needs fresh follower telemetry. Check that robot-teleop is running."}
+		return false
+	if save_pose and not bool(follower.get("rest_pose_save_supported", false)):
+		_rest_return_status = {"message": "Restart the updated Python launcher to use Save Current Pose as Rest."}
+		return false
+	if save_pose and str(follower.get("state", "")) not in ["ready", "hold"]:
+		_rest_return_status = {"message": "Stop motion with Hold before saving a rest pose."}
 		return false
 	if not _arm_command_udp.is_socket_connected():
 		if _connect_arm_command_peer() != OK:
 			_rest_return_status = {"message": "Could not connect to the configured follower command port."}
 			return false
 	_rest_return_request_id = Crypto.new().generate_random_bytes(16).hex_encode()
-	var error := _arm_command_udp.put_packet(JSON.stringify({
-		"type": "arm_return_to_rest",
+	_rest_action_saves_pose = save_pose
+	var request := {
+		"type": "arm_save_rest_pose" if save_pose else "arm_return_to_rest",
 		"control_session": "godot-editor-rest-return",
-		"rest_return_request_id": _rest_return_request_id,
-	}).to_utf8_buffer())
+	}
+	request["rest_save_request_id" if save_pose else "rest_return_request_id"] = _rest_return_request_id
+	var error := _arm_command_udp.put_packet(JSON.stringify(request).to_utf8_buffer())
 	_rest_return_tracking = error == OK
 	_rest_return_acknowledged = false
 	_rest_return_requested_msec = Time.get_ticks_msec()
-	_rest_return_status = {"message": "Return to rest requested; waiting for the follower response." if error == OK else "Could not send the return-to-rest request."}
+	_rest_return_status = {"message": action + " requested; waiting for the follower response." if error == OK else "Could not send the rest-pose request."}
 	return error == OK
 
 
@@ -877,11 +895,12 @@ func _update_rest_return_status(follower: Dictionary, now_msec: int) -> void:
 		return
 	var age_msec := Time.get_unix_time_from_system() * 1000.0 - float(follower.get("sent_unix_ms", 0.0))
 	var fresh := age_msec >= -1000.0 and age_msec <= 1000.0
-	if fresh and str(follower.get("rest_return_request_id", "")) == _rest_return_request_id:
+	var request_key := "rest_save_request_id" if _rest_action_saves_pose else "rest_return_request_id"
+	if fresh and str(follower.get(request_key, "")) == _rest_return_request_id:
 		_rest_return_acknowledged = true
-		_rest_return_tracking = bool(follower.get("rest_return_active", false))
+		_rest_return_tracking = not _rest_action_saves_pose and bool(follower.get("rest_return_active", false))
 		_rest_return_status = {
-			"message": str(follower.get("message", "Follower replied without a rest-pose status.")),
+			"message": str(follower.get("rest_save_message" if _rest_action_saves_pose else "message", "Follower replied without a rest-pose status.")),
 			"active": _rest_return_tracking,
 			"progress": float(follower.get("rest_return_progress", 0.0)),
 		}
@@ -889,8 +908,8 @@ func _update_rest_return_status(follower: Dictionary, now_msec: int) -> void:
 		_rest_return_status = {"message": "Return-to-rest feedback is unavailable; the arm's current motion state is unknown. Check the follower terminal."}
 	elif now_msec - _rest_return_requested_msec >= 3000:
 		_rest_return_tracking = false
-		_rest_return_status = {"message": "No matching return-to-rest response. Restart robot-teleop from the updated checkout and check its terminal. The command was not resent."}
-		if fresh and not follower.has("rest_return_request_id"):
+		_rest_return_status = {"message": "No matching rest-pose response. Restart robot-teleop from the updated checkout and check its terminal. The command was not resent."}
+		if fresh and not follower.has(request_key):
 			_rest_return_status.message += " Last follower message: " + str(follower.get("message", "unavailable"))
 
 
