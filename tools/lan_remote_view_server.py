@@ -3830,8 +3830,12 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             packet["robot_overlay_style"] = style
         if "display_mode" in data:
             display_mode = data["display_mode"]
-            if not isinstance(display_mode, str) or display_mode not in ("point_cloud", "rgb_camera"):
-                raise ValueError("display_mode must be point_cloud or rgb_camera")
+            if not isinstance(display_mode, str) or display_mode not in (
+                "point_cloud", "shader_mesh", "independent_mesh", "rgb_camera"
+            ):
+                raise ValueError(
+                    "display_mode must be point_cloud, shader_mesh, independent_mesh, or rgb_camera"
+                )
             packet["display_mode"] = display_mode
         if "stream_preset" in data:
             stream_preset = data["stream_preset"]

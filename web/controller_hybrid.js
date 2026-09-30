@@ -24,9 +24,8 @@
       "head-height", "orbit-elevation", "workspace-surface-offset", "workspace-surface-size",
       "workspace-surface-opacity",
     ];
-    // v12 persists the selected quality/latency stream preset as an
-    // installation default while preserving older saved camera views.
-    const viewSettingsVersion = 12;
+    // v13 adds GPU mesh views while preserving older saved camera views.
+    const viewSettingsVersion = 13;
 
     let peer = null;
     let trackingDataChannel = null;
@@ -54,6 +53,12 @@
     let startupNavigation = null;
     let startupNavigationPending = false;
     const hybridMode = !window.location.pathname.startsWith("/frame-stream");
+    const displayModes = hybridMode
+      ? ["point_cloud", "shader_mesh", "independent_mesh", "rgb_camera"]
+      : ["point_cloud", "rgb_camera"];
+    for (const option of displayModeSelect.options) {
+      option.hidden = option.disabled = !displayModes.includes(option.value);
+    }
     const quickTunnel = window.location.hostname.endsWith(".trycloudflare.com");
     if (!hybridMode && quickTunnel) {
       // WebRTC media cannot reliably traverse a TCP-only Quick Tunnel. Avoid
@@ -139,7 +144,7 @@
 
     function restoreViewSettings(savedInput = null) {
       const saved = savedInput && Object.keys(savedInput).length ? savedInput : localSavedViewSettings();
-      if (!saved || ![6, 7, 8, 9, 10, 11, viewSettingsVersion].includes(saved.settings_version)) {
+      if (!saved || ![6, 7, 8, 9, 10, 11, 12, viewSettingsVersion].includes(saved.settings_version)) {
         updateHeadTrackingOptions();
         return updateViewLabels();
       }
@@ -160,7 +165,7 @@
       document.getElementById("workspace-surface-offset").value = String(saved.workspace_surface_offset ?? 0);
       document.getElementById("workspace-surface-size").value = String(saved.workspace_surface_size ?? 1.2);
       document.getElementById("workspace-surface-opacity").value = String(saved.workspace_surface_opacity ?? 0.18);
-      displayModeSelect.value = saved.display_mode === "rgb_camera" ? "rgb_camera" : "point_cloud";
+      displayModeSelect.value = displayModes.includes(saved.display_mode) ? saved.display_mode : "point_cloud";
       streamPresetSelect.value = saved.stream_preset === "latency" ? "latency" : "quality";
       startupNavigation = saved.default_navigation || null;
       startupNavigationPending = startupNavigation !== null;
@@ -576,15 +581,15 @@
         throw new Error("hybrid RGB-D renderer did not load");
       }
       const hybridPreset = streamPresetSelect.value === "latency"
-        ? { width: 384, fps: 60, contextFps: 30, detailFps: 60, quality: 74, geometryMode: "points", splatFill: 1.18 }
+        ? { width: 384, fps: 60, contextFps: 30, detailFps: 60, quality: 74, splatFill: 1.18 }
         : (quickTunnel
           // Plane-aware, keyframe-relative depth tiles carry the complete
           // 666x526 workspace crop at a full 30 Hz source cadence. Requesting a
           // larger image would only upscale the cropped sensor samples.
           // Whole-scene motion automatically falls back to a fresh lossless
           // keyframe, so the stream cannot accumulate temporal errors.
-          ? { width: 666, fps: 30, contextFps: 36, detailFps: 36, quality: 68, geometryMode: "points", splatFill: 1.32 }
-          : { width: 720, fps: 30, contextFps: 15, detailFps: 36, quality: 90, geometryMode: "points", splatFill: 1.32 });
+          ? { width: 666, fps: 30, contextFps: 36, detailFps: 36, quality: 68, splatFill: 1.32 }
+          : { width: 720, fps: 30, contextFps: 15, detailFps: 36, quality: 90, splatFill: 1.32 });
       const persistentReference = document.getElementById(
         "persistent-temporal-reference-enabled"
       ).checked;
@@ -592,7 +597,6 @@
         "full-rgb-frame-updates-enabled"
       ).checked;
       window.setGodotHybridViewSettings && window.setGodotHybridViewSettings(viewSettingsPayload({
-        geometry_mode: hybridPreset.geometryMode,
         splat_fill: hybridPreset.splatFill,
         mesh_depth_delta: 0.035,
         mesh_max_edge: 0.055,

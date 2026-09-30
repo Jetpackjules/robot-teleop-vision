@@ -88,7 +88,7 @@ For an explicitly local-only deployment, set `stack.public_mode = "off"`.
 - Independent meshes by default, with optional multi-camera alignment and color matching.
 - Latest-only capture and cancellable latest-frame delivery; slow clients do not build a stale queue.
 - Parallel RGB/depth encoding, persistent references, absolute temporal tile updates, plane-aware depth stabilization, and recoverable keyframes.
-- A selectable live 3D point cloud or regular 2D RGB camera view, with full-frame RGB compatibility fallback.
+- The browser's View menu selects a live 3D point cloud, GPU shader mesh, independent GPU meshes, or a regular 2D RGB camera view. Shader mesh shares colour across overlapping camera surfaces; independent mesh keeps each camera's own colour. The choice survives reconnects and can be saved with the site defaults. Full-frame RGB has a compatibility fallback.
 - Mouse orbit/pan/zoom that works independently of optional browser head tracking; disabling tracking releases the webcam.
 - Installation-wide camera-start defaults and stable view settings shared by new browsers, without persisting mutating actions.
 - A flat support-surface guide plus an optional module-declared workspace envelope. Motor stopping remains robot-specific and hardware-authoritative.

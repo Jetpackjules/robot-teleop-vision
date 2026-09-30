@@ -98,6 +98,7 @@ const state = {
     fov: 55,
     splat_fill: 1.3,
     geometry_mode: "points",
+    camera_color_fusion_enabled: true,
     mesh_depth_delta: 0.035,
     mesh_max_edge: 0.055,
     point_underlay: false,
@@ -725,7 +726,7 @@ function deleteRobotMeshes(gl, meshes = state.robotMeshes) {
 function deleteWorkspaceGuide(gl) {
   if (!gl || !state.workspaceGuide) return;
   for (const item of Object.values(state.workspaceGuide.items || {})) {
-    if (item.buffer) gl.deleteBuffer(item.buffer);
+    if (item?.buffer) gl.deleteBuffer(item.buffer);
   }
   state.workspaceGuide = null;
 }
@@ -2031,7 +2032,9 @@ function render() {
   const meshMode = state.settings.geometry_mode === "mesh";
   gl.uniform1f(state.uniforms.meshDepthDelta, Number(state.settings.mesh_depth_delta || 0.045));
   gl.uniform1f(state.uniforms.meshMaxEdge, Number(state.settings.mesh_max_edge || 0.08));
-  const fusionReference = state.cameras.find((camera) => String(camera.metadata.model || "").includes("435")) || null;
+  const fusionReference = state.settings.camera_color_fusion_enabled
+    ? state.cameras.find((camera) => String(camera.metadata.model || "").includes("435")) || null
+    : null;
 
   for (const camera of state.cameras) {
     gl.activeTexture(gl.TEXTURE0);
@@ -2694,6 +2697,10 @@ export function setGodotHybridViewSettings(settings = {}) {
       ? "alignment"
       : state.settings.robot_overlay_style,
   };
+  if (["point_cloud", "shader_mesh", "independent_mesh"].includes(settings.display_mode)) {
+    state.settings.geometry_mode = settings.display_mode === "point_cloud" ? "points" : "mesh";
+    state.settings.camera_color_fusion_enabled = settings.display_mode !== "independent_mesh";
+  }
   if (settings.recenter) recenterGodotHybridRenderer();
 }
 
