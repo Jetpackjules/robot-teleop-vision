@@ -5,7 +5,7 @@ const status = document.getElementById("so101-wrist-camera-status");
 const storageKey = "robotTeleop.so101.wristCameraEnabled";
 
 if (toggle) {
-  toggle.checked = localStorage.getItem(storageKey) !== "false";
+  toggle.checked = localStorage.getItem(storageKey) === "true";
 }
 
 let retryTimer = 0;

@@ -76,7 +76,7 @@ const MODULE_STYLE = `
 `;
 
 const SETTINGS_MARKUP = `
-  <label class="toggle-row"><span>Wrist camera</span><input id="so101-wrist-camera-enabled" type="checkbox" checked></label>
+  <label class="toggle-row"><span>Wrist camera</span><input id="so101-wrist-camera-enabled" type="checkbox"></label>
   <div class="button-row">
     <button id="so101-connect" type="button">Connect Leader</button>
     <button id="so101-keyboard" type="button" title="WASD translates the claw, R/F raises or lowers it, I/K pitches and J/L rolls the wrist, Q/E opens or closes it, and Shift enables precision motion.">Keyboard Control</button>
