@@ -458,6 +458,7 @@ def test_site_settings_persist_only_stable_setup_and_clamp_navigation():
             "arm_idle_return_enabled": True,
             "calibrate_robot_position": True,
             "manual_claw_calibration_save": True,
+            "robot_visual_calibration_action": {"operation": "import", "request_id": "test", "file": {"type": "so101_visual_calibration"}},
             "default_navigation": {
                 "orbit_yaw": 900,
                 "orbit_pitch": -900,
@@ -474,6 +475,7 @@ def test_site_settings_persist_only_stable_setup_and_clamp_navigation():
     assert result["arm_idle_return_enabled"] is True
     assert "calibrate_robot_position" not in result
     assert "manual_claw_calibration_save" not in result
+    assert "robot_visual_calibration_action" not in result
     assert result["default_navigation"] == {
         "orbit_yaw": 180.0,
         "orbit_pitch": -80.0,

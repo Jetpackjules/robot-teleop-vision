@@ -192,6 +192,10 @@ class GenericRobotOperator:
 
         return ()
 
+    def structured_view_settings(self, data: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate module-owned structured actions; never installation defaults."""
+        return {}
+
     def resolve_auxiliary_device(self, view_id: str, configured: str = "") -> str:
         return str(configured or "")
 

@@ -10,6 +10,7 @@ var _overlay: Node3D = null
 var _calibrator: Node = null
 var _configuration_error := ""
 var _hardware_enabled := true
+var _manual_panel: Window
 
 
 func _ready() -> void:
@@ -18,6 +19,8 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	if is_instance_valid(_manual_panel):
+		_manual_panel.queue_free()
 	if is_instance_valid(_calibrator):
 		_calibrator.queue_free()
 	if is_instance_valid(_overlay):
@@ -97,7 +100,32 @@ func apply_remote_settings(payload: Dictionary) -> void:
 		refine_calibration(true)
 	if bool(payload.get("cancel_robot_position_calibration", false)):
 		_calibrator.call("cancel_arm_position_calibration")
-	_apply_manual_claw_settings(payload)
+	if payload.get("robot_visual_calibration_action") is Dictionary:
+		manual_calibration_action(payload.robot_visual_calibration_action, payload)
+	else:
+		_apply_manual_claw_settings(payload)
+
+
+func manual_calibration_action(action: Dictionary, settings: Dictionary = {}) -> Dictionary:
+	if not is_instance_valid(_overlay) or not is_instance_valid(_calibrator):
+		return {"ok": false, "message": "Robot calibration is unavailable."}
+	var status: Dictionary = _calibrator.call("get_calibration_status")
+	var busy := str(status.get("state", "")) in ["capturing", "solving"] or bool(_calibrator.get("_automation_active"))
+	var result: Dictionary = _overlay.call("handle_manual_calibration_action", action, settings, busy)
+	_calibrator.set("_editor_status_until_msec", Time.get_ticks_msec() + 30000)
+	if not busy and bool(result.get("ok", false)) and str(action.get("operation", "")) in ["save", "import"]:
+		_calibrator.call("report_external_registration", str(result.message), 0.0)
+	_calibrator.call("_emit_status", true)
+	return result
+
+
+func open_manual_calibration_panel() -> void:
+	if not is_instance_valid(_manual_panel):
+		_manual_panel = Window.new()
+		_manual_panel.set_script(load("res://robot_modules/so101/godot/so101_calibration_panel.gd"))
+		_manual_panel.set("robot_module", self)
+		add_child(_manual_panel)
+	_manual_panel.call("open_panel")
 
 
 func _apply_manual_claw_settings(payload: Dictionary) -> void:
@@ -108,6 +136,7 @@ func _apply_manual_claw_settings(payload: Dictionary) -> void:
 	if bool(payload.get("manual_claw_calibration_cancel", false)):
 		_overlay.call("cancel_manual_claw_calibration")
 	var names := [
+		"manual_shoulder_lift_trim_degrees", "manual_elbow_flex_trim_degrees",
 		"manual_wrist_flex_trim_degrees", "manual_wrist_roll_trim_degrees",
 		"manual_wrist_roll_direction", "manual_tool_x", "manual_tool_y",
 		"manual_tool_z", "manual_tool_roll", "manual_tool_pitch",
@@ -120,11 +149,15 @@ func _apply_manual_claw_settings(payload: Dictionary) -> void:
 
 
 func start_full_calibration(from_editor: bool = false) -> void:
+	if is_instance_valid(_overlay) and bool(_overlay.get("manual_claw_calibration_enabled")):
+		return
 	if _hardware_enabled and is_instance_valid(_calibrator):
 		_calibrator.call("start_automated_arm_calibration", from_editor)
 
 
 func refine_calibration(from_editor: bool = false) -> void:
+	if is_instance_valid(_overlay) and bool(_overlay.get("manual_claw_calibration_enabled")):
+		return
 	if _hardware_enabled and is_instance_valid(_calibrator):
 		_calibrator.call("start_joint_alignment_calibration", from_editor)
 

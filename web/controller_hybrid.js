@@ -129,7 +129,8 @@
     function sendViewSettings(extra = {}) {
       updateViewLabels();
       const payload = viewSettingsPayload(extra);
-      localStorage.setItem("robotTeleopViewSettings", JSON.stringify(payload));
+      // Calibration actions and uploaded files are transient, never startup defaults.
+      localStorage.setItem("robotTeleopViewSettings", JSON.stringify(viewSettingsPayload()));
       window.setGodotHybridViewSettings && window.setGodotHybridViewSettings(payload);
       return window.sendGodotViewSettings && window.sendGodotViewSettings(payload);
     }

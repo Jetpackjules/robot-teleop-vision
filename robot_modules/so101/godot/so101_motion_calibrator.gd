@@ -916,6 +916,8 @@ func _update_rest_return_status(follower: Dictionary, now_msec: int) -> void:
 func get_calibration_status() -> Dictionary:
 	var status := _status.duplicate(true)
 	var overlay := get_node_or_null(OVERLAY_PATH)
+	if overlay != null and overlay.has_method("get_manual_calibration_status"):
+		status["manual_calibration"] = overlay.call("get_manual_calibration_status")
 	if overlay != null and overlay.has_method("get_latest_status"):
 		_update_rest_return_status(overlay.call("get_latest_status"), Time.get_ticks_msec())
 	if not _rest_return_status.is_empty():
@@ -5415,9 +5417,11 @@ func _fail(message: String, confidence: float = 0.0) -> void:
 
 func _emit_status(force: bool) -> void:
 	var now := Time.get_ticks_msec()
-	if Engine.is_editor_hint() and _state not in ["capturing", "solving"] and now > _editor_status_until_msec:
+	var overlay := get_node_or_null(OVERLAY_PATH)
+	var manual_active := overlay != null and bool(overlay.get("manual_claw_calibration_enabled"))
+	if Engine.is_editor_hint() and not manual_active and _state not in ["capturing", "solving"] and now > _editor_status_until_msec:
 		return
 	if not force and now - _last_status_send_msec < 200:
 		return
 	_last_status_send_msec = now
-	_status_udp.put_packet(JSON.stringify(_status).to_utf8_buffer())
+	_status_udp.put_packet(JSON.stringify(get_calibration_status()).to_utf8_buffer())

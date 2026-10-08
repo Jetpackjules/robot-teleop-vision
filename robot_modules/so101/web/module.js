@@ -54,15 +54,22 @@ const MODULE_STYLE = `
   #so101-wrist-camera-status { padding:12px; color:var(--muted); font:12px/1.4 ui-monospace,monospace; }
   #so101-manual-workspace {
     position:fixed; right:16px; bottom:16px; z-index:5;
-    width:min(980px,calc(100vw - 408px)); max-height:calc(100vh - 32px);
+    width:min(440px,calc(100vw - 32px)); max-height:calc(100vh - 32px);
     overflow:auto; padding:12px; border:1px solid var(--line); border-radius:10px;
     background:rgba(8,10,12,.94); box-shadow:0 22px 70px rgba(0,0,0,.58); backdrop-filter:blur(14px);
   }
-  .so101-manual-preview-grid { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(240px,.75fr); gap:10px; }
+  .so101-manual-preview-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; }
   .so101-manual-preview-grid figure { margin:0; }
   .so101-manual-preview-grid figcaption { margin-bottom:5px; color:var(--muted); font-size:12px; }
   .so101-manual-preview-grid canvas { display:block; width:100%; max-height:43vh; object-fit:contain; border:1px solid var(--line); border-radius:6px; background:#111; }
-  .so101-manual-controls { display:grid; grid-template-columns:repeat(4,minmax(130px,1fr)); gap:9px; margin-top:10px; }
+  .so101-manual-controls { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin-top:10px; }
+  .so101-joint-row { display:grid; grid-template-columns:1fr 84px; align-items:center; gap:6px 12px; margin:12px 0; }
+  .so101-joint-row label { margin:0; }
+  .so101-joint-row input[type=range] { grid-column:1 / -1; width:100%; height:22px; margin:0; padding:0; }
+  .so101-joint-value { display:flex; align-items:center; gap:4px; }
+  .so101-joint-value input[type=number] { width:72px; min-width:0; height:34px; padding:6px; border:1px solid var(--line); border-radius:5px; background:#171b1f; color:var(--text); font:inherit; }
+  #so101-import-dialog { max-width:min(430px,calc(100vw - 48px)); color:var(--text); background:#15191d; border:1px solid var(--line); border-radius:10px; padding:20px; }
+  #so101-import-dialog::backdrop { background:rgba(0,0,0,.6); }
   .so101-manual-actions { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:10px; }
   .so101-manual-note { margin:8px 0 0; color:var(--muted); font-size:12px; }
   @media (max-width:760px) { #so101-wrist-camera-panel { width:min(46vw,320px); } }
@@ -110,9 +117,12 @@ const VIEW_MARKUP = `
     <summary>Recovery tools</summary>
     <div class="disclosure-body">
       <button id="so101-refine" type="button">Refine Arm Servos</button>
-      <button id="so101-manual-open" type="button">Manual Wrist / Claw Calibration</button>
+      <button id="so101-manual-open" type="button">Manual Joint Tuning</button>
+      <div class="button-row"><button id="so101-calibration-export" type="button">Export JSON</button><button id="so101-calibration-import" type="button">Import JSON</button></div>
+      <input id="so101-calibration-file" type="file" accept=".json,application/json" hidden>
+      <p id="so101-calibration-file-status" class="helper-text" role="status"></p>
       <label class="toggle-row"><span>D455 wrist / claw visual correction</span><input id="so101-d455-visual-correction-enabled" type="checkbox"></label>
-      <p class="helper-text">Use these only when full calibration leaves a known distal-link mismatch.</p>
+      <p class="helper-text">Tune remaining joint mismatches after the base is aligned. Export a saved calibration to reuse it with this arm and motor profile.</p>
     </div>
   </details>
 `;
@@ -127,16 +137,33 @@ const STATUS_MARKUP = `
   </div>
 `;
 
+const JOINT_TUNING_FIELDS = [
+  ["manual_shoulder_lift_trim_degrees", "Shoulder lift (J2)", -180, 180],
+  ["manual_elbow_flex_trim_degrees", "Elbow bend (J3)", -180, 180],
+  ["manual_wrist_flex_trim_degrees", "Wrist bend (J4)", -90, 90],
+  ["manual_wrist_roll_trim_degrees", "Wrist rotation (J5)", -180, 180],
+];
+const JOINT_TUNING_MARKUP = JOINT_TUNING_FIELDS.map(([key, label, min, max]) => `
+  <div class="so101-joint-row">
+    <label for="so101-number-${key}">${label}</label>
+    <div class="so101-joint-value"><input id="so101-number-${key}" data-manual-number="${key}" type="number" min="${min}" max="${max}" step="0.1" value="0" aria-label="${label} offset in degrees"><span aria-hidden="true">°</span></div>
+    <input data-manual-key="${key}" type="range" min="${min}" max="${max}" step="0.1" value="0" aria-label="${label} offset slider">
+  </div>`).join("");
+
 const FLOATING_MARKUP = `
   <div id="so101-wrist-camera-panel" hidden><img id="so101-wrist-camera-view" alt="SO-101 wrist camera" hidden><div id="so101-wrist-camera-status">Connecting to wrist camera…</div></div>
-  <section id="so101-manual-workspace" hidden aria-label="Manual wrist and claw calibration">
+  <section id="so101-manual-workspace" hidden aria-label="Manual joint tuning">
+    <strong>Manual joint tuning</strong>
+    <p class="so101-manual-note">Match the overlay to the real arm. These are adjustments to the saved angles; base placement stays fixed.</p>
+    ${JOINT_TUNING_MARKUP}
+    <details class="advanced-disclosure"><summary>Wrist / claw close-up</summary>
     <div class="so101-manual-preview-grid">
       <figure><figcaption>Aligned RGB + exact projected 3D geometry</figcaption><canvas id="manual-rgb-canvas"></canvas></figure>
       <figure><figcaption>Automatic claw crop</figcaption><canvas id="manual-crop-canvas"></canvas></figure>
     </div>
+    </details>
+    <details class="advanced-disclosure"><summary>Claw and tool adjustments</summary>
     <div class="so101-manual-controls">
-      <label>Wrist flex zero <span data-manual-value="manual_wrist_flex_trim_degrees" class="value-label">0.0°</span><input data-manual-key="manual_wrist_flex_trim_degrees" type="range" min="-90" max="90" step="0.5" value="0"></label>
-      <label>Wrist rotation zero <span data-manual-value="manual_wrist_roll_trim_degrees" class="value-label">0.0°</span><input data-manual-key="manual_wrist_roll_trim_degrees" type="range" min="-180" max="180" step="0.5" value="0"></label>
       <label>Wrist direction<select id="so101-manual-wrist-direction"><option value="0" selected>Keep saved direction</option><option value="1">Normal (+)</option><option value="-1">Reversed (−)</option></select></label>
       <label>Overlay opacity <span data-manual-value="manual_overlay_opacity" class="value-label">30%</span><input data-manual-key="manual_overlay_opacity" type="range" min="0.05" max="0.9" step="0.05" value="0.3"></label>
       <label>Tool X <span data-manual-value="manual_tool_x" class="value-label">0.0 mm</span><input data-manual-key="manual_tool_x" type="range" min="-0.05" max="0.05" step="0.0005" value="0"></label>
@@ -148,9 +175,20 @@ const FLOATING_MARKUP = `
       <label>Opening offset <span data-manual-value="manual_opening_offset_degrees" class="value-label">0.0°</span><input data-manual-key="manual_opening_offset_degrees" type="range" min="-35" max="35" step="0.25" value="0"></label>
       <label>Opening scale <span data-manual-value="manual_opening_scale" class="value-label">1.000×</span><input data-manual-key="manual_opening_scale" type="range" min="0.5" max="1.5" step="0.005" value="1"></label>
     </div>
+    </details>
     <p class="so101-manual-note">Preview only. This does not move the arm or modify saved registration until Save is pressed.</p>
+    <p id="so101-manual-status" class="helper-text" role="status">Check several arm poses before saving.</p>
     <div class="so101-manual-actions"><button id="so101-manual-reset" type="button">Reset Preview</button><button id="so101-manual-cancel" type="button">Cancel</button><button id="so101-manual-save" class="primary" type="button">Save Calibration</button></div>
   </section>
+  <dialog id="so101-import-dialog" aria-labelledby="so101-import-title">
+    <h3 id="so101-import-title">Import visual calibration</h3>
+    <p id="so101-import-name"></p>
+    <p>Use this file with the same physical arm and motor profile. By default, only joint calibration is imported and the current base is kept.</p>
+    <label class="toggle-row"><span>Also restore saved base placement</span><input id="so101-import-base" type="checkbox"></label>
+    <p class="helper-text">Restore the base only when camera alignment and physical placement match the saved setup.</p>
+    <p id="so101-import-status" class="helper-text" role="status"></p>
+    <div class="button-row"><button id="so101-import-cancel" type="button">Cancel</button><button id="so101-import-apply" class="primary" type="button">Import and Save</button></div>
+  </dialog>
 `;
 
 function element(id) { return document.getElementById(id); }
@@ -162,6 +200,10 @@ class So101WebModule {
     this.sendViewSettings = () => false;
     this.updateStatus = () => {};
     this.manualInputs = [];
+    this.manualPending = null;
+    this.manualReady = false;
+    this.manualPreviewTimer = null;
+    this.importFile = null;
   }
 
   async mount({ settingsRoot, setupRoot, viewRoot, statusRoot, floatingRoot }) {
@@ -215,8 +257,10 @@ class So101WebModule {
     for (const input of this.manualInputs) {
       const key = input.dataset.manualKey;
       const output = document.querySelector(`[data-manual-value="${key}"]`);
-      if (!output) continue;
       const value = Number(input.value);
+      const numeric = document.querySelector(`[data-manual-number="${key}"]`);
+      if (numeric && document.activeElement !== numeric) numeric.value = input.value;
+      if (!output) continue;
       output.textContent = key === "manual_overlay_opacity" ? `${Math.round(value * 100)}%`
         : key === "manual_opening_scale" ? `${value.toFixed(3)}×`
         : ["manual_tool_x", "manual_tool_y", "manual_tool_z"].includes(key) ? `${(value * 1000).toFixed(1)} mm`
@@ -229,8 +273,100 @@ class So101WebModule {
       input.value = input.dataset.manualKey === "manual_opening_scale" ? "1"
         : input.dataset.manualKey === "manual_overlay_opacity" ? "0.3" : "0";
     }
+    for (const input of document.querySelectorAll("[data-manual-number]")) input.value = "0";
     element("so101-manual-wrist-direction").value = "0";
     this.updateManualLabels();
+  }
+
+  manualMessage(message) {
+    element("so101-manual-status").textContent = message;
+    element("so101-calibration-file-status").textContent = message;
+    element("so101-import-status").textContent = message;
+  }
+
+  calibrationAction(operation, extra = {}) {
+    if (operation === "save" && Array.from(document.querySelectorAll("[data-manual-number]")).some(input => !input.checkValidity() || !Number.isFinite(input.valueAsNumber))) {
+      return Promise.reject(new Error("Enter a valid angle in each joint field before saving."));
+    }
+    const request_id = globalThis.crypto?.randomUUID?.() || `cal-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const action = { operation, request_id, ...extra };
+    const settings = ["save", "preview"].includes(operation) ? this.manualPayload() : {};
+    if (operation === "preview") {
+      return this.sendViewSettings({ ...settings, robot_visual_calibration_action: action });
+    }
+    if (this.manualPending) return Promise.reject(new Error("Wait for the previous calibration action."));
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        if (this.manualPending?.request_id !== request_id) return;
+        this.manualPending = null;
+        reject(new Error("No confirmation from Godot. The action may not have completed; check the connection before retrying."));
+      }, 12000);
+      this.manualPending = { request_id, resolve, reject, timer };
+      this.manualMessage("Waiting for Godot…");
+      if (!this.sendViewSettings({ ...settings, robot_visual_calibration_action: action })) {
+        window.clearTimeout(timer);
+        this.manualPending = null;
+        reject(new Error("Connect the controller to Godot before changing calibration."));
+      }
+    });
+  }
+
+  queueManualPreview() {
+    this.updateManualLabels();
+    window.clearTimeout(this.manualPreviewTimer);
+    this.manualPreviewTimer = window.setTimeout(() => {
+      if (!this.manualReady || this.manualPending) return;
+      if (!this.calibrationAction("preview")) this.manualMessage("Preview could not reach Godot; check the connection.");
+    }, 60);
+  }
+
+  finishManualPreview() {
+    this.manualReady = false;
+    window.clearTimeout(this.manualPreviewTimer);
+    element("so101-manual-workspace").hidden = true;
+    this.resetManualControls();
+  }
+
+  async performManualAction(operation, extra = {}) {
+    try {
+      const result = await this.calibrationAction(operation, extra);
+      this.manualMessage(result.message || "Calibration updated.");
+      return result;
+    } catch (error) {
+      this.manualMessage(String(error.message || error));
+      return null;
+    }
+  }
+
+  async exportCalibration() {
+    const result = await this.performManualAction("export");
+    if (!result?.file) return;
+    const blob = new Blob([JSON.stringify(result.file, null, 2) + "\n"], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `so101-visual-calibration-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    this.manualMessage("Exported the saved calibration as JSON.");
+  }
+
+  async chooseCalibrationFile(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      if (file.size > 16384) throw new Error("Choose a calibration JSON file smaller than 16 KB.");
+      const value = JSON.parse(await file.text());
+      if (value?.type !== "so101_visual_calibration" || value.schema_version !== 1) throw new Error("This is not a supported visual calibration file.");
+      this.importFile = value;
+      element("so101-import-name").textContent = file.name;
+      element("so101-import-base").checked = false;
+      element("so101-import-status").textContent = "";
+      element("so101-import-dialog").showModal();
+    } catch (error) { this.manualMessage(String(error.message || error)); }
   }
 
   controllerStatus() {
@@ -252,6 +388,21 @@ class So101WebModule {
     const arm = this.controllerStatus();
     const status = arm.status || {};
     const calibration = status.robot_calibration || {};
+    const manual = calibration.manual_calibration || {};
+    if (this.manualPending && manual.reply?.request_id === this.manualPending.request_id) {
+      const pending = this.manualPending;
+      this.manualPending = null;
+      window.clearTimeout(pending.timer);
+      if (manual.reply.ok) pending.resolve(manual.reply);
+      else pending.reject(new Error(manual.reply.message || "Godot rejected this calibration action."));
+    }
+    const manualOffline = calibration.state === "offline" || manual.supported !== true;
+    const manualBusy = ["capturing", "solving"].includes(calibration.state) || Boolean(this.manualPending);
+    element("so101-manual-open").disabled = manualOffline || manualBusy || !manual.registered;
+    element("so101-calibration-export").disabled = manualOffline || manualBusy || !manual.registered || manual.enabled === true;
+    element("so101-calibration-import").disabled = manualOffline || manualBusy || manual.enabled === true;
+    for (const id of ["so101-manual-save", "so101-manual-reset", "so101-manual-cancel", "so101-import-apply"]) element(id).disabled = manualOffline || manualBusy;
+    for (const input of document.querySelectorAll("#so101-manual-workspace input, #so101-manual-workspace select")) input.disabled = manualOffline || manualBusy;
     element("so101-connect").textContent = arm.leaderConnected ? "Leader Connected" : "Connect Leader";
     element("so101-keyboard").textContent = arm.keyboardConnected ? "Keyboard Enabled" : "Keyboard Control";
     element("so101-keyboard").classList.toggle("primary", arm.keyboardConnected === true);
@@ -298,9 +449,9 @@ class So101WebModule {
     element("so101-calibration-progress").value = progress;
     element("so101-calibration-progress-value").textContent = `${Math.round(progress * 100)}%`;
     element("so101-calibrate").textContent = capturing && mode === "base" ? "Cancel Full Arm Calibration" : solving && mode === "base" ? "Fitting Full Arm" : offline ? "Godot Calibration Offline" : "Calibrate Full Arm";
-    element("so101-calibrate").disabled = solving || offline || (capturing && mode !== "base");
+    element("so101-calibrate").disabled = manual.enabled === true || solving || offline || (capturing && mode !== "base");
     element("so101-refine").textContent = capturing && mode === "joints" ? "Cancel Servo Refinement" : solving && mode === "joints" ? "Fitting Arm Servos" : offline ? "Godot Calibration Offline" : "Refine Arm Servos";
-    element("so101-refine").disabled = solving || offline || (capturing && mode !== "joints");
+    element("so101-refine").disabled = manual.enabled === true || solving || offline || (capturing && mode !== "joints");
     element("so101-calibration-status").textContent = `${calibration.message || "Arm position calibration idle"}\nFrames ${calibration.frames || 0} | confidence ${Math.round((calibration.confidence || 0) * 100)}%`;
   }
 
@@ -368,14 +519,42 @@ class So101WebModule {
       if (!capturing && !window.confirm("Refine shoulder, elbow, and wrist servos now? Clear the workspace and stay ready to remove power.")) return;
       if (!sendViewSettings(capturing ? { cancel_robot_position_calibration: true } : { refine_robot_joint_alignment: true })) element("so101-calibration-status").textContent = "Start the controller so Godot can receive calibration commands.";
     });
-    element("so101-manual-open").addEventListener("click", () => { this.resetManualControls(); element("so101-manual-workspace").hidden = false; sendViewSettings({ manual_claw_calibration_begin: true, ...this.manualPayload() }); });
-    for (const input of this.manualInputs) input.addEventListener("input", () => { this.updateManualLabels(); sendViewSettings(this.manualPayload()); });
-    element("so101-manual-wrist-direction").addEventListener("change", () => sendViewSettings(this.manualPayload()));
-    element("so101-manual-reset").addEventListener("click", () => { this.resetManualControls(); sendViewSettings({ manual_claw_calibration_reset: true, ...this.manualPayload() }); });
-    element("so101-manual-cancel").addEventListener("click", () => { sendViewSettings({ manual_claw_calibration_cancel: true }); element("so101-manual-workspace").hidden = true; });
-    element("so101-manual-save").addEventListener("click", () => { if (window.confirm("Save this wrist/claw preview into robot registration?")) { sendViewSettings({ ...this.manualPayload(), manual_claw_calibration_save: true }); element("so101-manual-workspace").hidden = true; } });
+    element("so101-manual-open").addEventListener("click", async () => {
+      if (await this.performManualAction("begin")) {
+        this.resetManualControls();
+        this.manualReady = true;
+        element("so101-manual-workspace").hidden = false;
+        element("so101-manual-workspace").querySelector("input[type=number]").focus();
+      }
+    });
+    for (const input of this.manualInputs) input.addEventListener("input", () => this.queueManualPreview());
+    for (const input of document.querySelectorAll("[data-manual-number]")) input.addEventListener("input", () => {
+      if (!input.checkValidity() || !Number.isFinite(input.valueAsNumber)) return;
+      const slider = this.manualInputs.find((candidate) => candidate.dataset.manualKey === input.dataset.manualNumber);
+      slider.value = input.value;
+      this.queueManualPreview();
+    });
+    element("so101-manual-wrist-direction").addEventListener("change", () => this.queueManualPreview());
+    element("so101-manual-reset").addEventListener("click", async () => {
+      if (await this.performManualAction("reset")) this.resetManualControls();
+    });
+    element("so101-manual-cancel").addEventListener("click", async () => {
+      if (await this.performManualAction("cancel")) this.finishManualPreview();
+    });
+    element("so101-manual-save").addEventListener("click", async () => {
+      if (await this.performManualAction("save")) this.finishManualPreview();
+    });
+    element("so101-calibration-export").addEventListener("click", () => this.exportCalibration());
+    element("so101-calibration-import").addEventListener("click", () => element("so101-calibration-file").click());
+    element("so101-calibration-file").addEventListener("change", (event) => this.chooseCalibrationFile(event));
+    element("so101-import-cancel").addEventListener("click", () => element("so101-import-dialog").close());
+    element("so101-import-apply").addEventListener("click", async () => {
+      if (await this.performManualAction("import", { file: this.importFile, restore_base: element("so101-import-base").checked })) element("so101-import-dialog").close();
+    });
     window.addEventListener("so101-arm-status", updateStatus);
-    window.addEventListener("pagehide", () => { if (!element("so101-manual-workspace").hidden) sendViewSettings({ manual_claw_calibration_cancel: true }); });
+    window.addEventListener("pagehide", () => {
+      if (this.manualReady) sendViewSettings({ robot_visual_calibration_action: { operation: "cancel", request_id: `close-${Date.now()}` } });
+    });
   }
 
   start() {

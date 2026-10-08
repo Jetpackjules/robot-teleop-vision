@@ -69,6 +69,10 @@ robot-teleop init --example so101_realsense --force
 
 Place that arm's local LeRobot pair profile at `robot_modules/so101/local/arm_pair.json`, then set `robot.enabled = true` in ignored `config/local.toml`. Run `robot-teleop doctor` before enabling motion. The SO-101 browser module supplies its leader/keyboard controls, wrist view, safety feedback, overlay, and transactional full-arm calibration workflow.
 
+If the base is aligned but a joint still looks wrong, open **Advanced Setup → Robot setup and calibration → Recovery tools → Manual Joint Tuning**. Adjust the shoulder, elbow, and wrist offsets while checking the overlay in several poses, then **Save Calibration**. A partial automatic calibration with a saved base is sufficient. **Reset Preview** and **Cancel** discard the unsaved adjustments. These controls change the visual overlay without commanding the motors. Godot exposes the same saved calibration through **View Inspector → Robot Module → Manual Joint Tuning / Calibration Files**.
+
+**Export JSON** downloads the saved visual calibration; **Import JSON** restores it on this or another device using the **same physical arm and motor profile**. Import keeps the receiving device's current base alignment by default. Select **Also restore saved base placement** only when the camera alignment and physical placement match the exported setup. The file includes the base transform, joint offsets/directions, and claw geometry, but not camera alignment, motor calibration, ports, or rest-pose settings. Save/import validates the file and retains the previous registration as a backup; manual adjustments are recorded as user tuning, not new automatic validation.
+
 ## Free temporary public access
 
 Cloudflare Quick Tunnel access is enabled by default. `robot-teleop init` writes a unique,

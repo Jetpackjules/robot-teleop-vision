@@ -10,6 +10,7 @@ const ROBOT_POSITION_CHECKPOINT_PATH := "user://so101_robot_registration.depth_v
 var _registration_path := REGISTRATION_PATH
 var _robot_position_checkpoint_path := ROBOT_POSITION_CHECKPOINT_PATH
 const ROBOT_KINEMATICS_VERSION := 10
+const CALIBRATION_FILE := preload("res://robot_modules/so101/godot/so101_calibration_file.gd")
 const BASE_TELEMETRY_DIRECTION := 1.0
 # Measured with the physical shoulder pan aligned straight ahead. The servo's
 # normalized encoder reports -40.4296875 degrees at that pose.
@@ -227,6 +228,8 @@ const JOINTS := [
 ## Website-driven, visualization-only calibration. These values are deltas on
 ## top of the saved registration and never command a physical servo.
 var manual_claw_calibration_enabled: bool = false
+var manual_shoulder_lift_trim_degrees: float = 0.0
+var manual_elbow_flex_trim_degrees: float = 0.0
 var manual_wrist_flex_trim_degrees: float = 0.0
 var manual_wrist_roll_trim_degrees: float = 0.0
 var manual_wrist_roll_direction: float = 1.0
@@ -234,6 +237,8 @@ var manual_tool_rpy_degrees := Vector3.ZERO
 var manual_tool_translation_local := Vector3.ZERO
 var manual_opening_offset_degrees: float = 0.0
 var manual_opening_scale: float = 1.0
+var _manual_calibration_reply: Dictionary = {}
+var _manual_calibration_replies: Dictionary = {}
 @export_group("Measured Feedback")
 @export var measured_feedback_enabled: bool = true
 @export var target_ghost_enabled: bool = true
@@ -331,7 +336,10 @@ func configure_feedback_features(settings: Dictionary) -> void:
 
 
 func begin_manual_claw_calibration() -> void:
+	_registration_status.erase("manual_save_error")
 	manual_claw_calibration_enabled = true
+	manual_shoulder_lift_trim_degrees = 0.0
+	manual_elbow_flex_trim_degrees = 0.0
 	manual_wrist_flex_trim_degrees = 0.0
 	manual_wrist_roll_trim_degrees = 0.0
 	manual_wrist_roll_direction = _joint_direction(4)
@@ -345,6 +353,12 @@ func begin_manual_claw_calibration() -> void:
 func update_manual_claw_calibration(settings: Dictionary) -> void:
 	if not manual_claw_calibration_enabled:
 		begin_manual_claw_calibration()
+	manual_shoulder_lift_trim_degrees = clampf(float(settings.get(
+		"manual_shoulder_lift_trim_degrees", manual_shoulder_lift_trim_degrees
+	)), -180.0, 180.0)
+	manual_elbow_flex_trim_degrees = clampf(float(settings.get(
+		"manual_elbow_flex_trim_degrees", manual_elbow_flex_trim_degrees
+	)), -180.0, 180.0)
 	manual_wrist_flex_trim_degrees = clampf(float(settings.get(
 		"manual_wrist_flex_trim_degrees", manual_wrist_flex_trim_degrees
 	)), -90.0, 90.0)
@@ -356,6 +370,8 @@ func update_manual_claw_calibration(settings: Dictionary) -> void:
 	))
 	if absf(requested_direction) >= 0.5:
 		manual_wrist_roll_direction = -1.0 if requested_direction < 0.0 else 1.0
+	else:
+		manual_wrist_roll_direction = _joint_direction(4)
 	manual_tool_translation_local = Vector3(
 		clampf(float(settings.get("manual_tool_x", manual_tool_translation_local.x)), -0.05, 0.05),
 		clampf(float(settings.get("manual_tool_y", manual_tool_translation_local.y)), -0.05, 0.05),
@@ -381,6 +397,8 @@ func reset_manual_claw_calibration() -> void:
 
 func cancel_manual_claw_calibration() -> void:
 	manual_claw_calibration_enabled = false
+	manual_shoulder_lift_trim_degrees = 0.0
+	manual_elbow_flex_trim_degrees = 0.0
 	manual_wrist_flex_trim_degrees = 0.0
 	manual_wrist_roll_trim_degrees = 0.0
 	manual_tool_rpy_degrees = Vector3.ZERO
@@ -393,6 +411,7 @@ func cancel_manual_claw_calibration() -> void:
 func save_manual_claw_calibration() -> bool:
 	if (
 		not manual_claw_calibration_enabled
+		or not bool(_registration_status.get("registered", false))
 		or joint_angle_offsets_degrees.size() < 5
 		or joint_angle_directions.size() < 5
 	):
@@ -405,7 +424,11 @@ func save_manual_claw_calibration() -> bool:
 	var previous_gripper_angles := gripper_angle_samples_degrees.duplicate()
 	var previous_jaw_angles := moving_jaw_opening_samples_degrees.duplicate()
 	var previous_status := _registration_status.duplicate(true)
-	joint_angle_offsets_degrees[3] += manual_wrist_flex_trim_degrees
+	var previous_force_straight := force_wrist_roll_straight
+	for index in range(1, 4):
+		var delta: float = [manual_shoulder_lift_trim_degrees, manual_elbow_flex_trim_degrees, manual_wrist_flex_trim_degrees][index - 1]
+		joint_angle_offsets_degrees[index] = wrapf(joint_angle_offsets_degrees[index] + delta + 180.0, 0.0, 360.0) - 180.0
+	force_wrist_roll_straight = false
 	joint_angle_directions[4] = manual_wrist_roll_direction
 	joint_angle_offsets_degrees[4] = wrapf(
 		joint_angle_offsets_degrees[4] + manual_wrist_roll_trim_degrees + 180.0,
@@ -414,11 +437,15 @@ func save_manual_claw_calibration() -> bool:
 	gripper_visual_correction_rpy_degrees += manual_tool_rpy_degrees
 	gripper_visual_correction_translation_local += manual_tool_translation_local
 	for index in range(gripper_angle_samples_degrees.size()):
+		if moving_jaw_calibration_enabled:
+			break
 		gripper_angle_samples_degrees[index] = (
 			float(gripper_angle_samples_degrees[index]) * manual_opening_scale
 			+ manual_opening_offset_degrees
 		)
 	for index in range(moving_jaw_opening_samples_degrees.size()):
+		if not moving_jaw_calibration_enabled:
+			break
 		moving_jaw_opening_samples_degrees[index] = (
 			float(moving_jaw_opening_samples_degrees[index]) * manual_opening_scale
 			+ manual_opening_offset_degrees
@@ -426,18 +453,31 @@ func save_manual_claw_calibration() -> bool:
 	_registration_status["registered"] = true
 	_registration_status["saved_unix_ms"] = Time.get_unix_time_from_system() * 1000.0
 	_registration_status["manual_claw_calibration"] = manual_state
+	_registration_status["base_registration_source"] = previous_status.get("base_registration_source", previous_status.get("registration_source", ""))
+	_registration_status["registration_source"] = "manual_visual_joint_tuning"
+	_registration_status["confidence"] = 0.0
+	# Automatic evidence only covers the unchanged prefix. Manual adjustments
+	# remain explicitly identified instead of being presented as a fresh solve.
+	for index in range(1, 5):
+		if not is_equal_approx(previous_offsets[index], joint_angle_offsets_degrees[index]) or not is_equal_approx(previous_directions[index], joint_angle_directions[index]):
+			_registration_status["calibrated_through_joint"] = mini(index - 1, int(previous_status.get("calibrated_through_joint", 0)))
+			break
 	var existing_refinement = _registration_status.get("joint_refinement", {})
 	var refinement := (
 		(existing_refinement as Dictionary).duplicate(true)
 		if existing_refinement is Dictionary
 		else {}
 	)
-	manual_state["method"] = "user_visual_d455_rgbd_rigid_claw_fit"
+	manual_state["method"] = "user_visual_joint_tuning"
+	manual_state["validated_in_current_run"] = false
 	manual_state["saved_unix_ms"] = _registration_status["saved_unix_ms"]
 	refinement["manual_claw_calibration"] = manual_state
 	_registration_status["joint_refinement"] = refinement
+	_registration_status.erase("manual_save_error")
 	manual_claw_calibration_enabled = false
-	if _save_registration():
+	var candidate := CALIBRATION_FILE.package(_build_registration_payload(), ROBOT_KINEMATICS_VERSION)
+	var validation_error := _validate_portable_mapping(candidate)
+	if validation_error.is_empty() and _save_registration():
 		cancel_manual_claw_calibration()
 		return true
 	joint_angle_directions = previous_directions
@@ -447,6 +487,11 @@ func save_manual_claw_calibration() -> bool:
 	gripper_angle_samples_degrees = previous_gripper_angles
 	moving_jaw_opening_samples_degrees = previous_jaw_angles
 	_registration_status = previous_status
+	force_wrist_roll_straight = previous_force_straight
+	if not validation_error.is_empty():
+		_registration_status["manual_save_error"] = validation_error
+	else:
+		_registration_status["manual_save_error"] = "Could not write the calibration file. The preview is still open."
 	manual_claw_calibration_enabled = true
 	_refresh_manual_claw_calibration()
 	return false
@@ -455,6 +500,8 @@ func save_manual_claw_calibration() -> bool:
 func get_manual_claw_calibration_state() -> Dictionary:
 	return {
 		"enabled": manual_claw_calibration_enabled,
+		"shoulder_lift_trim_degrees": manual_shoulder_lift_trim_degrees,
+		"elbow_flex_trim_degrees": manual_elbow_flex_trim_degrees,
 		"wrist_flex_trim_degrees": manual_wrist_flex_trim_degrees,
 		"wrist_roll_trim_degrees": manual_wrist_roll_trim_degrees,
 		"wrist_roll_direction": manual_wrist_roll_direction,
@@ -463,6 +510,136 @@ func get_manual_claw_calibration_state() -> Dictionary:
 		"opening_offset_degrees": manual_opening_offset_degrees,
 		"opening_scale": manual_opening_scale,
 	}
+
+
+func get_manual_calibration_status() -> Dictionary:
+	return {
+		"supported": true,
+		"enabled": manual_claw_calibration_enabled,
+		"registered": bool(_registration_status.get("registered", false)),
+		"reply": _manual_calibration_reply.duplicate(true),
+		"preview": get_manual_claw_calibration_state(),
+	}
+
+
+func handle_manual_calibration_action(action: Dictionary, settings: Dictionary = {}, busy: bool = false) -> Dictionary:
+	var request_id := str(action.get("request_id", ""))
+	var operation := str(action.get("operation", ""))
+	if request_id.is_empty() or request_id.length() > 80:
+		return {"ok": false, "message": "Missing calibration request identifier."}
+	if _manual_calibration_replies.has(request_id):
+		var cached: Dictionary = _manual_calibration_replies[request_id].duplicate(true)
+		if str(cached.get("operation", "")) != "preview":
+			_manual_calibration_reply = cached.duplicate(true)
+		return cached
+	var reply := {"request_id": request_id, "operation": operation, "ok": false, "message": ""}
+	if busy:
+		reply.message = "Wait for automatic calibration to finish, or cancel it first."
+	elif operation == "export":
+		if not bool(_registration_status.get("registered", false)):
+			reply.message = "Align and save the robot base before exporting."
+		elif manual_claw_calibration_enabled:
+			reply.message = "Save or cancel the preview before exporting."
+		else:
+			var file := CALIBRATION_FILE.package(_build_registration_payload(), ROBOT_KINEMATICS_VERSION)
+			reply.message = _validate_portable_mapping(file)
+			if str(reply.message).is_empty():
+				reply.ok = true
+				reply.file = file
+				reply.message = "Calibration file ready to export."
+	elif operation == "import":
+		reply.message = _import_visual_calibration(action.get("file"), bool(action.get("restore_base", false)))
+		reply.ok = str(reply.message).is_empty()
+		if reply.ok:
+			reply.message = "Imported and saved the visual calibration." if bool(action.get("restore_base", false)) else "Imported and saved joint calibration; current base placement kept."
+	elif operation == "cancel":
+		cancel_manual_claw_calibration()
+		reply.ok = true
+		reply.message = "Preview cancelled; saved calibration restored."
+	elif not bool(_registration_status.get("registered", false)):
+		reply.message = "Align the robot base first. A partial automatic calibration with a saved base is enough."
+	elif operation in ["begin", "reset"]:
+		begin_manual_claw_calibration()
+		reply.ok = true
+		reply.message = "Adjust the overlay, then check several arm poses before saving."
+	elif operation in ["preview", "save"] and manual_claw_calibration_enabled:
+		update_manual_claw_calibration(settings)
+		if operation == "preview":
+			reply.ok = true
+		else:
+			reply.ok = save_manual_claw_calibration()
+			reply.message = "Manual calibration saved. It will load next time; Export JSON creates a portable copy." if reply.ok else str(_registration_status.get("manual_save_error", "Could not save the calibration. The preview is still open."))
+	else:
+		reply.message = "Open manual joint tuning before editing or saving."
+	# Preview acknowledgements must not overwrite an in-flight Save/Export reply.
+	if operation != "preview":
+		_manual_calibration_reply = reply.duplicate(true)
+		_manual_calibration_replies[request_id] = reply.duplicate(true)
+	while _manual_calibration_replies.size() > 32:
+		_manual_calibration_replies.erase(_manual_calibration_replies.keys()[0])
+	return reply
+
+
+func _validate_portable_mapping(file: Variant) -> String:
+	var error := CALIBRATION_FILE.validate(file, ROBOT_KINEMATICS_VERSION)
+	if not error.is_empty():
+		return error
+	# Exercise the actual saved-file loader on a detached node. It never enters
+	# the scene tree, binds telemetry, loads meshes, or writes any file. Reject
+	# values the loader would silently discard so Save/Import survives restart.
+	var probe: Node3D = get_script().new()
+	probe.set("_registration_path", "user://__so101_validation_only__.json")
+	probe.call("_apply_saved_joint_mapping", file.registration)
+	var accepted: Dictionary = probe.call("_build_registration_payload")
+	probe.free()
+	for key in file.registration:
+		if key in CALIBRATION_FILE.BASE_FIELDS:
+			continue
+		if str(key).begins_with("moving_jaw_") and not bool(file.registration.moving_jaw_calibration_enabled):
+			continue
+		var wanted = file.registration[key]
+		var actual = accepted.get(key)
+		if wanted is Array:
+			if not actual is Array or wanted.size() != actual.size():
+				return "Unsupported saved calibration: " + str(key)
+			for index in range(wanted.size()):
+				if absf(float(wanted[index]) - float(actual[index])) > 0.0001:
+					return "This correction would not survive reload: " + str(key)
+		elif wanted is bool:
+			if wanted != actual:
+				return "Unsupported saved calibration: " + str(key)
+		elif (not actual is float and not actual is int) or absf(float(wanted) - float(actual)) > 0.0001:
+			return "Unsupported saved calibration: " + str(key)
+	return ""
+
+
+func _import_visual_calibration(file: Variant, restore_base: bool) -> String:
+	if manual_claw_calibration_enabled:
+		return "Save or cancel the current preview before importing."
+	var error := _validate_portable_mapping(file)
+	if not error.is_empty():
+		return error
+	if not restore_base and not bool(_registration_status.get("registered", false)):
+		return "Align the base first, or select Restore saved base placement for the same physical camera setup."
+	var payload := _build_registration_payload()
+	for key in file.registration:
+		if key in CALIBRATION_FILE.BASE_FIELDS and not restore_base:
+			continue
+		payload[key] = file.registration[key]
+	payload["registration_source"] = "imported_visual_calibration"
+	payload["saved_unix_ms"] = Time.get_unix_time_from_system() * 1000.0
+	# Imported calibration is user supplied, not a fresh automatic validation.
+	payload["confidence"] = 0.0
+	payload["joint_refinement"] = {"manual_import": {"saved_unix_ms": payload.saved_unix_ms, "restored_base": restore_base}}
+	if restore_base:
+		payload.erase("base_axis_fit")
+		payload.erase("base_registration_source")
+		payload.erase("calibrated_through_joint")
+	if not _write_registration_payload(payload):
+		return "Could not save the imported file. Current calibration was kept."
+	_load_registration()
+	_refresh_manual_claw_calibration()
+	return ""
 
 
 func _refresh_manual_claw_calibration() -> void:
@@ -1547,12 +1724,12 @@ func _normalized_joint_angle(index: int, normalized: float) -> float:
 		if manual_claw_calibration_enabled:
 			calibrated = calibrated * manual_opening_scale + deg_to_rad(manual_opening_offset_degrees)
 		return clampf(calibrated, limits.x, limits.y)
-	if index == 4 and force_wrist_roll_straight:
+	if index == 4 and force_wrist_roll_straight and not manual_claw_calibration_enabled:
 		return 0.0
 	var direction := manual_wrist_roll_direction if manual_claw_calibration_enabled and index == 4 else _joint_direction(index)
 	var trim := 0.0
 	if manual_claw_calibration_enabled:
-		trim = manual_wrist_flex_trim_degrees if index == 3 else manual_wrist_roll_trim_degrees if index == 4 else 0.0
+		trim = [0.0, manual_shoulder_lift_trim_degrees, manual_elbow_flex_trim_degrees, manual_wrist_flex_trim_degrees, manual_wrist_roll_trim_degrees][index]
 	var angle := deg_to_rad(normalized * direction + _joint_offset(index) + trim)
 	angle = wrapf(angle + PI, 0.0, TAU) - PI
 	return clampf(angle, limits.x, limits.y) if clamp_visual_joint_limits else angle
@@ -1725,6 +1902,10 @@ func _apply_moving_jaw_visual_geometry() -> void:
 		)
 
 func _save_registration() -> bool:
+	return _write_registration_payload(_build_registration_payload())
+
+
+func _build_registration_payload() -> Dictionary:
 	var payload := _read_registration_payload()
 	payload.merge(_transform_to_dictionary(transform), true)
 	payload["type"] = "so101_robot_registration"
@@ -1799,6 +1980,10 @@ func _save_registration() -> bool:
 		payload["calibrated_through_joint"] = int(
 			_registration_status["calibrated_through_joint"]
 		)
+	return payload
+
+
+func _write_registration_payload(payload: Dictionary) -> bool:
 	var target_path := ProjectSettings.globalize_path(_registration_path)
 	var temporary_path := target_path + ".pending"
 	if FileAccess.file_exists(temporary_path):
@@ -1809,7 +1994,12 @@ func _save_registration() -> bool:
 		return false
 	file.store_string(JSON.stringify(payload, "\t"))
 	file.flush()
+	var write_error := file.get_error()
 	file.close()
+	if write_error != OK:
+		DirAccess.remove_absolute(temporary_path)
+		_registration_status["fault"] = "could not finish writing robot registration"
+		return false
 	# Keep the prior path untouched until a complete pending file exists. On
 	# supported desktop platforms rename is the single atomic commit point and
 	# replaces the old file without exposing a partial JSON document.

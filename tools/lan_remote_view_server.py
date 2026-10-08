@@ -3864,6 +3864,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if isinstance(sent_unix_ms, bool) or not isinstance(sent_unix_ms, (int, float)) or not np.isfinite(sent_unix_ms):
                 raise ValueError("focus_pick_sent_unix_ms must be finite")
             packet["focus_pick_sent_unix_ms"] = int(sent_unix_ms)
+        packet.update(self.server.robot_operator.structured_view_settings(data))
         return packet
 
     def validate_site_settings(self, data: object) -> dict:

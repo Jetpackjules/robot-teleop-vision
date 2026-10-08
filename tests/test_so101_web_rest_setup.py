@@ -48,7 +48,7 @@ def test_missing_rest_setup_and_old_service_controls_render_without_crashing(tmp
     shutil.copyfile(ROOT / "robot_modules/so101/web/module.js", tmp_path / "module.mjs")
     (tmp_path / "probe.mjs").write_text("""
 const elements = new Map();
-globalThis.document = {getElementById(id) {
+globalThis.document = {querySelectorAll() { return []; }, getElementById(id) {
   if (!elements.has(id)) elements.set(id, {classList: {toggle() {}}, textContent: ''});
   return elements.get(id);
 }};

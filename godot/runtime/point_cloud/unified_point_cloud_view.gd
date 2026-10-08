@@ -218,6 +218,8 @@ const DORMANT_OAKD_PROPERTIES := [
 @export_tool_button("Calibrate Robot") var calibrate_robot_position_action: Callable = _start_robot_position_calibration
 ## Runs the selected module's optional refinement workflow.
 @export_tool_button("Refine Robot Calibration") var refine_robot_joint_alignment_action: Callable = _start_robot_joint_refinement
+## Opens visual joint tuning with local save and portable JSON import/export.
+@export_tool_button("Manual Joint Tuning / Calibration Files") var manual_robot_calibration_action: Callable = _open_manual_robot_calibration
 ## Sends the selected module's guarded rest request, when supported.
 @export_tool_button("Return Robot to Rest Pose") var return_robot_to_rest_action: Callable = _return_robot_to_rest_pose
 @export_tool_button("Save Current Pose as Rest") var save_robot_rest_action: Callable = _save_current_robot_rest_pose
@@ -920,6 +922,12 @@ func _start_robot_position_calibration() -> void:
 		return
 	module.call("start_full_calibration", Engine.is_editor_hint())
 	_update_robot_position_calibration_status()
+
+
+func _open_manual_robot_calibration() -> void:
+	var module := _active_robot_module()
+	if module != null and module.has_method("open_manual_calibration_panel"):
+		module.call("open_manual_calibration_panel")
 
 
 func _start_robot_joint_refinement() -> void:

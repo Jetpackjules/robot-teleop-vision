@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, ClassVar
@@ -201,6 +202,8 @@ class So101Operator(GenericRobotOperator):
 
     def numeric_view_settings(self) -> Mapping[str, tuple[float, float]]:
         return {
+            "manual_shoulder_lift_trim_degrees": (-180.0, 180.0),
+            "manual_elbow_flex_trim_degrees": (-180.0, 180.0),
             "manual_wrist_flex_trim_degrees": (-90.0, 90.0),
             "manual_wrist_roll_trim_degrees": (-180.0, 180.0),
             "manual_wrist_roll_direction": (-1.0, 1.0),
@@ -239,6 +242,32 @@ class So101Operator(GenericRobotOperator):
             "arm_d455_visual_correction_enabled",
             "arm_idle_return_enabled",
         )
+
+    def structured_view_settings(self, data: Mapping[str, Any]) -> dict[str, Any]:
+        key = "robot_visual_calibration_action"
+        if key not in data:
+            return {}
+        action = data[key]
+        if not isinstance(action, dict):
+            raise ValueError("visual calibration action must be an object")  # noqa: TRY004 - HTTP validation contract
+        operation = action.get("operation")
+        if operation not in ("begin", "preview", "reset", "cancel", "save", "export", "import"):
+            raise ValueError("unsupported visual calibration operation")
+        request_id = action.get("request_id")
+        if not isinstance(request_id, str) or not 1 <= len(request_id) <= 80:
+            raise ValueError("visual calibration request_id is required (maximum 80 characters)")
+        result = {"request_id": request_id, "operation": operation}
+        if operation == "import":
+            file = action.get("file")
+            if not isinstance(file, dict):
+                raise ValueError("visual calibration file must be a JSON object")
+            if len(json.dumps(file, allow_nan=False).encode("utf-8")) > 16384:
+                raise ValueError("visual calibration file exceeds 16 KB")
+            restore_base = action.get("restore_base", False)
+            if not isinstance(restore_base, bool):
+                raise ValueError("restore_base must be boolean")
+            result.update(file=file, restore_base=restore_base)
+        return {key: result}
 
     def resolve_auxiliary_device(self, view_id: str, configured: str = "") -> str:
         if view_id != "wrist_rgb":
