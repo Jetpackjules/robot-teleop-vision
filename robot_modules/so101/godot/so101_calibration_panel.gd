@@ -22,6 +22,10 @@ var _preview_started := false
 func _ready() -> void:
 	title = "Manual joint tuning / Calibration files"
 	size = Vector2i(600, 660)
+	if Engine.is_editor_hint():
+		var editor_interface := Engine.get_singleton("EditorInterface")
+		if editor_interface != null:
+			size = Vector2i(Vector2(size) * float(editor_interface.call("get_editor_scale")))
 	min_size = Vector2i(480, 480)
 	visible = false
 	close_requested.connect(_close)
@@ -51,8 +55,8 @@ func _ready() -> void:
 		var input := SpinBox.new()
 		input.min_value = CONTROLS[key][1]
 		input.max_value = CONTROLS[key][2]
-		input.value = CONTROLS[key][3]
 		input.step = 0.005 if key == "manual_opening_scale" else 0.1
+		input.value = CONTROLS[key][3]
 		input.suffix = "x" if key == "manual_opening_scale" else "deg"
 		input.custom_minimum_size.x = 180
 		input.value_changed.connect(_preview.bind(key))
@@ -93,7 +97,7 @@ func _button(parent: Node, label: String, callback: Callable) -> void:
 
 
 func open_panel() -> void:
-	popup_centered()
+	popup_centered_clamped(size, 0.9)
 	_message.text = "Adjust a joint to start a preview, or import an existing JSON file."
 
 

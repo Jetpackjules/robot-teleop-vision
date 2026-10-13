@@ -120,11 +120,27 @@ func manual_calibration_action(action: Dictionary, settings: Dictionary = {}) ->
 
 
 func open_manual_calibration_panel() -> void:
+	var panel_host: Node = self
+	if Engine.is_editor_hint():
+		# A Window under the edited scene is embedded in its preview viewport,
+		# so it cannot serve as an interactive dialog over the 3D editor.
+		var editor_interface := Engine.get_singleton("EditorInterface")
+		if editor_interface == null:
+			push_error("Manual joint tuning could not find the Godot editor UI.")
+			return
+		panel_host = editor_interface.call("get_base_control")
 	if not is_instance_valid(_manual_panel):
 		_manual_panel = Window.new()
+		_manual_panel.visible = false
+		_manual_panel.transient = true
 		_manual_panel.set_script(load("res://robot_modules/so101/godot/so101_calibration_panel.gd"))
 		_manual_panel.set("robot_module", self)
-		add_child(_manual_panel)
+	if _manual_panel.get_parent() == null:
+		panel_host.add_child(_manual_panel)
+	elif _manual_panel.get_parent() != panel_host:
+		# Also recover a panel created before the script was reloaded.
+		_manual_panel.hide()
+		_manual_panel.reparent(panel_host)
 	_manual_panel.call("open_panel")
 
 

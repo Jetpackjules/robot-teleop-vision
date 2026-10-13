@@ -146,6 +146,7 @@ func _run() -> void:
 	panel.robot_module = module
 	module.add_child(panel)
 	panel.open_panel()
+	check(is_equal_approx(panel._fields.manual_opening_scale.value, 1.0), "native opening scale starts unchanged")
 	panel._fields.manual_shoulder_lift_trim_degrees.value = 3.5
 	check(arm.manual_claw_calibration_enabled and arm.manual_shoulder_lift_trim_degrees == 3.5, "native numeric field drives preview")
 	panel._save()

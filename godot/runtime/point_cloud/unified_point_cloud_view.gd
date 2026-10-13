@@ -926,8 +926,13 @@ func _start_robot_position_calibration() -> void:
 
 func _open_manual_robot_calibration() -> void:
 	var module := _active_robot_module()
-	if module != null and module.has_method("open_manual_calibration_panel"):
-		module.call("open_manual_calibration_panel")
+	if module == null or not module.has_method("open_manual_calibration_panel"):
+		robot_position_calibration_status = "Manual joint tuning is unavailable. No compatible robot module is loaded."
+		push_warning(robot_position_calibration_status)
+		if Engine.is_editor_hint():
+			notify_property_list_changed()
+		return
+	module.call("open_manual_calibration_panel")
 
 
 func _start_robot_joint_refinement() -> void:
