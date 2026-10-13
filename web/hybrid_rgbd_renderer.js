@@ -1,3 +1,5 @@
+import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261013";
+
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},
   colors: {},
@@ -20,6 +22,7 @@ const state = {
   gl: null,
   program: null,
   uniforms: null,
+  cameraFusion: null,
   robotProgram: null,
   robotUniforms: null,
   robotVao: null,
@@ -98,6 +101,7 @@ const state = {
     fov: 55,
     splat_fill: 1.3,
     geometry_mode: "points",
+    overlap_suppression_enabled: false,
     camera_color_fusion_enabled: true,
     mesh_depth_delta: 0.035,
     mesh_max_edge: 0.055,
@@ -153,6 +157,7 @@ uniform mat4 u_view_projection;
 uniform vec4 u_intrinsics;
 uniform ivec2 u_size;
 uniform float u_point_size;
+uniform float u_max_point_size;
 uniform highp int u_render_mode;
 uniform float u_mesh_depth_delta;
 uniform float u_mesh_max_edge;
@@ -169,6 +174,7 @@ uniform float u_fusion_depth_tolerance;
 
 out vec3 v_color;
 out float v_valid;
+out vec3 v_world_position;
 
 bool depth_supported(ivec2 pixel, uint depth_mm) {
   float tolerance_mm = max(2.0, u_mesh_depth_delta * float(depth_mm) * 0.5);
@@ -184,6 +190,7 @@ bool depth_supported(ivec2 pixel, uint depth_mm) {
 }
 
 void main() {
+  v_world_position = vec3(0.0);
   ivec2 pixel_coord;
   bool triangle_valid = true;
   if (u_render_mode == 1) {
@@ -271,7 +278,8 @@ void main() {
     }
   }
   gl_Position = u_view_projection * vec4(world_position, 1.0);
-  gl_PointSize = u_point_size;
+  v_world_position = world_position;
+  gl_PointSize = clamp(u_point_size * z / max(0.001, gl_Position.w), 1.0, u_max_point_size);
   v_color = texelFetch(u_color, ivec2(x, y), 0).rgb;
   if (u_fusion_enabled == 1) {
     vec3 fusion_position = (u_world_to_fusion * vec4(world_position, 1.0)).xyz;
@@ -302,8 +310,11 @@ in float v_valid;
 uniform highp int u_render_mode;
 out vec4 out_color;
 
+${FUSION_FRAGMENT_SHADER}
+
 void main() {
   if (v_valid < 0.9999) discard;
+  if (u_render_mode == 1 && rig_overlap()) discard;
   // A surface triangle is only usable when all three vertices survived the
   // depth-continuity test. Interpolation makes v_valid less than one if even
   // one corner was rejected, preventing the long screen-spanning streaks
@@ -954,6 +965,11 @@ function findUniforms(gl, program) {
     intrinsics: gl.getUniformLocation(program, "u_intrinsics"),
     size: gl.getUniformLocation(program, "u_size"),
     pointSize: gl.getUniformLocation(program, "u_point_size"),
+    maxPointSize: gl.getUniformLocation(program, "u_max_point_size"),
+    rigEnabled: gl.getUniformLocation(program, "u_rig_enabled"),
+    rigIndex: gl.getUniformLocation(program, "u_rig_index"),
+    rigDepth: gl.getUniformLocation(program, "u_rig_depth"),
+    rigData: gl.getUniformLocation(program, "u_rig_data"),
     renderMode: gl.getUniformLocation(program, "u_render_mode"),
     meshDepthDelta: gl.getUniformLocation(program, "u_mesh_depth_delta"),
     meshMaxEdge: gl.getUniformLocation(program, "u_mesh_max_edge"),
@@ -1759,7 +1775,7 @@ async function decodeNewestPackets() {
       deleteCameraTextures(camera);
       return false;
     });
-    state.cameras.sort((left, right) => Number(left.metadata.priority || 0) - Number(right.metadata.priority || 0));
+    state.cameras = orderedCameras(state.cameras);
     const viewerTransform = metadata.viewer && metadata.viewer.transform;
     if (!state.baseViewer && Array.isArray(viewerTransform) && viewerTransform.length === 16) {
       state.baseViewer = {
@@ -2032,11 +2048,29 @@ function render() {
   const meshMode = state.settings.geometry_mode === "mesh";
   gl.uniform1f(state.uniforms.meshDepthDelta, Number(state.settings.mesh_depth_delta || 0.045));
   gl.uniform1f(state.uniforms.meshMaxEdge, Number(state.settings.mesh_max_edge || 0.08));
+  const now = performance.now();
   const fusionReference = state.settings.camera_color_fusion_enabled
-    ? state.cameras.find((camera) => String(camera.metadata.model || "").includes("435")) || null
+    ? chooseColorReference(state.cameras, now)
     : null;
+  let unified = meshMode && state.settings.overlap_suppression_enabled && state.cameras.length >= 2;
+  if (unified) {
+    try {
+      state.cameraFusion.update(state.cameras, inverseRigidTransform, now);
+      state.stats.renderWarning = "";
+    } catch (error) {
+      unified = false;
+      state.stats.renderWarning = String(error.message || error);
+    }
+  } else {
+    state.cameraFusion.clear();
+    state.stats.renderWarning = "";
+  }
+  gl.uniform1i(state.uniforms.rigEnabled, unified ? 1 : 0);
+  gl.uniform1f(state.uniforms.fusionDepthTolerance, 0.035);
 
-  for (const camera of state.cameras) {
+  for (const [cameraIndex, camera] of state.cameras.entries()) {
+    if (unified && !cameraIsFresh(camera, now)) continue;
+    gl.uniform1i(state.uniforms.rigIndex, cameraIndex);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, camera.depthTexture);
     gl.activeTexture(gl.TEXTURE1);
@@ -2056,26 +2090,21 @@ function render() {
     gl.uniformMatrix4fv(state.uniforms.model, false, camera.modelMatrix);
     gl.uniform4fv(state.uniforms.intrinsics, camera.intrinsicsArray);
     gl.uniform2i(state.uniforms.size, camera.width, camera.height);
-    const detailBoost = String(camera.metadata.model || "").includes("435") ? 1.15 : 1.0;
-    const sampleFootprint = Math.max(
-      dimensions.width / Math.max(1, camera.width),
-      dimensions.height / Math.max(1, camera.height),
-    );
-    const pointSize = sampleFootprint * Number(state.settings.splat_fill || 1.15) * detailBoost;
+    const pointSize = pointPixelScale(dimensions.height, fov, camera.intrinsicsArray, Number(state.settings.splat_fill || 1.15));
     if (meshMode && camera.width > 1 && camera.height > 1) {
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
-      if (state.settings.point_underlay) {
+      if (state.settings.point_underlay && !unified) {
         gl.uniform1i(state.uniforms.renderMode, 2);
-        gl.uniform1f(state.uniforms.pointSize, clamp(pointSize * 0.85, 1, 10));
+        gl.uniform1f(state.uniforms.pointSize, pointSize * 0.85);
         gl.drawArrays(gl.POINTS, 0, camera.width * camera.height);
       }
       // Validate each emitted triangle from its actual three depth samples, matching Godot's mesh rule.
       gl.uniform1i(state.uniforms.renderMode, 1);
-      gl.uniform1f(state.uniforms.pointSize, clamp(pointSize, 1, 10));
+      gl.uniform1f(state.uniforms.pointSize, pointSize);
       gl.drawArrays(gl.TRIANGLES, 0, (camera.width - 1) * (camera.height - 1) * 6);
     } else {
       gl.uniform1i(state.uniforms.renderMode, 0);
-      gl.uniform1f(state.uniforms.pointSize, clamp(pointSize, 1, 10));
+      gl.uniform1f(state.uniforms.pointSize, pointSize);
       gl.drawArrays(gl.POINTS, 0, camera.width * camera.height);
     }
   }
@@ -2551,6 +2580,7 @@ export async function startGodotHybridRenderer(options = {}) {
   state.gl = gl;
   state.program = createProgram(gl);
   state.uniforms = findUniforms(gl, state.program);
+  state.cameraFusion = new MultiCameraFusion(gl);
   state.robotProgram = createProgram(gl, ROBOT_VERTEX_SHADER, ROBOT_FRAGMENT_SHADER);
   state.robotUniforms = findRobotUniforms(gl, state.robotProgram);
   state.robotVao = gl.createVertexArray();
@@ -2559,6 +2589,9 @@ export async function startGodotHybridRenderer(options = {}) {
   gl.uniform1i(state.uniforms.color, 1);
   gl.uniform1i(state.uniforms.fusionDepth, 2);
   gl.uniform1i(state.uniforms.fusionColor, 3);
+  gl.uniform1i(state.uniforms.rigDepth, 4);
+  gl.uniform1i(state.uniforms.rigData, 5);
+  gl.uniform1f(state.uniforms.maxPointSize, Math.min(32, gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]));
   state.running = true;
   state.robotLoadToken += 1;
   const robotLoadToken = state.robotLoadToken;
@@ -2658,6 +2691,8 @@ export function stopGodotHybridRenderer() {
   state.persistentMetadata = null;
   for (const camera of state.cameras) deleteCameraTextures(camera);
   state.cameras = [];
+  state.cameraFusion?.clear();
+  state.cameraFusion = null;
   const gl = state.gl;
   deleteWorkspaceGuide(gl);
   deleteRobotMeshes(gl);
@@ -2697,9 +2732,10 @@ export function setGodotHybridViewSettings(settings = {}) {
       ? "alignment"
       : state.settings.robot_overlay_style,
   };
-  if (["point_cloud", "shader_mesh", "independent_mesh"].includes(settings.display_mode)) {
+  if (["point_cloud", "shader_mesh", "independent_mesh", "unified_mesh"].includes(settings.display_mode)) {
     state.settings.geometry_mode = settings.display_mode === "point_cloud" ? "points" : "mesh";
-    state.settings.camera_color_fusion_enabled = settings.display_mode !== "independent_mesh";
+    state.settings.camera_color_fusion_enabled = ["point_cloud", "shader_mesh"].includes(settings.display_mode);
+    state.settings.overlap_suppression_enabled = settings.display_mode === "unified_mesh";
   }
   if (settings.recenter) recenterGodotHybridRenderer();
 }

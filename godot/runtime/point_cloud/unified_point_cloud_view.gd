@@ -195,7 +195,7 @@ const DORMANT_OAKD_PROPERTIES := [
 @export_group("RealSense Color Match")
 ## Optional reference serial. When blank, the darker D435 is preferred so the match does not wash out the wood surface.
 @export var realsense_color_reference_serial: String = ""
-## Fits the other live RealSense camera to the reference using depth-verified overlap samples.
+## Fits every other active RealSense camera to the reference using depth-verified overlap. Failed fits keep their previous settings.
 @export_tool_button("Match RealSense Colors Now") var match_realsense_colors_action: Callable = _match_realsense_colors_now
 @export_tool_button("Clear RealSense Color Matching") var clear_realsense_color_matching_action: Callable = _clear_realsense_color_matching
 @export_multiline var realsense_color_match_status: String = "RealSense color matching has not been run."
@@ -2940,12 +2940,7 @@ func _update_unified_mesh_fusion() -> void:
 		if renderer.has_method("set_fusion_color_only"):
 			renderer.call("set_fusion_color_only", false)
 	if render_mode == "shader_mesh" and renderers.size() >= 2:
-		var reference_id := _realsense_camera_id(realsense_color_reference_serial.strip_edges())
-		if not _camera_nodes.has(reference_id):
-			for camera_id in fusion_camera_ids:
-				if str(_realsense_setting(camera_id, "model", "")).to_upper().contains("D435"):
-					reference_id = camera_id
-					break
+		var reference_id := _realsense_color_reference_id(_live_realsense_color_ids())
 		var reference := _camera_nodes.get(reference_id) as MeshInstance3D
 		if reference == null or not is_instance_valid(reference):
 			return
@@ -2970,6 +2965,11 @@ func _update_unified_mesh_fusion() -> void:
 			renderer.call("set_fusion_depth_tolerance", maxf(mesh_fusion_depth_tolerance_m, 0.05))
 			renderer.call("set_fusion_color_only", true)
 			renderer.call("set_fusion_enabled", true)
+			var material := renderer.get_active_material(0) as ShaderMaterial if renderer.mesh != null else renderer.material_override as ShaderMaterial
+			if material != null:
+				var matched := bool(reference.get("color_match_enabled"))
+				material.set_shader_parameter("fusion_peer_color_gain", reference.get("color_gain") if matched else Vector3.ONE)
+				material.set_shader_parameter("fusion_peer_color_bias", reference.get("color_bias") if matched else Vector3.ZERO)
 		return
 	if not rig_mode:
 		return
@@ -3165,55 +3165,68 @@ func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) ->
 		if node.has_method("get_direct_realsense_status"):
 			realsense_status = "%s: %s" % [_camera_label(camera_id), str(node.call("get_direct_realsense_status"))]
 
-func _match_realsense_colors_now() -> void:
-	var live_ids: Array[String] = []
+func _live_realsense_color_ids() -> Array[String]:
+	var ids: Array[String] = []
 	for camera_id in _realsense_camera_ids():
 		var renderer := _camera_nodes.get(camera_id) as MeshInstance3D
-		if renderer != null and is_instance_valid(renderer) and renderer.has_method("get_depth_image") and renderer.has_method("get_color_image"):
-			live_ids.append(camera_id)
+		if renderer == null or not is_instance_valid(renderer) or not _camera_enabled(camera_id) or not _camera_diagnostic_visible(camera_id):
+			continue
+		if not renderer.has_method("get_depth_image") or not renderer.has_method("get_color_image"):
+			continue
+		if renderer.has_method("get_display_frame_age_ms") and float(renderer.call("get_display_frame_age_ms")) >= 1000.0:
+			continue
+		if _color_match_image_missing(renderer.call("get_depth_image")) or _color_match_image_missing(renderer.call("get_color_image")):
+			continue
+		ids.append(camera_id)
+	ids.sort()
+	return ids
+
+func _realsense_color_reference_id(live_ids: Array[String]) -> String:
+	var requested := _realsense_camera_id(realsense_color_reference_serial.strip_edges())
+	if requested in live_ids:
+		return requested
+	for camera_id in live_ids:
+		if str(_realsense_setting(camera_id, "model", "")).to_upper().contains("D435"):
+			return camera_id
+	return live_ids[0] if not live_ids.is_empty() else ""
+
+func _match_realsense_colors_now() -> void:
+	var live_ids := _live_realsense_color_ids()
 	if live_ids.size() < 2:
-		realsense_color_match_status = "Color match needs two live RealSense renderers."
+		realsense_color_match_status = "Color match needs at least two enabled cameras with fresh depth and RGB frames. Existing settings were kept."
 		return
-
-	var reference_id := ""
-	var requested_serial := realsense_color_reference_serial.strip_edges()
-	if not requested_serial.is_empty():
-		var requested_id := _realsense_camera_id(requested_serial)
-		if requested_id in live_ids:
-			reference_id = requested_id
-	if reference_id.is_empty():
-		for camera_id in live_ids:
-			if str(_realsense_setting(camera_id, "model", "")).to_upper().contains("D435"):
-				reference_id = camera_id
-				break
-	if reference_id.is_empty():
-		reference_id = live_ids[0]
-	var target_id := ""
-	for camera_id in live_ids:
-		if camera_id != reference_id and str(_realsense_setting(camera_id, "model", "")).to_upper().contains("D455"):
-			target_id = camera_id
-			break
-	if target_id.is_empty():
-		for camera_id in live_ids:
-			if camera_id != reference_id:
-				target_id = camera_id
-				break
-	if target_id.is_empty():
-		realsense_color_match_status = "Could not choose a non-reference RealSense camera."
-		return
-	var target_anchor := _find_realsense_camera_anchor_existing(target_id)
-	if target_anchor == null:
-		realsense_color_match_status = "Color match could not find the target camera settings node."
-		return
-	# The reference must be raw too: an earlier failed run may have corrected the
-	# wrong camera. Always restore every live RealSense camera before measuring.
-	for camera_id in live_ids:
-		var camera_anchor := _find_realsense_camera_anchor_existing(camera_id)
-		if camera_anchor != null and camera_anchor.has_method("reset_color_match"):
-			camera_anchor.call("reset_color_match")
-			_sync_realsense_registry_from_node(camera_id)
+	var reference_id := _realsense_color_reference_id(live_ids)
+	var reference_gain := Vector3.ONE
+	var reference_bias := Vector3.ZERO
+	var reference_anchor := _find_realsense_camera_anchor_existing(reference_id)
+	if reference_anchor != null and bool(reference_anchor.get("color_match_enabled")):
+		reference_gain = reference_anchor.get("color_gain")
+		reference_bias = reference_anchor.get("color_bias")
+	var results: Array[String] = []
+	var matched := 0
+	for target_id in live_ids:
+		if target_id == reference_id:
+			continue
+		var target_anchor := _find_realsense_camera_anchor_existing(target_id)
+		if target_anchor == null:
+			results.append("%s: settings node unavailable; kept existing settings." % _realsense_serial(target_id))
+			continue
+		# Images are raw; preserve the reference's current appearance. Never reset
+		# an existing match before a replacement has passed the evidence checks.
+		var fit := _measure_realsense_color_fit(reference_id, target_id, reference_gain, reference_bias)
+		if fit.has("error"):
+			results.append("%s: %s" % [_realsense_serial(target_id), str(fit.error)])
+			continue
+		target_anchor.set("color_gain", fit.gain)
+		target_anchor.set("color_bias", fit.bias)
+		target_anchor.set("color_match_enabled", true)
+		_sync_realsense_registry_from_node(target_id)
+		matched += 1
+		results.append("%s: %d samples, residual %.4f -> %.4f" % [_realsense_serial(target_id), int(fit.samples), float(fit.before_error), float(fit.after_error)])
 	_update_camera_renderers()
+	realsense_color_match_status = "Matched %d/%d cameras to %s. Unsuccessful fits kept their existing settings.\n%s" % [matched, live_ids.size() - 1, _realsense_serial(reference_id), "\n".join(results)]
 
+func _measure_realsense_color_fit(reference_id: String, target_id: String, reference_gain := Vector3.ONE, reference_bias := Vector3.ZERO) -> Dictionary:
 	var reference := _camera_nodes.get(reference_id) as MeshInstance3D
 	var target := _camera_nodes.get(target_id) as MeshInstance3D
 	var reference_depth := reference.call("get_depth_image") as Image
@@ -3221,14 +3234,14 @@ func _match_realsense_colors_now() -> void:
 	var target_depth := target.call("get_depth_image") as Image
 	var target_color := target.call("get_color_image") as Image
 	if _color_match_image_missing(reference_depth) or _color_match_image_missing(reference_color) or _color_match_image_missing(target_depth) or _color_match_image_missing(target_color):
-		realsense_color_match_status = "Color match is waiting for complete depth and RGB frames from both cameras."
-		return
+		return {"error": "Color match is waiting for complete depth and RGB frames from both cameras."}
 
 	var reference_intrinsics: Vector4 = reference.call("get_current_intrinsics")
 	var target_intrinsics: Vector4 = target.call("get_current_intrinsics")
+	var reference_stride := maxi(1, int(reference.call("get_current_grid_stride")))
+	var target_stride := maxi(1, int(target.call("get_current_grid_stride")))
 	if reference_intrinsics.x <= 0.0 or reference_intrinsics.y <= 0.0 or target_intrinsics.x <= 0.0 or target_intrinsics.y <= 0.0:
-		realsense_color_match_status = "Color match could not read valid camera intrinsics."
-		return
+		return {"error": "Color match could not read valid camera intrinsics."}
 
 	var target_samples := PackedVector3Array()
 	var reference_samples := PackedVector3Array()
@@ -3243,16 +3256,16 @@ func _match_realsense_colors_now() -> void:
 			if _color_match_depth_edge(target_depth, x, y, target_depth_m, sample_step):
 				continue
 			var target_local := Vector3(
-				(float(x) - target_intrinsics.z) * target_depth_m / target_intrinsics.x,
-				-(float(y) - target_intrinsics.w) * target_depth_m / target_intrinsics.y,
+				(float(x * target_stride) - target_intrinsics.z) * target_depth_m / target_intrinsics.x,
+				-(float(y * target_stride) - target_intrinsics.w) * target_depth_m / target_intrinsics.y,
 				-target_depth_m
 			)
 			var reference_local := world_to_reference * (target_to_world * target_local)
 			var projected_depth := -reference_local.z
 			if projected_depth < _camera_min_depth(reference_id) or projected_depth > _camera_max_depth(reference_id):
 				continue
-			var reference_x := int(round(reference_local.x * reference_intrinsics.x / projected_depth + reference_intrinsics.z))
-			var reference_y := int(round(-reference_local.y * reference_intrinsics.y / projected_depth + reference_intrinsics.w))
+			var reference_x := int(round((reference_local.x * reference_intrinsics.x / projected_depth + reference_intrinsics.z) / reference_stride))
+			var reference_y := int(round((-reference_local.y * reference_intrinsics.y / projected_depth + reference_intrinsics.w) / reference_stride))
 			if reference_x < sample_step or reference_y < sample_step or reference_x >= reference_depth.get_width() - sample_step or reference_y >= reference_depth.get_height() - sample_step:
 				continue
 			var reference_depth_m := reference_depth.get_pixel(reference_x, reference_y).r
@@ -3263,40 +3276,24 @@ func _match_realsense_colors_now() -> void:
 				continue
 			var target_rgb := _color_match_rgb_at_depth_pixel(target_color, target_depth, x, y)
 			var reference_rgb := _color_match_rgb_at_depth_pixel(reference_color, reference_depth, reference_x, reference_y)
+			reference_rgb = (reference_rgb * reference_gain + reference_bias).clamp(Vector3.ZERO, Vector3.ONE)
 			if not _color_match_rgb_valid(target_rgb) or not _color_match_rgb_valid(reference_rgb):
 				continue
 			target_samples.append(target_rgb)
 			reference_samples.append(reference_rgb)
 
 	if target_samples.size() < 300:
-		realsense_color_match_status = "Color match rejected: only %d valid overlap samples (need 300)." % target_samples.size()
-		return
+		return {"error": "Color match rejected: only %d valid overlap samples (need 300)." % target_samples.size()}
 	var fit := _fit_realsense_color_affine(target_samples, reference_samples)
 	if fit.is_empty():
-		realsense_color_match_status = "Color match rejected: overlap samples did not produce a stable fit."
-		return
+		return {"error": "Color match rejected: overlap samples did not produce a stable fit."}
 	var before_error := float(fit.get("before_error", INF))
 	var after_error := float(fit.get("after_error", INF))
 	if not is_finite(before_error) or not is_finite(after_error) or after_error >= before_error * 0.98 or before_error - after_error < 0.001:
-		realsense_color_match_status = "Color match kept existing settings: %d samples, residual %.4f -> %.4f (insufficient improvement)." % [target_samples.size(), before_error, after_error]
-		return
+		return {"error": "Color match kept existing settings: %d samples, residual %.4f -> %.4f (insufficient improvement)." % [target_samples.size(), before_error, after_error]}
 
-	var gain: Vector3 = fit["gain"]
-	var bias: Vector3 = fit["bias"]
-	target_anchor.set("color_gain", gain)
-	target_anchor.set("color_bias", bias)
-	target_anchor.set("color_match_enabled", true)
-	_sync_realsense_registry_from_node(target_id)
-	_update_camera_renderers()
-	realsense_color_match_status = "%s matched to %s: %d samples, residual %.4f -> %.4f, gain=%s bias=%s" % [
-		_realsense_serial(target_id),
-		_realsense_serial(reference_id),
-		target_samples.size(),
-		before_error,
-		after_error,
-		str(gain),
-		str(bias),
-	]
+	fit["samples"] = target_samples.size()
+	return fit
 
 func _clear_realsense_color_matching() -> void:
 	var cleared := 0

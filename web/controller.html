@@ -275,7 +275,7 @@
     }
   </style>
   <script type="module" src="./godot_webcam_tracker_bridge.js?v=20260803_settings_cleanup_v1"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=20260930_mesh_views_v1"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261013_multicamera"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -293,6 +293,7 @@
               <option value="point_cloud" selected>3D point cloud</option>
               <option value="shader_mesh">Shader mesh</option>
               <option value="independent_mesh">Independent mesh</option>
+              <option value="unified_mesh">Unified mesh</option>
               <option value="rgb_camera">RGB camera</option>
             </select>
           </label>
@@ -404,6 +405,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20260930_mesh_views_v1"></script>
+  <script type="module" src="./controller_hybrid.js?v=20261013_multicamera"></script>
 </body>
 </html>

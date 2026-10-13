@@ -3831,10 +3831,10 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if "display_mode" in data:
             display_mode = data["display_mode"]
             if not isinstance(display_mode, str) or display_mode not in (
-                "point_cloud", "shader_mesh", "independent_mesh", "rgb_camera"
+                "point_cloud", "shader_mesh", "independent_mesh", "unified_mesh", "rgb_camera"
             ):
                 raise ValueError(
-                    "display_mode must be point_cloud, shader_mesh, independent_mesh, or rgb_camera"
+                    "display_mode must be point_cloud, shader_mesh, independent_mesh, unified_mesh, or rgb_camera"
                 )
             packet["display_mode"] = display_mode
         if "stream_preset" in data:

@@ -54,7 +54,7 @@
     let startupNavigationPending = false;
     const hybridMode = !window.location.pathname.startsWith("/frame-stream");
     const displayModes = hybridMode
-      ? ["point_cloud", "shader_mesh", "independent_mesh", "rgb_camera"]
+      ? ["point_cloud", "shader_mesh", "independent_mesh", "unified_mesh", "rgb_camera"]
       : ["point_cloud", "rgb_camera"];
     for (const option of displayModeSelect.options) {
       option.hidden = option.disabled = !displayModes.includes(option.value);
@@ -1009,6 +1009,7 @@
       ].join("\n");
       statusLines.textContent = [
         `Stream ${streamMode} | ${size} | ${fps} | ${bitrate}`,
+        activeViewportMode === "hybrid" ? hybrid.renderWarning : "",
         headTrackingEnabled
           ? `Tracking ${latest.status || trackingState} | ${remote.connected ? "bridge on" : "bridge ..."}`
           : "Tracking off | mouse orbit/pan/zoom enabled",

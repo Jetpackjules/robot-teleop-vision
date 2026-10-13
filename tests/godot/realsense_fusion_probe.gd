@@ -90,15 +90,29 @@ func sample(viewport: SubViewport, surfaces: Array[MeshInstance3D], fusion: RefC
 func run() -> void:
 	check(ClassDB.class_exists("RealSenseSharedMemoryPointCloud"), "rebuilt native extension loaded")
 	var native = ClassDB.instantiate("RealSenseSharedMemoryPointCloud")
-	native.set("shared_memory_name", "__codex_fusion_test_no_source__")
+	native.set("shared_memory_name", OS.get_environment("ROBOT_TELEOP_TEST_SHM"))
 	native.set("direct_realsense_enabled", false)
 	native.set("render_connected_mesh", true)
 	native.set("gpu_connected_mesh", true)
 	native.set("gpu_mesh_static_shader", true)
 	root.add_child(native)
+	await process_frame
+	await process_frame
 	native.set_process(false)
-	var template: ShaderMaterial = native.get_material_override()
+	var raw_grid: Dictionary = native.get_depth_u16_frame(16)
+	check(raw_grid.get("intrinsics", Vector4.ZERO).is_equal_approx(Vector4(16,16,7.5,7.5)), "raw RGBD intrinsics account for sampling stride")
+	check(native.request_rgbd_encode(16,90), "synthetic RGBD encode accepted")
+	var encoded: Dictionary = {}
+	for attempt in 100:
+		encoded = native.take_rgbd_encoded_frame()
+		if not encoded.is_empty(): break
+		await create_timer(0.01).timeout
+	check(encoded.get("intrinsics", Vector4.ZERO).is_equal_approx(Vector4(16,16,7.5,7.5)), "asynchronous RGBD encoder preserves sampled geometry")
+	var template: ShaderMaterial = native.get_active_material(0)
 	check(template != null and template.shader.code.contains("rig_overlap"), "production native shader contains multi-camera fusion")
+	if template == null:
+		quit(1)
+		return
 	var viewport := SubViewport.new()
 	viewport.size = Vector2i(128,128)
 	viewport.own_world_3d = true
@@ -166,6 +180,14 @@ func run() -> void:
 	hidden.visible = false
 	await sample(viewport, surfaces, fusion, true, "hidden camera removed from layers", Color.GREEN)
 	check(fusion.depth_layers.get_layers() == 3, "camera removal rebuilds layer count")
+	for surface in surfaces: surface.visible = false
+	var target := surfaces[0]
+	target.visible = true
+	target.fill(1.0, Color.RED)
+	var material := target.material_override as ShaderMaterial
+	for pair in [["fusion_enabled",true], ["fusion_color_only",true], ["fusion_local_to_peer",Transform3D.IDENTITY], ["fusion_peer_grid_size",Vector2(16,16)], ["fusion_peer_intrinsics",Vector4(16,16,7.5,7.5)], ["fusion_peer_depth_tex",ImageTexture.create_from_image(target.depth)], ["fusion_peer_color_tex",ImageTexture.create_from_image(target.color)], ["fusion_peer_color_gain",Vector3.ZERO], ["fusion_peer_color_bias",Vector3(0,0,1)]]:
+		material.set_shader_parameter(pair[0], pair[1])
+	await sample(viewport, surfaces, fusion, false, "shared color respects reference correction", Color.BLUE)
 	print("REALSENSE_FUSION_PROBE checks=%d failures=%d" % [checks, failures])
 	native.queue_free()
 	viewport.queue_free()

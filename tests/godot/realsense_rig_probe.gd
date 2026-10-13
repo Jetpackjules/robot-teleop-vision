@@ -11,6 +11,42 @@ class TestView extends View:
 	func _restart_realsense_direct_renderers() -> void:
 		pass
 
+class ColorAnchor extends Node3D:
+	var color_match_enabled := true
+	var color_gain := Vector3(0.8, 0.8, 0.8)
+	var color_bias := Vector3.ZERO
+
+class ColorSurface extends MeshInstance3D:
+	var depth: Image
+	var rgb: Image
+	var stride := 1
+	var age := 0.0
+	func get_depth_image() -> Image: return depth
+	func get_color_image() -> Image: return rgb
+	func get_current_intrinsics() -> Vector4: return Vector4(192,192,96,96)
+	func get_current_grid_stride() -> int: return stride
+	func get_display_frame_age_ms() -> float: return age
+	func fill(gain: float, z := 1.0) -> void:
+		var size := int(192 / stride)
+		depth = Image.create(size,size,false,Image.FORMAT_RF)
+		depth.fill(Color(z,0,0,1))
+		rgb = Image.create(size,size,false,Image.FORMAT_RGBAF)
+		for y in size:
+			for x in size:
+				rgb.set_pixel(x,y,Color((0.2+0.45*x/size)/gain,(0.3+0.3*y/size)/gain,(0.25+0.2*(x+y)/size)/gain,1))
+
+class ColorView extends TestView:
+	var ids: Array[String] = []
+	var anchors: Dictionary = {}
+	var disabled := ""
+	var hidden_camera := ""
+	func _realsense_camera_ids() -> Array[String]: return ids
+	func _camera_enabled(id: String) -> bool: return id != disabled
+	func _camera_diagnostic_visible(id: String) -> bool: return id != hidden_camera
+	func _realsense_setting(_id: String, key: String, fallback): return "D455" if key == "model" else fallback
+	func _find_realsense_camera_anchor_existing(id: String) -> Node3D: return anchors.get(id)
+	func _sync_realsense_registry_from_node(_id: String) -> void: pass
+
 func check(condition: bool, label: String) -> void:
 	checks += 1
 	if not condition:
@@ -127,5 +163,37 @@ func run() -> void:
 	view._update_realsense_direct_status()
 	check(view.realsense_status.contains("needs rebuilding"), "stream status does not overwrite a mesh failure")
 	view.free()
+	check_color_matching()
 	print("REALSENSE_RIG_PROBE checks=%d failures=%d" % [checks, failures])
 	quit(0 if failures == 0 else 1)
+
+func check_color_matching() -> void:
+	var view := ColorView.new()
+	for i in 6:
+		var id := "realsense:" + str(i)
+		view.ids.append(id)
+		var surface := ColorSurface.new()
+		surface.stride = 2 if i == 1 else 1
+		surface.fill(1.0 + i*0.1, 2.0 if i == 3 else 1.0)
+		root.add_child(surface)
+		view._camera_nodes[id] = surface
+		view.anchors[id] = ColorAnchor.new()
+	view.anchors[view.ids[0]].color_gain = Vector3.ONE
+	view.disabled = view.ids[4]
+	view.hidden_camera = view.ids[5]
+	check(view._live_realsense_color_ids().size() == 4, "hidden and disabled cameras excluded from color matching")
+	check(view._realsense_color_reference_id(view._live_realsense_color_ids()) == view.ids[0], "all-D455 rig has a deterministic color reference")
+	view.realsense_color_reference_serial = "missing"
+	check(view._realsense_color_reference_id(view._live_realsense_color_ids()) == view.ids[0], "missing configured color reference falls back to live camera")
+	view._match_realsense_colors_now()
+	check(view.realsense_color_match_status.begins_with("Matched 2/3"), "every non-reference camera attempted, with one no-overlap rejection")
+	check(view.anchors[view.ids[1]].color_gain.distance_to(Vector3.ONE*1.1) < 0.03, "color fit respects different sampling strides")
+	check(view.anchors[view.ids[2]].color_gain.distance_to(Vector3.ONE*1.2) < 0.03, "third camera gets its own color fit")
+	check(view.anchors[view.ids[3]].color_gain == Vector3.ONE*0.8, "failed overlap keeps previously saved correction")
+	check(view.anchors[view.ids[4]].color_gain == Vector3.ONE*0.8, "disabled camera correction untouched")
+	var first: ColorSurface = view._camera_nodes[view.ids[0]]
+	first.age = 1500.0
+	check(not view.ids[0] in view._live_realsense_color_ids(), "stale camera cannot be color reference")
+	for surface in view._camera_nodes.values(): surface.free()
+	for anchor in view.anchors.values(): anchor.free()
+	view.free()

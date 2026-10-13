@@ -1617,8 +1617,8 @@ Dictionary RealSenseSharedMemoryPointCloud::get_depth_u16_frame(int p_max_width)
             destination[destination_offset + 1] = uint8_t((millimeters >> 8) & 0xff);
         }
     }
-    const double scale_x = double(target_width) / double(source_width);
-    const double scale_y = double(target_height) / double(source_height);
+    const double scale_x = double(target_width) / (double(source_width) * std::max(1, current_stride));
+    const double scale_y = double(target_height) / (double(source_height) * std::max(1, current_stride));
     result["width"] = target_width;
     result["height"] = target_height;
     result["intrinsics"] = Vector4(
@@ -1650,7 +1650,9 @@ bool RealSenseSharedMemoryPointCloud::request_rgbd_encode(int p_max_width, int p
     job.color_height = current_color_image->get_height();
 	job.color_format = current_color_image->get_format();
 	job.color_data = current_color_image->get_data();
-	job.intrinsics = current_intrinsics;
+	// The encoded image is the sampled grid, while sensor intrinsics describe
+	// the full-resolution pixels. Keep web deprojection in the grid's frame.
+	job.intrinsics = current_intrinsics / real_t(std::max(1, current_stride));
 	job.crop_rect = direct_realsense_crop_rect;
 	job.min_depth = min_depth;
 	job.max_depth = max_depth;
@@ -2228,6 +2230,8 @@ uniform float edge_feather_width = 0.035;
 uniform float edge_feather_min_alpha = 0.20;
 uniform bool fusion_enabled = false;
 uniform bool fusion_color_only = false;
+uniform vec3 fusion_peer_color_gain = vec3(1.0);
+uniform vec3 fusion_peer_color_bias = vec3(0.0);
 uniform sampler2D fusion_peer_depth_tex : filter_nearest;
 uniform sampler2D fusion_peer_color_tex : source_color, filter_nearest;
 uniform mat4 fusion_local_to_peer;
@@ -2455,7 +2459,9 @@ void fragment() {
     if (!color_valid) {
         discard;
     }
-    vec3 matched_color = color_from_peer ? color.rgb : matched_rgb(color.rgb);
+    vec3 peer_working = color_source_is_linear ? linear_to_srgb(color.rgb) : color.rgb;
+    peer_working = clamp(peer_working * fusion_peer_color_gain + fusion_peer_color_bias, vec3(0.0), vec3(1.0));
+    vec3 matched_color = color_from_peer ? (color_source_is_linear ? srgb_to_linear(peer_working) : peer_working) : matched_rgb(color.rgb);
     float gray = dot(matched_color, vec3(0.299, 0.587, 0.114));
     ALBEDO = (color_enabled ? matched_color : vec3(gray)) * edge_shade;
 }

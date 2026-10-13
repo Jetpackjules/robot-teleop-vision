@@ -30,14 +30,35 @@ lower-priority surface. Texture layers and metadata scale with camera count,
 subject to GPU memory and texture-layer limits; there is no two-camera cap.
 **Prefer D455 / Prefer D435** use the same rig-wide suppression with a different
 priority. **Independent Mesh** keeps separate surfaces; **Shader Mesh** shares
-color but keeps both surfaces, so neither guarantees removal of geometric
+color but keeps the separate surfaces, so neither guarantees removal of geometric
 flicker. These render modes do not repair incorrect camera calibration.
 
 The updated Windows native DLL is bundled. Other platforms must rebuild the
 native extension to obtain rig-wide mesh suppression. A stale extension is
 reported instead of silently suppressing only the first two cameras. Camera
 calibration and these native render settings are currently in Godot; the
-browser's local RGB-D renderer has its own point/shader/independent modes.
+browser's local RGB-D renderer has its own modes, selected in its existing
+**View** dropdown. **Unified mesh** now provides the same stable overlap
+selection for every streamed camera; it does not require changing the Godot
+render mode. **Shader mesh** shares a live reference camera's color, preferring
+a D435 when available and falling back to another live camera. Restart Godot
+and the Python launcher after pulling the updated DLL/server, then refresh
+the browser. The frame-stream fallback displays the Godot-rendered view.
+
+**View → RealSense Color Match → Match RealSense Colors Now** attempts every
+other active camera against the live reference. Each fit needs sufficient
+depth-verified overlap; a failed fit leaves that camera's previous adjustment
+unchanged and reports the reason. Hidden, disabled and stale cameras cannot
+be the reference. These adjustments carry into the browser RGB-D stream.
+
+Browser points now scale with the camera intrinsics and viewing distance,
+reducing gaps when approaching the scene. The stream also accounts for depth
+sampling stride when exporting intrinsics, so lower-resolution grids retain
+the correct shape. This does not create missing depth detail. Prefer the
+existing Quality stream preset for detail; the latency preset deliberately
+uses fewer samples. No heavier SDK filtering or frame-rate changes are enabled
+automatically. Neither point splats nor Unified Mesh performs learned 3D
+Gaussian reconstruction or persistent volumetric fusion.
 
 Use overlapping static geometry, a flat support surface, and adequate depth texture. More cameras improve coverage only when their extrinsics are trustworthy; a bad auxiliary camera must not veto a strong reference-camera solve.
 

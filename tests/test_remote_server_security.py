@@ -482,6 +482,9 @@ def test_site_settings_persist_only_stable_setup_and_clamp_navigation():
         "dolly": 8.0,
         "pan": [20.0, -20.0, 1.5],
     }
+    unified = handler.validate_site_settings({"settings_version": 13, "display_mode": "unified_mesh"})
+    assert unified["display_mode"] == "unified_mesh"
+    assert handler.validate_view_settings(unified)["display_mode"] == "unified_mesh"
     with pytest.raises(ValueError, match="settings_version"):
         handler.validate_site_settings({"settings_version": "ten"})
 

@@ -1,5 +1,8 @@
 """Run the production camera-rig transaction without opening any device."""
 import os
+import mmap
+import struct
+import uuid
 import shutil
 import subprocess
 from pathlib import Path
@@ -56,14 +59,22 @@ def test_native_multi_camera_mesh_rendering(tmp_path, renderer):
     (tmp_path / "native.gdextension").write_text(descriptor, encoding="utf-8")
     (tmp_path / ".godot").mkdir()
     (tmp_path / ".godot/extension_list.cfg").write_text("res://native.gdextension\n", encoding="utf-8")
-    result = subprocess.run(
-        [str(executable), "--path", str(tmp_path),
-         "--rendering-method", renderer, "--position", "-32000,-32000",
-         "--resolution", "128x128", "--script", "res://probe.gd"],
-        env={**os.environ, "APPDATA": str(tmp_path / "appdata"), "XDG_DATA_HOME": str(tmp_path / "data"),
-             "PATH": str(native / "bin") + os.pathsep + os.environ.get("PATH", "")},
-        capture_output=True, text=True, timeout=90, check=False,
-    )
+    # Synthetic 16x16 grid sampled from a 32x32 sensor at stride 2. Use a unique
+    # Windows mapping; the probe never opens a camera or a real publisher.
+    name = "codex_rgbd_test_" + uuid.uuid4().hex
+    with mmap.mmap(-1, 128 + 16 * 16 * 8, tagname=name) as mapping:
+        mapping[:8] = b"RSPG01\0\0"
+        struct.pack_into("<QQIIIIffffII", mapping, 8, 2, 1, 16, 16, 2, 1, 32, 32, 15, 15, 1024, 1024)
+        mapping[128:1152] = struct.pack("<256f", *([1.0] * 256))
+        mapping[1152:] = bytes([128, 64, 32, 255]) * 256
+        result = subprocess.run(
+            [str(executable), "--path", str(tmp_path),
+             "--rendering-method", renderer, "--position", "-32000,-32000",
+             "--resolution", "128x128", "--script", "res://probe.gd"],
+            env={**os.environ, "APPDATA": str(tmp_path / "appdata"), "XDG_DATA_HOME": str(tmp_path / "data"),
+                 "PATH": str(native / "bin") + os.pathsep + os.environ.get("PATH", ""), "ROBOT_TELEOP_TEST_SHM": name},
+            capture_output=True, text=True, timeout=90, check=False,
+        )
     output = result.stdout + result.stderr
     (tmp_path / "render.log").write_text(output, encoding="utf-8")
     assert result.returncode == 0 and "SCRIPT ERROR" not in output and "SHADER ERROR" not in output, output
