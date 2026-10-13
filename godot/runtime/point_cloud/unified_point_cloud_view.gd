@@ -1,6 +1,9 @@
 @tool
 extends Node3D
 
+const RigCalibration = preload("res://godot/runtime/point_cloud/realsense_rig_calibration.gd")
+const MeshFusion = preload("res://godot/runtime/point_cloud/realsense_mesh_fusion.gd")
+
 const CAMERA_REALSENSE := "realsense"
 const CAMERA_REALSENSE_PREFIX := "realsense:"
 const CAMERA_OAKD := "oakd"
@@ -148,7 +151,7 @@ const DORMANT_OAKD_PROPERTIES := [
 	set(value):
 		sync_fps_to_slowest = value
 		_send_all_stream_commands()
-## independent_mesh draws both cameras untouched and is the project default. shader_mesh shares the reference camera's color in overlap. prefer_d455/prefer_d435 remove only the losing mesh where depth agrees. unified_mesh is the legacy D455-priority mode.
+## independent_mesh keeps each camera surface and is the project default. shader_mesh shares the reference camera's color in overlap. unified_mesh and prefer_d455/prefer_d435 suppress matching overlap across all visible cameras with stable priority.
 @export_enum("shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh", "unified_mesh", "points", "point_splats", "cpu_mesh") var render_mode: String = "independent_mesh":
 	set(value):
 		if value == "gpu_mesh":
@@ -560,13 +563,13 @@ const DORMANT_OAKD_PROPERTIES := [
 
 @export_group("Calibration")
 @export_subgroup("Core Actions")
-## Recommended one-button calibration. Uses native SuperPoint + LightGlue RGB-D matching and guarded cloud refinement; no marker or Python process is used.
+## Calibrates all enabled RealSense cameras in one run using native RGB-D matching. Keep the cameras and scene still. Saves only when the whole rig succeeds.
 @export var auto_align_realsense_without_marker_now: bool = false:
 	set(value):
 		auto_align_realsense_without_marker_now = false
 		if value:
 			_request_native_realsense_calibration("markerless")
-## Establishes a high-confidence reference from a shared DICT_4X4_100 marker and saves it as the calibration ground truth.
+## Calibrates all enabled cameras using a shared DICT_4X4_100 marker. Keep the marker stationary for the entire run. Saves the whole rig together.
 @export var calibrate_realsense_with_aruco_now: bool = false:
 	set(value):
 		calibrate_realsense_with_aruco_now = false
@@ -659,7 +662,7 @@ const DORMANT_OAKD_PROPERTIES := [
 			_request_realsense_cloud_alignment("benchmark")
 ## Serial used as the alignment reference. Leave blank to use the first discovered enabled RealSense.
 @export var realsense_cloud_alignment_reference_serial: String = ""
-## Serial transformed into the reference camera. Leave blank to use the second discovered enabled RealSense.
+## Target for expert pair-only tools and manual nudges. The core native calibration actions always include all enabled cameras.
 @export var realsense_cloud_alignment_target_serial: String = ""
 ## Number of depth frames to capture per camera for the pure-cloud alignment worker.
 @export_range(1, 30, 1) var realsense_cloud_alignment_frames: int = 8
@@ -802,6 +805,9 @@ var _native_realsense_calibration_pending := false
 var _native_realsense_calibration_mode := ""
 var _native_realsense_calibration_reference_id := ""
 var _native_realsense_calibration_target_id := ""
+var _native_realsense_rig: RigCalibration
+var _mesh_fusion := MeshFusion.new()
+var _mesh_fusion_status := ""
 var _debug_viewport: SubViewport
 var _debug_sprite: Sprite3D
 var _debug_root: PanelContainer
@@ -2031,6 +2037,8 @@ func _realsense_direct_capture_active(camera_id: String = CAMERA_REALSENSE) -> b
 
 func _update_realsense_direct_status() -> void:
 	var lines: Array[String] = []
+	if not _mesh_fusion_status.is_empty():
+		lines.append(_mesh_fusion_status)
 	for camera_id in _realsense_camera_order:
 		var node := _camera_nodes.get(camera_id) as Node
 		if node == null or not is_instance_valid(node):
@@ -2099,6 +2107,8 @@ func _realsense_cloud_alignment_running() -> bool:
 
 func _native_realsense_calibration_running() -> bool:
 	return (
+		_native_realsense_rig != null
+		or
 		_native_realsense_calibration_pending
 		or (
 			_native_realsense_calibrator != null
@@ -2201,18 +2211,21 @@ func _save_realsense_alignment_ground_truth() -> void:
 		return
 	if _realsense_alignment_ground_truth_path.is_empty():
 		_realsense_alignment_ground_truth_path = ProjectSettings.globalize_path(REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH)
-	var transform: Transform3D = _alignment_transforms.get(target_id, Transform3D.IDENTITY)
-	var payload := _transform_to_payload(transform)
-	payload["type"] = "realsense_alignment_ground_truth"
-	payload["target_camera"] = target_id
-	payload["reference_camera"] = _manual_realsense_reference_id(target_id)
-	payload["saved_at"] = Time.get_unix_time_from_system()
-	var out := FileAccess.open(_realsense_alignment_ground_truth_path, FileAccess.WRITE)
-	if out == null:
+	var reference_id := _manual_realsense_reference_id(target_id)
+	var entries: Dictionary = {}
+	for camera in _alignment_transforms:
+		if str(camera).begins_with(CAMERA_REALSENSE_PREFIX):
+			entries[camera] = RigCalibration.payload(_alignment_transforms[camera])
+			entries[camera]["coordinate_space"] = "world"
+	for camera in [reference_id, target_id]:
+		if not entries.has(camera):
+			entries[camera] = RigCalibration.payload(_alignment_transforms.get(camera, Transform3D.IDENTITY))
+			entries[camera]["coordinate_space"] = "world"
+	var payload := {"type": "realsense_alignment_ground_truth", "transforms": entries, "reference_camera": reference_id, "saved_at": Time.get_unix_time_from_system()}
+	if RigCalibration.write_atomic(_realsense_alignment_ground_truth_path, payload) != OK:
 		calibration_status = "Could not save RealSense alignment ground truth: %s" % _realsense_alignment_ground_truth_path
 		return
-	out.store_string(JSON.stringify(payload, "\t"))
-	calibration_status = "Saved RealSense benchmark ground truth for %s" % _realsense_serial(target_id)
+	calibration_status = "Saved RealSense benchmark ground truth for %d cameras." % entries.size()
 	_apply_saved_realsense_alignment_ground_truth(false)
 
 func _apply_saved_realsense_alignment_ground_truth(show_missing_status: bool) -> bool:
@@ -2233,6 +2246,24 @@ func _apply_saved_realsense_alignment_ground_truth(show_missing_status: bool) ->
 			calibration_status = "Saved RealSense alignment truth is invalid JSON."
 		return false
 	var payload := parsed as Dictionary
+	if not show_missing_status:
+		var registry := _read_camera_registry()
+		var truth_time := float(payload.get("updated_at", payload.get("saved_at", 0.0)))
+		if float(registry.get("updated_at", 0.0)) > truth_time + 0.001:
+			# Explicit restore may deliberately go back to the benchmark. Startup
+			# must not replace a newer successfully saved rig with older truth.
+			return false
+	if payload.get("transforms") is Dictionary:
+		var saved := RigCalibration.resolve_registry(payload)
+		if saved.is_empty():
+			return false
+		if show_missing_status and not _write_camera_alignment_set(saved, str(payload.get("reference_camera", "")), "saved_ground_truth_lock", "Restored saved RealSense alignment"):
+			calibration_status = "Could not save restored camera alignment; current alignment preserved."
+			return false
+		_alignment_transforms.merge(saved, true)
+		calibration_status = "Applied saved alignment for %d cameras." % saved.size()
+		_update_camera_renderers()
+		return true
 	var target_id := str(payload.get("target_camera", ""))
 	if target_id.is_empty():
 		target_id = _manual_realsense_alignment_target_id()
@@ -2240,7 +2271,13 @@ func _apply_saved_realsense_alignment_ground_truth(show_missing_status: bool) ->
 		if show_missing_status:
 			calibration_status = "Saved RealSense alignment truth has no valid target camera."
 		return false
-	_alignment_transforms[target_id] = _transform_from_payload(payload)
+	var saved_transform = RigCalibration.transform_from_payload(payload)
+	if saved_transform == null:
+		return false
+	var reference_id := str(payload.get("reference_camera", ""))
+	if str(payload.get("coordinate_space", "")) != "world":
+		saved_transform = (_alignment_transforms.get(reference_id, Transform3D.IDENTITY) as Transform3D) * (saved_transform as Transform3D)
+	_alignment_transforms[target_id] = saved_transform
 	var status := "Applied locked RealSense alignment truth for %s" % _realsense_serial(target_id)
 	calibration_status = status
 	_persist_realsense_alignment_transform(target_id, "saved_ground_truth_lock", status)
@@ -2268,7 +2305,7 @@ func _persist_realsense_alignment_transform(target_id: String, method: String, s
 		transforms = {}
 	var transforms_dict := transforms as Dictionary
 	var payload := _transform_to_payload(_alignment_transforms.get(target_id, Transform3D.IDENTITY))
-	payload["relative_to"] = reference_id
+	payload["coordinate_space"] = "world"
 	payload["method"] = method
 	payload["status"] = status
 	payload["updated_at"] = Time.get_unix_time_from_system()
@@ -2440,11 +2477,19 @@ func _native_realsense_saved_prior(reference_id: String, target_id: String) -> P
 	if not parsed is Dictionary:
 		return PackedFloat64Array()
 	var payload := parsed as Dictionary
+	if payload.get("transforms") is Dictionary:
+		var saved := RigCalibration.resolve_registry(payload)
+		if saved.has(reference_id) and saved.has(target_id):
+			return _packed_realsense_transform((saved[reference_id] as Transform3D).affine_inverse() * (saved[target_id] as Transform3D))
+		return PackedFloat64Array()
 	if str(payload.get("reference_camera", "")) != reference_id:
 		return PackedFloat64Array()
 	if str(payload.get("target_camera", "")) != target_id:
 		return PackedFloat64Array()
-	return _packed_realsense_transform(_transform_from_payload(payload))
+	var transform := _transform_from_payload(payload)
+	if str(payload.get("coordinate_space", "")) == "world":
+		transform = (_alignment_transforms.get(reference_id, Transform3D.IDENTITY) as Transform3D).affine_inverse() * transform
+	return _packed_realsense_transform(transform)
 
 func _request_native_realsense_calibration(mode: String) -> void:
 	mode = mode.strip_edges().to_lower()
@@ -2456,30 +2501,49 @@ func _request_native_realsense_calibration(mode: String) -> void:
 	if _realsense_cloud_alignment_running():
 		calibration_status = "A RealSense calibration is already running."
 		return
-	var pair := _cloud_alignment_serial_pair()
-	if not bool(pair.get("ok", false)):
-		calibration_status = str(pair.get("status", "RealSense calibration could not start."))
+	var ids: Array[String] = []
+	for serial in _enabled_realsense_serials():
+		ids.append(_realsense_camera_id(serial))
+	if ids.size() < 2:
+		calibration_status = "Camera calibration needs at least two enabled RealSense cameras."
 		return
 	if not ClassDB.class_exists("RealSensePairCalibrator"):
 		calibration_status = "Native RealSense calibration is unavailable in this extension build."
 		return
-	var reference_serial := str(pair["reference_serial"])
-	var target_serial := str(pair["target_serial"])
-	var reference_id := _realsense_camera_id(reference_serial)
-	var target_id := _realsense_camera_id(target_serial)
-	_native_realsense_calibrator = ClassDB.instantiate("RealSensePairCalibrator")
-	if _native_realsense_calibrator == null:
-		calibration_status = "Could not create the native RealSense calibrator."
+	var reference_id := _realsense_camera_id(realsense_cloud_alignment_reference_serial.strip_edges()) if not realsense_cloud_alignment_reference_serial.strip_edges().is_empty() else ids[0]
+	var rig := RigCalibration.new()
+	if not rig.begin(ids, reference_id, _alignment_transforms):
+		calibration_status = "The reference camera must be enabled and discovered."
 		return
+	_native_realsense_rig = rig
 	_native_realsense_calibration_mode = mode
-	_native_realsense_calibration_reference_id = reference_id
-	_native_realsense_calibration_target_id = target_id
 	_native_realsense_calibration_pending = true
 	_set_realsense_direct_renderers_enabled(false)
-	calibration_status = "Native %s calibration is releasing the live camera pipelines..." % mode
+	calibration_status = "Calibrating %d cameras: releasing live pipelines. Keep the scene and marker still." % ids.size()
 	await get_tree().create_timer(1.25).timeout
-	if not is_inside_tree() or _native_realsense_calibrator == null:
+	if not is_inside_tree() or _native_realsense_rig != rig:
 		_native_realsense_calibration_pending = false
+		return
+	_start_next_native_realsense_pair()
+
+func _start_next_native_realsense_pair() -> void:
+	if _native_realsense_rig == null:
+		return
+	var pair := _native_realsense_rig.next_pair()
+	if pair.is_empty():
+		_finish_native_realsense_rig()
+		return
+	var reference_id := str(pair.reference_camera)
+	var target_id := str(pair.target_camera)
+	var reference_serial := _realsense_serial(reference_id)
+	var target_serial := _realsense_serial(target_id)
+	var mode := _native_realsense_calibration_mode
+	_native_realsense_calibration_reference_id = reference_id
+	_native_realsense_calibration_target_id = target_id
+	_native_realsense_calibrator = ClassDB.instantiate("RealSensePairCalibrator")
+	if _native_realsense_calibrator == null:
+		_native_realsense_rig.accept({"ok": false, "status": "Native calibrator unavailable"})
+		call_deferred("_start_next_native_realsense_pair")
 		return
 	var calibration_min_depth := maxf(_camera_min_depth(reference_id), _camera_min_depth(target_id))
 	var calibration_max_depth := minf(
@@ -2501,8 +2565,9 @@ func _request_native_realsense_calibration(mode: String) -> void:
 		"max_depth_m": calibration_max_depth,
 	}
 	if mode == "refine":
+		var reference_world: Transform3D = _native_realsense_rig.transforms[reference_id]
 		options["initial_transform"] = _packed_realsense_transform(
-			_alignment_transforms.get(target_id, Transform3D.IDENTITY)
+			reference_world.affine_inverse() * (_alignment_transforms.get(target_id, Transform3D.IDENTITY) as Transform3D)
 		)
 	elif mode == "markerless":
 		var prior := _native_realsense_saved_prior(reference_id, target_id)
@@ -2511,56 +2576,85 @@ func _request_native_realsense_calibration(mode: String) -> void:
 	var started := bool(_native_realsense_calibrator.start(options))
 	_native_realsense_calibration_pending = false
 	if not started:
-		calibration_status = str(_native_realsense_calibrator.get_status())
+		_native_realsense_rig.accept({"ok": false, "status": str(_native_realsense_calibrator.get_status())})
 		_native_realsense_calibrator = null
-		_native_realsense_calibration_mode = ""
-		_native_realsense_calibration_reference_id = ""
-		_native_realsense_calibration_target_id = ""
-		_restart_realsense_direct_renderers()
+		call_deferred("_start_next_native_realsense_pair")
 		return
-	calibration_status = "Native %s calibration started: %s -> %s" % [mode, target_serial, reference_serial]
+	calibration_status = "Camera rig %d/%d aligned: %s -> %s (%s)" % [_native_realsense_rig.transforms.size(), _native_realsense_rig.cameras.size(), target_serial, reference_serial, mode]
 
 func _update_native_realsense_calibration() -> void:
 	if _native_realsense_calibrator == null or _native_realsense_calibration_pending:
 		return
 	if bool(_native_realsense_calibrator.is_running()):
-		calibration_status = str(_native_realsense_calibrator.get_status())
+		calibration_status = "Camera rig %d/%d aligned | %s -> %s | %s" % [_native_realsense_rig.transforms.size(), _native_realsense_rig.cameras.size(), _realsense_serial(_native_realsense_calibration_target_id), _realsense_serial(_native_realsense_calibration_reference_id), str(_native_realsense_calibrator.get_status())]
 		return
 	var result: Dictionary = _native_realsense_calibrator.get_result()
-	var mode := _native_realsense_calibration_mode
-	var reference_id := _native_realsense_calibration_reference_id
-	var target_id := _native_realsense_calibration_target_id
+	result["reference_camera"] = _native_realsense_calibration_reference_id
+	result["target_camera"] = _native_realsense_calibration_target_id
 	_native_realsense_calibrator = null
+	_native_realsense_rig.accept(result)
+	_start_next_native_realsense_pair()
+
+func _finish_native_realsense_rig() -> void:
+	var rig := _native_realsense_rig
+	var mode := _native_realsense_calibration_mode
+	if rig.complete():
+		var status := "All %d cameras calibrated and saved (%s)." % [rig.cameras.size(), mode]
+		if not _write_camera_alignment_set(rig.transforms, rig.reference_id, "native_rig_" + mode, status):
+			calibration_status = "Camera calibration could not save the rig. Previous alignment preserved."
+		else:
+			_alignment_transforms.merge(rig.transforms, true)
+			_camera_alignment_registry_token = ""
+			calibration_status = status
+			if mode == "aruco":
+				if _realsense_alignment_ground_truth_path.is_empty():
+					_realsense_alignment_ground_truth_path = ProjectSettings.globalize_path(REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH)
+				var truth := _read_camera_registry()
+				truth["type"] = "realsense_alignment_ground_truth"
+				if RigCalibration.write_atomic(_realsense_alignment_ground_truth_path, truth) != OK:
+					calibration_status += " Alignment saved; ArUco benchmark file could not be written."
+	else:
+		calibration_status = "Camera rig calibration incomplete: %s could not be aligned. Previous alignment preserved. %s" % [", ".join(rig.pending_cameras()), " | ".join(rig.failures)]
+	_native_realsense_rig = null
+	_native_realsense_calibration_pending = false
 	_native_realsense_calibration_mode = ""
 	_native_realsense_calibration_reference_id = ""
 	_native_realsense_calibration_target_id = ""
-	if bool(result.get("ok", false)):
-		result["reference_camera"] = reference_id
-		result["target_camera"] = target_id
-		if _apply_realsense_cloud_alignment_payload(result):
-			var status := str(result.get("status", "Native RealSense calibration applied."))
-			_persist_realsense_alignment_transform(target_id, str(result.get("method", mode)), status)
-			if mode == "aruco":
-				_save_native_realsense_ground_truth(result, reference_id, target_id)
-	else:
-		calibration_status = str(result.get("status", "Native RealSense calibration failed."))
 	_restart_realsense_direct_renderers()
 	_update_camera_renderers()
 
-func _save_native_realsense_ground_truth(result: Dictionary, reference_id: String, target_id: String) -> void:
-	if _realsense_alignment_ground_truth_path.is_empty():
-		_realsense_alignment_ground_truth_path = ProjectSettings.globalize_path(REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH)
-	var payload := result.duplicate(true)
-	payload["type"] = "realsense_alignment_ground_truth"
-	payload["reference_camera"] = reference_id
-	payload["target_camera"] = target_id
-	payload["saved_at"] = Time.get_unix_time_from_system()
-	var out := FileAccess.open(_realsense_alignment_ground_truth_path, FileAccess.WRITE)
-	if out == null:
-		calibration_status += " | could not save ArUco ground truth"
-		return
-	out.store_string(JSON.stringify(payload, "\t"))
-	calibration_status += " | ArUco ground truth saved"
+func _read_camera_registry() -> Dictionary:
+	if _camera_alignment_registry_path.is_empty():
+		_camera_alignment_registry_path = ProjectSettings.globalize_path(CAMERA_ALIGNMENT_REGISTRY_PATH)
+	if not FileAccess.file_exists(_camera_alignment_registry_path):
+		return {"transforms": {}}
+	var file := FileAccess.open(_camera_alignment_registry_path, FileAccess.READ)
+	if file == null:
+		return {"invalid": true}
+	var data = JSON.parse_string(file.get_as_text())
+	if not data is Dictionary or not data.get("transforms", {}) is Dictionary:
+		return {"invalid": true}
+	return data
+
+func _write_camera_alignment_set(transforms: Dictionary, reference: String, method: String, status: String) -> bool:
+	var registry := _read_camera_registry()
+	if registry.get("invalid", false):
+		return false
+	var entries: Dictionary = registry.get("transforms", {}).duplicate(true)
+	# Preserve excluded cameras in their existing world frame, even if their
+	# legacy entry was relative to a camera being recalibrated in this run.
+	var previous := RigCalibration.resolve_registry(registry)
+	for camera in previous:
+		entries[camera].merge(RigCalibration.payload(previous[camera]), true)
+		entries[camera]["coordinate_space"] = "world"
+		entries[camera].erase("relative_to")
+	var updated := Time.get_unix_time_from_system()
+	for camera in transforms:
+		var entry := RigCalibration.payload(transforms[camera])
+		entry.merge({"coordinate_space": "world", "method": method, "updated_at": updated, "status": status})
+		entries[camera] = entry
+	registry.merge({"type": "camera_alignment_registry", "reference_camera": reference, "transforms": entries, "updated_at": updated}, true)
+	return RigCalibration.write_atomic(_camera_alignment_registry_path, registry) == OK
 
 func _restart_realsense_direct_renderers() -> void:
 	for camera_id in _realsense_camera_order:
@@ -2602,7 +2696,8 @@ func _request_realsense_cloud_alignment(mode: String) -> void:
 	if mode == "benchmark" and not FileAccess.file_exists(_realsense_alignment_ground_truth_path):
 		calibration_status = "Save RealSense alignment ground truth after manual alignment before running benchmark."
 		return
-	var current_transform: Transform3D = _alignment_transforms.get(target_id, Transform3D.IDENTITY)
+	var reference_transform: Transform3D = _alignment_transforms.get(_realsense_camera_id(reference_serial), Transform3D.IDENTITY)
+	var current_transform: Transform3D = reference_transform.affine_inverse() * (_alignment_transforms.get(target_id, Transform3D.IDENTITY) as Transform3D)
 	var initial_json := JSON.stringify(_transform_to_payload(current_transform))
 	if FileAccess.file_exists(_realsense_cloud_alignment_result_path):
 		DirAccess.remove_absolute(_realsense_cloud_alignment_result_path)
@@ -2824,12 +2919,21 @@ func _update_camera_renderers() -> void:
 
 func _update_unified_mesh_fusion() -> void:
 	var renderers: Array[MeshInstance3D] = []
+	var depth_limits: Array[Vector2] = []
 	var fusion_camera_ids := _realsense_camera_ids()
 	fusion_camera_ids.sort_custom(_fusion_camera_precedes)
 	for camera_id in fusion_camera_ids:
 		var renderer := _camera_nodes.get(camera_id) as MeshInstance3D
 		if renderer != null and is_instance_valid(renderer) and _camera_enabled(camera_id) and _camera_diagnostic_visible(camera_id):
 			renderers.append(renderer)
+			depth_limits.append(Vector2(_camera_min_depth(camera_id), _camera_max_depth(camera_id)))
+	var rig_mode := render_mode in ["unified_mesh", "prefer_d455", "prefer_d435"] and renderers.size() >= 2
+	if not rig_mode:
+		_mesh_fusion.clear()
+		_set_mesh_fusion_status("")
+	for node in _camera_nodes.values():
+		if is_instance_valid(node) and node.has_method("set_fusion_camera_layers") and (not rig_mode or node not in renderers):
+			node.call("set_fusion_camera_layers", null, null, null, -1)
 	for renderer in renderers:
 		if renderer.has_method("set_fusion_enabled"):
 			renderer.call("set_fusion_enabled", false)
@@ -2867,38 +2971,34 @@ func _update_unified_mesh_fusion() -> void:
 			renderer.call("set_fusion_color_only", true)
 			renderer.call("set_fusion_enabled", true)
 		return
-	if render_mode not in ["unified_mesh", "prefer_d455", "prefer_d435"] or renderers.size() < 2:
+	if not rig_mode:
 		return
-	# The current view is a calibrated two-camera rig. Extra devices remain visible,
-	# but only the first pair participates until multi-peer texture arrays are added.
-	for index in range(2):
-		var renderer := renderers[index]
-		var peer := renderers[1 - index]
-		if not renderer.has_method("set_fusion_enabled"):
-			continue
-		var peer_size: Vector2 = peer.call("get_current_grid_size") if peer.has_method("get_current_grid_size") else Vector2.ZERO
-		var peer_depth = peer.call("get_depth_texture") if peer.has_method("get_depth_texture") else null
-		var ready := peer_depth != null and peer_size.x > 1.0 and peer_size.y > 1.0
-		renderer.call("set_fusion_enabled", ready)
-		if not ready:
-			continue
-		renderer.call("set_fusion_peer_depth_texture", peer_depth)
-		if peer.has_method("get_color_texture"):
-			renderer.call("set_fusion_peer_color_texture", peer.call("get_color_texture"))
-		renderer.call("set_fusion_local_to_peer", peer.global_transform.affine_inverse() * renderer.global_transform)
-		renderer.call("set_fusion_peer_intrinsics", peer.call("get_current_intrinsics"))
-		renderer.call("set_fusion_peer_grid_size", peer_size)
-		renderer.call("set_fusion_peer_grid_stride", int(peer.call("get_current_grid_stride")))
-		# renderers are ordered D455, then D435 by _fusion_camera_precedes().
-		var loses_overlap := index == (1 if render_mode in ["unified_mesh", "prefer_d455"] else 0)
-		renderer.call("set_fusion_priority", 1 if loses_overlap else 0)
-		renderer.call("set_fusion_depth_tolerance", mesh_fusion_depth_tolerance_m)
+	for renderer in renderers:
+		if not renderer.has_method("set_fusion_camera_layers"):
+			_set_mesh_fusion_status("Unified mesh needs the updated native extension. Rebuild/pull it and restart Godot.")
+			return
+	var ready := _mesh_fusion.update(renderers, depth_limits, mesh_max_depth_delta_m, mesh_max_edge_m)
+	for index in renderers.size():
+		renderers[index].call("set_fusion_camera_layers", _mesh_fusion.depth_layers, _mesh_fusion.color_layers, _mesh_fusion.camera_data, index if ready else -1)
+		renderers[index].call("set_fusion_depth_tolerance", mesh_fusion_depth_tolerance_m)
+	_set_mesh_fusion_status(_mesh_fusion.error)
+
+func _set_mesh_fusion_status(message: String) -> void:
+	if message == _mesh_fusion_status:
+		return
+	_mesh_fusion_status = message
+	if not message.is_empty():
+		push_warning(message)
 
 func _fusion_camera_precedes(left_camera_id: String, right_camera_id: String) -> bool:
-	return _fusion_camera_rank(left_camera_id) < _fusion_camera_rank(right_camera_id)
+	var left := _fusion_camera_rank(left_camera_id)
+	var right := _fusion_camera_rank(right_camera_id)
+	return left < right if left != right else left_camera_id < right_camera_id
 
 func _fusion_camera_rank(camera_id: String) -> int:
 	var model := str(_realsense_setting(camera_id, "model", "")).to_lower()
+	if render_mode == "prefer_d435" and model.contains("435"):
+		return -1
 	if model.contains("455"):
 		return 0
 	if model.contains("435"):
@@ -3352,12 +3452,21 @@ func _apply_realsense_cloud_alignment_payload(payload: Dictionary) -> bool:
 	if not target_camera.begins_with(CAMERA_REALSENSE_PREFIX):
 		calibration_status = "RealSense cloud alignment result has invalid target camera: %s" % target_camera
 		return false
-	_alignment_transforms[target_camera] = _transform_from_payload(payload)
+	var transform = RigCalibration.transform_from_payload(payload)
+	if transform == null:
+		calibration_status = "RealSense calibration returned an invalid transform; previous alignment preserved."
+		return false
+	var reference_id := str(payload.get("reference_camera", ""))
+	if str(payload.get("coordinate_space", "")) != "world":
+		transform = (_alignment_transforms.get(reference_id, Transform3D.IDENTITY) as Transform3D) * (transform as Transform3D)
+	_alignment_transforms[target_camera] = transform
 	calibration_status = str(payload.get("status", "RealSense cloud alignment applied."))
 	_update_camera_renderers()
 	return true
 
 func _poll_realsense_cloud_alignment_result(force: bool) -> void:
+	if _native_realsense_rig != null:
+		return
 	if _realsense_cloud_alignment_result_path.is_empty():
 		_realsense_cloud_alignment_result_path = ProjectSettings.globalize_path(REALSENSE_CLOUD_ALIGNMENT_RESULT_PATH)
 	if not FileAccess.file_exists(_realsense_cloud_alignment_result_path):
@@ -3379,6 +3488,8 @@ func _poll_realsense_cloud_alignment_result(force: bool) -> void:
 	_apply_realsense_cloud_alignment_payload(parsed as Dictionary)
 
 func _poll_camera_alignment_registry(force: bool) -> void:
+	if _native_realsense_rig != null:
+		return
 	if _camera_alignment_registry_path.is_empty():
 		_camera_alignment_registry_path = ProjectSettings.globalize_path(CAMERA_ALIGNMENT_REGISTRY_PATH)
 	if not FileAccess.file_exists(_camera_alignment_registry_path):
@@ -3398,6 +3509,7 @@ func _poll_camera_alignment_registry(force: bool) -> void:
 	if typeof(parsed) != TYPE_DICTIONARY:
 		return
 	var registry := parsed as Dictionary
+	var resolved := RigCalibration.resolve_registry(registry)
 	var transforms = registry.get("transforms", {})
 	if typeof(transforms) != TYPE_DICTIONARY:
 		return
@@ -3410,8 +3522,8 @@ func _poll_camera_alignment_registry(force: bool) -> void:
 		if not target_id.begins_with(CAMERA_REALSENSE_PREFIX):
 			continue
 		var entry_dict := entry as Dictionary
-		if entry_dict.has("R") and entry_dict.has("T"):
-			_alignment_transforms[target_id] = _transform_from_payload(entry_dict)
+		if resolved.has(target_id):
+			_alignment_transforms[target_id] = resolved[target_id]
 			var method := str(entry_dict.get("method", "saved"))
 			loaded_status = "Loaded saved RealSense alignment for %s (%s)." % [
 				_realsense_serial(target_id),

@@ -11,6 +11,7 @@
 #include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/texture2d.hpp>
+#include <godot_cpp/classes/texture2d_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
 #include <godot_cpp/variant/color.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
@@ -157,6 +158,7 @@ public:
     void set_fusion_peer_grid_stride(int p_stride);
     void set_fusion_priority(int p_priority);
     void set_fusion_depth_tolerance(double p_tolerance);
+    void set_fusion_camera_layers(const godot::Ref<godot::Texture2DArray> &p_depth, const godot::Ref<godot::Texture2DArray> &p_color, const godot::Ref<godot::Texture2D> &p_cameras, int p_index);
     void set_robot_mask_capsules(const godot::PackedVector4Array &p_capsules);
     void set_robot_mask_enabled(bool p_enabled);
 
@@ -278,6 +280,10 @@ private:
     int fusion_peer_grid_stride = 1;
     int fusion_priority = 0;
     double fusion_depth_tolerance = 0.035;
+    godot::Ref<godot::Texture2DArray> fusion_depth_layers;
+    godot::Ref<godot::Texture2DArray> fusion_color_layers;
+    godot::Ref<godot::Texture2D> fusion_camera_data;
+    int fusion_camera_index = -1;
     bool robot_mask_enabled = false;
     godot::PackedVector4Array robot_mask_capsules;
 

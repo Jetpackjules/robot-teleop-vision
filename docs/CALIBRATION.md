@@ -4,6 +4,41 @@
 
 Every connected RealSense is discovered dynamically. The first enabled camera is the default reference unless a local serial-keyed registry selects another. Fixed multi-camera sites should save one trusted local transform per camera after setup and recreate it whenever hardware moves.
 
+In Godot, select **View → Calibration → Core Actions**. Both **Auto Align
+RealSense Without Marker** and **Calibrate RealSense With ArUco** now calibrate
+all enabled RealSense cameras in one run, including rigs of three or more. They
+solve camera pairs internally, with one fixed world reference; this is not a
+simultaneous bundle-adjustment solver. If a camera cannot see the reference,
+the run tries an already aligned camera as a bridge. Every camera must have an
+overlap path to the reference. Keep all cameras, the scene, and (for ArUco) the
+marker stationary throughout the run. The target-serial setting applies only
+to the expert pair tools; disable a camera to exclude it from a rig run.
+
+The run stages all results and atomically saves them only when every enabled
+camera succeeds. A failed pair can be retried through another camera; an
+unconnected camera or failed save preserves the previous rig. Progress names
+the active pair and the number of aligned cameras. Saved files record world
+coordinates explicitly, and older pair-relative registries are composed on
+load. ArUco ground truth stores the whole rig, so restarting cannot silently
+restore just the last camera.
+
+**View → Render Mode → Unified Mesh** suppresses overlapping surfaces across
+all enabled, visible RealSense cameras, using stable camera priority. This is
+GPU surface selection, not a watertight volumetric reconstruction. Missing,
+stale, out-of-view, or invalid higher-priority depth does not suppress a valid
+lower-priority surface. Texture layers and metadata scale with camera count,
+subject to GPU memory and texture-layer limits; there is no two-camera cap.
+**Prefer D455 / Prefer D435** use the same rig-wide suppression with a different
+priority. **Independent Mesh** keeps separate surfaces; **Shader Mesh** shares
+color but keeps both surfaces, so neither guarantees removal of geometric
+flicker. These render modes do not repair incorrect camera calibration.
+
+The updated Windows native DLL is bundled. Other platforms must rebuild the
+native extension to obtain rig-wide mesh suppression. A stale extension is
+reported instead of silently suppressing only the first two cameras. Camera
+calibration and these native render settings are currently in Godot; the
+browser's local RGB-D renderer has its own point/shader/independent modes.
+
 Use overlapping static geometry, a flat support surface, and adequate depth texture. More cameras improve coverage only when their extrinsics are trustworthy; a bad auxiliary camera must not veto a strong reference-camera solve.
 
 Robot base fitting tries the capture-preferred camera first. If its motion fit

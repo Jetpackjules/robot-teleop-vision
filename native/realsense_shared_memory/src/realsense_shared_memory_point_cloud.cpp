@@ -1,4 +1,5 @@
 #include "realsense_shared_memory_point_cloud.h"
+#include "multi_camera_fusion_shader.h"
 
 #include <godot_cpp/classes/rd_shader_source.hpp>
 #include <godot_cpp/classes/rd_shader_spirv.hpp>
@@ -553,6 +554,7 @@ void RealSenseSharedMemoryPointCloud::_bind_methods() {
     ClassDB::bind_method(D_METHOD("set_fusion_peer_grid_stride", "stride"), &RealSenseSharedMemoryPointCloud::set_fusion_peer_grid_stride);
     ClassDB::bind_method(D_METHOD("set_fusion_priority", "priority"), &RealSenseSharedMemoryPointCloud::set_fusion_priority);
     ClassDB::bind_method(D_METHOD("set_fusion_depth_tolerance", "tolerance"), &RealSenseSharedMemoryPointCloud::set_fusion_depth_tolerance);
+    ClassDB::bind_method(D_METHOD("set_fusion_camera_layers", "depth", "color", "cameras", "index"), &RealSenseSharedMemoryPointCloud::set_fusion_camera_layers);
     ClassDB::bind_method(D_METHOD("set_robot_mask_capsules", "capsules"), &RealSenseSharedMemoryPointCloud::set_robot_mask_capsules);
     ClassDB::bind_method(D_METHOD("set_robot_mask_enabled", "enabled"), &RealSenseSharedMemoryPointCloud::set_robot_mask_enabled);
 
@@ -2170,6 +2172,14 @@ void RealSenseSharedMemoryPointCloud::set_robot_mask_capsules(const PackedVector
     update_material_params();
 }
 
+void RealSenseSharedMemoryPointCloud::set_fusion_camera_layers(const Ref<Texture2DArray> &p_depth, const Ref<Texture2DArray> &p_color, const Ref<Texture2D> &p_cameras, int p_index) {
+    fusion_depth_layers = p_depth;
+    fusion_color_layers = p_color;
+    fusion_camera_data = p_cameras;
+    fusion_camera_index = p_index;
+    update_material_params();
+}
+
 void RealSenseSharedMemoryPointCloud::set_robot_mask_enabled(bool p_enabled) {
     robot_mask_enabled = p_enabled;
     update_material_params();
@@ -2674,6 +2684,11 @@ void fragment() {
     ALBEDO = (color_enabled ? matched_color : vec3(gray)) * edge_shade;
 }
 )";
+    }
+    if (want_static_shader_mesh) {
+        shader_code = shader_code.replace("void vertex() {", String(MULTI_CAMERA_FUSION_SHADER) + "\nvoid vertex() {");
+        shader_code = shader_code.replace("point_position_local = VERTEX;", "point_position_local = VERTEX;\n    rig_world_position = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;");
+        shader_code = shader_code.replace("void fragment() {", "void fragment() {\n    if (rig_overlap()) discard;");
     }
     shader_code = shader_code.replace("__COLOR_TEX_UNIFORM__", color_sampler);
     shader->set_code(shader_code);
@@ -3914,6 +3929,14 @@ void RealSenseSharedMemoryPointCloud::update_material_params() {
     material->set_shader_parameter("fusion_peer_grid_stride", float(fusion_peer_grid_stride));
     material->set_shader_parameter("fusion_depth_tolerance", float(fusion_depth_tolerance));
     material->set_shader_parameter("fusion_priority", fusion_priority);
+    const bool rig_ready = fusion_camera_index >= 0 && fusion_depth_layers.is_valid() && fusion_color_layers.is_valid() && fusion_camera_data.is_valid();
+    material->set_shader_parameter("rig_fusion_enabled", rig_ready);
+    material->set_shader_parameter("rig_camera_index", std::max(0, fusion_camera_index));
+    if (rig_ready) {
+        material->set_shader_parameter("rig_depth", fusion_depth_layers);
+        material->set_shader_parameter("rig_color", fusion_color_layers);
+        material->set_shader_parameter("rig_cameras", fusion_camera_data);
+    }
     PackedVector4Array padded_capsules;
     padded_capsules.resize(12);
     const int capsule_values = std::min(12, int(robot_mask_capsules.size()));

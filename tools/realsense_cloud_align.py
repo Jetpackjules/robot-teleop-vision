@@ -76,6 +76,38 @@ def profile_tuple(profile: str) -> tuple[int, int, int]:
     return PROFILE_DEPTH.get(str(profile).strip().lower(), PROFILE_DEPTH["viewer30"])
 
 
+def benchmark_pair_transform(text: str, reference: str, target: str) -> np.ndarray:
+    """Read both legacy pair truth and the new whole-rig world-space file."""
+    payload = json.loads(text)
+    entries = payload.get("transforms")
+    if not isinstance(entries, dict):
+        if "R" not in payload or "T" not in payload:
+            raise ValueError("Calibration ground truth has no camera transforms")
+        if payload.get("reference_camera", reference) != reference or payload.get("target_camera", target) != target:
+            raise ValueError("Calibration ground truth belongs to a different camera pair")
+        return parse_transform(text)
+    resolved: dict[str, np.ndarray] = {}
+
+    def resolve(camera: str, visiting: frozenset[str]) -> np.ndarray:
+        if camera in resolved:
+            return resolved[camera]
+        if camera in visiting:
+            raise ValueError("Calibration ground truth has cyclic camera references")
+        entry = entries.get(camera)
+        if not isinstance(entry, dict) or "R" not in entry or "T" not in entry:
+            raise ValueError(f"Calibration ground truth has no transform for {camera}")
+        transform = parse_transform(json.dumps(entry))
+        parent = entry.get("relative_to")
+        if entry.get("coordinate_space") != "world" and parent and parent != camera and parent in entries:
+            transform = resolve(parent, visiting | {camera}) @ transform
+        if not np.isfinite(transform).all():
+            raise ValueError("Calibration ground truth contains nonfinite coordinates")
+        resolved[camera] = transform
+        return transform
+
+    return np.linalg.inv(resolve(reference, frozenset())) @ resolve(target, frozenset())
+
+
 def capture_depth(serial: str, profile: str, frames: int, timeout_s: float, capture_color: bool) -> tuple[np.ndarray, np.ndarray | None, rs.intrinsics, dict]:
     width, height, fps = profile_tuple(profile)
     pipeline = rs.pipeline()
@@ -890,7 +922,10 @@ def solve_alignment(
 
 
 def benchmark_candidates(args: argparse.Namespace, tgt_points, ref_points, tgt_colors, ref_colors, ref_depth, ref_color, ref_intr, ref_min_depth, ref_max_depth, tgt_depth, tgt_color, tgt_intr, tgt_min_depth, tgt_max_depth) -> tuple[np.ndarray, str, dict]:
-    ground_truth = parse_transform(Path(args.benchmark_ground_truth).read_text(encoding="utf-8"))
+    ground_truth = benchmark_pair_transform(
+        Path(args.benchmark_ground_truth).read_text(encoding="utf-8"),
+        f"realsense:{args.reference_serial}", f"realsense:{args.target_serial}",
+    )
     candidates: list[dict] = []
     candidates.append({"name": "keep_initial_static", "mode": "keep_initial", "voxel": 0.025, "score_distance": 0.055})
     for voxel in [0.018, 0.025, 0.035, 0.055, 0.075]:
