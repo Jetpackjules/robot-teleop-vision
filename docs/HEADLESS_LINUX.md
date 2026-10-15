@@ -6,6 +6,14 @@ The bundled native RealSense extension currently supports Linux x86-64. An ARM64
 
 ## First installation
 
+On Ubuntu or Debian, install the Open3D system libraries first. They are required
+when importing the calibration tools even without a desktop or display server:
+
+```bash
+sudo apt-get update
+sudo apt-get install --no-install-recommends -y libegl1 libgl1
+```
+
 Connect over SSH and run:
 
 ```bash
