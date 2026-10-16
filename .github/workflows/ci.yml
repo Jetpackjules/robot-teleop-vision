@@ -59,6 +59,20 @@ jobs:
           ./Godot_v4.6.3-stable_linux.x86_64 --headless --editor --path . --quit 2>&1 | tee godot-scan.log
           ! grep -Eiq "parse error|script error" godot-scan.log
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate BlendPCR with software GPU rendering
+        env:
+          ROBOT_TELEOP_TEST_GODOT: ${{ github.workspace }}/Godot_v4.6.3-stable_linux.x86_64
+          ROBOT_TELEOP_TEST_BLENDPCR_GPU: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y xvfb libgl1 libegl1 libvulkan1 mesa-vulkan-drivers
+          python -m pip install pytest
+          xvfb-run -a python -m pytest -q tests/test_blendpcr.py
+
   godot-windows-native:
     name: Godot Windows native extension smoke
     runs-on: windows-latest
