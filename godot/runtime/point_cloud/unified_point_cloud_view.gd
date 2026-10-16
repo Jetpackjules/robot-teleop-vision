@@ -3,6 +3,8 @@ extends Node3D
 
 const RigCalibration = preload("res://godot/runtime/point_cloud/realsense_rig_calibration.gd")
 const MeshFusion = preload("res://godot/runtime/point_cloud/realsense_mesh_fusion.gd")
+const BlendPCR = preload("res://godot/runtime/point_cloud/blendpcr/blendpcr_renderer.gd")
+const RENDERING_MODES := ["points", "point_splats", "independent_mesh", "shader_mesh", "unified_mesh", "blendpcr"]
 
 const CAMERA_REALSENSE := "realsense"
 const CAMERA_REALSENSE_PREFIX := "realsense:"
@@ -152,15 +154,45 @@ const DORMANT_OAKD_PROPERTIES := [
 		sync_fps_to_slowest = value
 		_send_all_stream_commands()
 ## independent_mesh keeps each camera surface and is the project default. shader_mesh shares the reference camera's color in overlap. unified_mesh and prefer_d455/prefer_d435 suppress matching overlap across all visible cameras with stable priority.
-@export_enum("shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh", "unified_mesh", "points", "point_splats", "cpu_mesh") var render_mode: String = "independent_mesh":
+@export_storage var render_mode: String = "independent_mesh":
 	set(value):
+		if value == "prefer_d455" or value == "prefer_d435":
+			unified_camera_priority = 1 if value == "prefer_d435" else 0
+			value = "unified_mesh"
 		if value == "gpu_mesh":
 			value = "independent_mesh"
-		if value not in ["points", "point_splats", "unified_mesh", "shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh", "cpu_mesh"]:
+		if value not in ["points", "point_splats", "unified_mesh", "shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh", "cpu_mesh", "blendpcr"]:
 			value = "point_splats"
 		render_mode = value
+		notify_property_list_changed()
 		_send_all_stream_commands()
 		_update_camera_renderers()
+## Choose how to draw the existing calibrated camera streams.
+@export_enum("Points", "Point splats", "Independent mesh", "Shared-color mesh", "Unified mesh", "BlendPCR (experimental)") var rendering_mode: int = 2:
+	get:
+		return maxi(0, RENDERING_MODES.find(render_mode)) if render_mode != "cpu_mesh" else 2
+	set(value):
+		render_mode = RENDERING_MODES[clampi(value, 0, RENDERING_MODES.size() - 1)]
+## Overlap owner preference used by Unified mesh. Alignment is unchanged.
+@export_enum("D455 first", "D435 first", "Serial order") var unified_camera_priority: int = 0:
+	set(value):
+		unified_camera_priority = clampi(value, 0, 2)
+		_update_camera_renderers()
+## BlendPCR rendering resolution relative to the active viewport.
+@export_enum("Balanced", "Full resolution", "Performance") var blendpcr_quality: int = 0
+@export_range(0.005, 0.10, 0.005, "suffix:m") var blendpcr_surface_tolerance_m: float = 0.035
+## Spatial seam smoothing radius at quarter resolution. No temporal history.
+@export_range(0, 10, 1) var blendpcr_seam_radius: int = 3
+
+@export_group("Rendering Diagnostics")
+## CPU geometry construction fallback. Choosing a normal rendering mode exits it.
+@export var diagnostic_cpu_mesh: bool = false:
+	get:
+		return render_mode == "cpu_mesh"
+	set(value):
+		render_mode = "cpu_mesh" if value else "independent_mesh"
+
+@export_group("Universal Point Cloud")
 ## Base screen size for points. Splat mode multiplies this slightly so splats are visibly different. Performance impact: moderate if very large.
 @export_range(1.0, 12.0, 0.25) var point_pixel_size: float = 2.5:
 	set(value):
@@ -807,6 +839,7 @@ var _native_realsense_calibration_reference_id := ""
 var _native_realsense_calibration_target_id := ""
 var _native_realsense_rig: RigCalibration
 var _mesh_fusion := MeshFusion.new()
+var _blendpcr: Node3D
 var _mesh_fusion_status := ""
 var _debug_viewport: SubViewport
 var _debug_sprite: Sprite3D
@@ -868,12 +901,18 @@ func _ready() -> void:
 
 func _validate_property(property: Dictionary) -> void:
 	var property_name := str(property.get("name", ""))
+	if property_name in ["rendering_mode", "diagnostic_cpu_mesh"]:
+		property["usage"] = PROPERTY_USAGE_EDITOR
+	if property_name.begins_with("blendpcr_") and render_mode != "blendpcr":
+		property["usage"] = PROPERTY_USAGE_STORAGE
 	if property_name in LEGACY_CALIBRATION_PROPERTIES \
 		or property_name in CORE_DEVELOPER_PROPERTIES \
 		or property_name in DORMANT_OAKD_PROPERTIES:
 		property["usage"] = PROPERTY_USAGE_STORAGE
 
 func _exit_tree() -> void:
+	if is_instance_valid(_blendpcr):
+		_blendpcr.clear()
 	if _native_realsense_calibrator != null and _native_realsense_calibrator.has_method("cancel"):
 		_native_realsense_calibrator.cancel()
 	if not Engine.is_editor_hint():
@@ -1837,19 +1876,19 @@ func _camera_transform(camera_id: String) -> Transform3D:
 	return camera_transform
 
 func _mesh_enabled() -> bool:
-	return render_mode in ["unified_mesh", "shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh", "cpu_mesh"]
+	return render_mode in ["unified_mesh", "shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh", "cpu_mesh", "blendpcr"]
 
 func _gpu_mesh_enabled() -> bool:
-	return render_mode in ["unified_mesh", "shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh"]
+	return render_mode in ["unified_mesh", "shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh", "blendpcr"]
 
 func _gpu_mesh_compute_enabled() -> bool:
 	return false
 
 func _gpu_mesh_static_shader_enabled() -> bool:
-	return render_mode in ["unified_mesh", "shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh"]
+	return render_mode in ["unified_mesh", "shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh", "blendpcr"]
 
 func _tracker_mesh_mode() -> String:
-	if render_mode in ["unified_mesh", "shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh"]:
+	if render_mode in ["unified_mesh", "shader_mesh", "prefer_d455", "prefer_d435", "independent_mesh", "blendpcr"]:
 		return "stereo_gpu"
 	if render_mode == "cpu_mesh":
 		return "stereo_cpu"
@@ -2916,6 +2955,7 @@ func _update_camera_renderers() -> void:
 			_free_camera_renderer(camera_id)
 	_update_unified_mesh_fusion()
 	_update_robot_renderer_masks()
+	_update_blendpcr_rendering()
 
 func _update_unified_mesh_fusion() -> void:
 	var renderers: Array[MeshInstance3D] = []
@@ -2930,7 +2970,8 @@ func _update_unified_mesh_fusion() -> void:
 	var rig_mode := render_mode in ["unified_mesh", "prefer_d455", "prefer_d435"] and renderers.size() >= 2
 	if not rig_mode:
 		_mesh_fusion.clear()
-		_set_mesh_fusion_status("")
+		if render_mode != "blendpcr":
+			_set_mesh_fusion_status("")
 	for node in _camera_nodes.values():
 		if is_instance_valid(node) and node.has_method("set_fusion_camera_layers") and (not rig_mode or node not in renderers):
 			node.call("set_fusion_camera_layers", null, null, null, -1)
@@ -2983,6 +3024,29 @@ func _update_unified_mesh_fusion() -> void:
 		renderers[index].call("set_fusion_depth_tolerance", mesh_fusion_depth_tolerance_m)
 	_set_mesh_fusion_status(_mesh_fusion.error)
 
+func _update_blendpcr_rendering() -> void:
+	if render_mode != "blendpcr":
+		if is_instance_valid(_blendpcr):
+			_blendpcr.clear()
+		return
+	if not is_instance_valid(_blendpcr):
+		_blendpcr = BlendPCR.new()
+		_blendpcr.name = "BlendPCRRenderer"
+		add_child(_blendpcr)
+	var ids := _realsense_camera_ids()
+	ids.sort()
+	var surfaces: Array[MeshInstance3D] = []
+	for id in ids:
+		var surface := _camera_nodes.get(id) as MeshInstance3D
+		if is_instance_valid(surface) and _camera_enabled(id) and _camera_diagnostic_visible(id):
+			surfaces.append(surface)
+	var viewer := get_viewport().get_camera_3d()
+	if viewer == null and Engine.is_editor_hint():
+		viewer = EditorInterface.get_editor_viewport_3d(0).get_camera_3d()
+	var scale := [0.75, 1.0, 0.5][clampi(blendpcr_quality, 0, 2)] as float
+	_blendpcr.update_surfaces(surfaces, viewer, scale, blendpcr_surface_tolerance_m, blendpcr_seam_radius)
+	_set_mesh_fusion_status(_blendpcr.status)
+
 func _set_mesh_fusion_status(message: String) -> void:
 	if message == _mesh_fusion_status:
 		return
@@ -2997,7 +3061,9 @@ func _fusion_camera_precedes(left_camera_id: String, right_camera_id: String) ->
 
 func _fusion_camera_rank(camera_id: String) -> int:
 	var model := str(_realsense_setting(camera_id, "model", "")).to_lower()
-	if render_mode == "prefer_d435" and model.contains("435"):
+	if unified_camera_priority == 2:
+		return 0
+	if unified_camera_priority == 1 and model.contains("435"):
 		return -1
 	if model.contains("455"):
 		return 0
