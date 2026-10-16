@@ -115,6 +115,7 @@ func run() -> void:
 		return
 	var viewport := SubViewport.new()
 	viewport.size = Vector2i(128,128)
+	viewport.transparent_bg = true
 	viewport.own_world_3d = true
 	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	root.add_child(viewport)
@@ -168,6 +169,22 @@ func run() -> void:
 	surfaces[0].age = 2000
 	await sample(viewport, surfaces, fusion, true, "stale first does not hide peers", Color.GREEN)
 	surfaces[0].age = 0
+	# A missing, stale B in front of live C: excluding B as an overlap owner
+	# alone is insufficient, since its frozen mesh can still win the depth test.
+	surfaces[0].fill(0, Color.RED)
+	surfaces[1].fill(0.7, Color.GREEN)
+	surfaces[1].age = 1000
+	await sample(viewport, surfaces, fusion, true, "stale foreground B cannot cover live C", Color.BLUE)
+	surfaces[1].age = 999
+	await sample(viewport, surfaces, fusion, true, "fresh foreground B is restored", Color.GREEN)
+	surfaces[1].age = 1000
+	await sample(viewport, surfaces, fusion, false, "independent retains held B", Color.GREEN)
+	for i in 4:
+		surfaces[i].age = 2000
+	await sample(viewport, surfaces, fusion, true, "all stale layers stop drawing", Color.BLACK)
+	for i in 4:
+		surfaces[i].age = 0
+		surfaces[i].fill(1.008 - i*0.002, palette[i])
 	surfaces[2].fill(0.7, Color.BLUE)
 	await sample(viewport, surfaces, fusion, true, "separate foreground stays visible", Color.BLUE)
 	surfaces[2].fill(1.004, Color.BLUE)

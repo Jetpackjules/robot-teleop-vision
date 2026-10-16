@@ -82,6 +82,9 @@ bool rig_covers(int camera, vec3 point) {
 
 bool rig_overlap() {
     if (!rig_fusion_enabled) return false;
+    // Expired layers must neither own overlap nor draw frozen foreground over
+    // live peers. Use the same readiness bit as rig_covers(), for every index.
+    if (rig_data(rig_camera_index, 6).w < 0.5) return true;
     vec4 world = vec4(rig_world_position, 1.0);
     // No camera-count constant: this loop visits every higher-priority layer.
     for (int camera = 0; camera < rig_camera_index; camera++) {

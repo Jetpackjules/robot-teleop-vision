@@ -79,6 +79,10 @@ const server = http.createServer((req,res) => {
       fixture([1000,1000,1000,850]);sample('unified_mesh','distinct foreground remains visible',palette[3]);
       fixture();state.cameras[0].lastUpdateMs=performance.now()-1500;
       sample('unified_mesh','stale first camera does not own surface',palette[1]);
+      fixture([0,700,1004,1002]);state.cameras[1].lastUpdateMs=performance.now()-1500;
+      sample('unified_mesh','stale foreground B cannot cover live C',palette[2]);
+      state.cameras[1].lastUpdateMs=performance.now();
+      sample('unified_mesh','fresh foreground B returns',palette[1]);
       fixture();state.cameras[0].modelMatrix[12]=2;
       sample('unified_mesh','translated first camera does not cover center',palette[1]);
       fixture([1008,1006,1004,1002],[64,48,80,64]);sample('unified_mesh','mixed resolutions',palette[0]);
