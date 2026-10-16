@@ -903,6 +903,8 @@ func _validate_property(property: Dictionary) -> void:
 	var property_name := str(property.get("name", ""))
 	if property_name in ["rendering_mode", "diagnostic_cpu_mesh"]:
 		property["usage"] = PROPERTY_USAGE_EDITOR
+	if property_name == "unified_camera_priority" and render_mode != "unified_mesh":
+		property["usage"] = PROPERTY_USAGE_STORAGE
 	if property_name.begins_with("blendpcr_") and render_mode != "blendpcr":
 		property["usage"] = PROPERTY_USAGE_STORAGE
 	if property_name in LEGACY_CALIBRATION_PROPERTIES \

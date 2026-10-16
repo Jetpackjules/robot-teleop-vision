@@ -20,6 +20,10 @@ func _initialize() -> void:
     for i in View.RENDERING_MODES.size():
         view.rendering_mode = i
         check(view.render_mode == View.RENDERING_MODES[i] and view.rendering_mode == i, "render selector round trip %d" % i)
+        var priority := {"name": "unified_camera_priority", "usage": PROPERTY_USAGE_DEFAULT}
+        view._validate_property(priority)
+        check(bool(priority.usage & PROPERTY_USAGE_EDITOR) == (view.render_mode == "unified_mesh"), "camera preference only appears for Unified mesh")
+        check(bool(priority.usage & PROPERTY_USAGE_STORAGE), "camera preference remains saved in every mode")
     view.diagnostic_cpu_mesh = true
     check(view.render_mode == "cpu_mesh" and not view._gpu_mesh_enabled(), "CPU fallback remains available")
     view.rendering_mode = 5
