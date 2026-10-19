@@ -24,3 +24,13 @@ The markerless solver uses the CPU execution provider; CUDA is not required.
 Licenses and notices are in `licenses/` and `models/LIGHTGLUE_ONNX_LICENSE`.
 Run `tests/godot/markerless_runtime_probe.gd` after any native dependency update;
 it runs inference on synthetic images and does not connect to hardware.
+
+## Linux calibration runtime
+
+The native markerless solver also searches the SDK's normal Linux runtime path,
+`thirdparty/onnxruntime/lib/libonnxruntime.so`, relative to this directory, as
+well as `bin/libonnxruntime.so` and standard system locations. An external
+installation can be selected with `ONNXRUNTIME_SO_PATH`, `ONNXRUNTIME_LIB_PATH`,
+or `ONNXRUNTIME_LIB_DIR`. The runtime must support the C API version used to
+build the extension. Run the same `markerless_runtime_probe.gd` after building
+on Linux to verify that the library loads and the packaged model runs.

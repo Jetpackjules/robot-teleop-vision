@@ -1787,7 +1787,18 @@ public:
         if (path && path[0]) {
             candidates.emplace_back(path);
         }
+        const char *library_path = std::getenv("ONNXRUNTIME_LIB_PATH");
+        if (library_path && library_path[0]) {
+            candidates.emplace_back(library_path);
+        }
+        const char *library_dir = std::getenv("ONNXRUNTIME_LIB_DIR");
+        if (library_dir && library_dir[0]) {
+            candidates.emplace_back(std::filesystem::path(library_dir) / "libonnxruntime.so");
+        }
         candidates.emplace_back("native/realsense_shared_memory/bin/libonnxruntime.so");
+        // Linux SDK setup keeps the runtime beside its headers. Match the
+        // Foundation Stereo loader instead of requiring a separate bin copy.
+        candidates.emplace_back("native/realsense_shared_memory/thirdparty/onnxruntime/lib/libonnxruntime.so");
         const char *home = std::getenv("HOME");
         if (home && home[0]) {
             const std::filesystem::path local = std::filesystem::path(home) / ".local/lib";
@@ -1807,6 +1818,7 @@ public:
                 }
             }
         }
+        candidates.emplace_back("/usr/local/lib/libonnxruntime.so");
         candidates.emplace_back("/usr/lib/x86_64-linux-gnu/libonnxruntime.so");
         candidates.emplace_back("libonnxruntime.so");
         for (const std::filesystem::path &candidate : candidates) {
