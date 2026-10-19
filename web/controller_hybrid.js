@@ -54,7 +54,7 @@
     let startupNavigationPending = false;
     const hybridMode = !window.location.pathname.startsWith("/frame-stream");
     const displayModes = hybridMode
-      ? ["point_cloud", "shader_mesh", "independent_mesh", "unified_mesh", "rgb_camera"]
+      ? ["point_cloud", "shader_mesh", "independent_mesh", "unified_mesh", "blendpcr", "rgb_camera"]
       : ["point_cloud", "rgb_camera"];
     const defaultDisplayMode = hybridMode ? "independent_mesh" : "point_cloud";
     for (const option of displayModeSelect.options) {

@@ -505,6 +505,9 @@ def test_site_settings_persist_only_stable_setup_and_clamp_navigation():
     unified = handler.validate_site_settings({"settings_version": 13, "display_mode": "unified_mesh"})
     assert unified["display_mode"] == "unified_mesh"
     assert handler.validate_view_settings(unified)["display_mode"] == "unified_mesh"
+    blended = handler.validate_site_settings({"settings_version": 14, "display_mode": "blendpcr"})
+    assert blended["display_mode"] == "blendpcr"
+    assert handler.validate_view_settings(blended)["display_mode"] == "blendpcr"
     with pytest.raises(ValueError, match="settings_version"):
         handler.validate_site_settings({"settings_version": "ten"})
 

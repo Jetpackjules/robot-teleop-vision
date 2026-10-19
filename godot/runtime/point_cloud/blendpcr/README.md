@@ -2,9 +2,14 @@
 
 Select **Rendering Mode → BlendPCR (experimental)** on the Unified Point Clouds
 node in Godot. Capture, LightGlue/ArUco alignment, saved camera transforms, robot
-masks, and RGB-D streaming use their existing paths. The browser point-cloud
-renderer does not gain BlendPCR in this change; its existing `shader_mesh` value
-is simply labelled **Shared-color mesh**.
+masks, and RGB-D streaming use their existing paths. The browser also offers
+**View -> BlendPCR** through `web/hybrid_blendpcr.js`; `shader_mesh` is labelled
+**Shared-color mesh**. The browser implementation uses WebGL2 texture arrays,
+full-resolution integer primitive IDs and the same local quality/free-space
+principles. It supports rigs beyond four cameras when GPU capacity permits.
+Browser RGB reconstruction preserves its existing per-vertex color interpolation;
+Godot's native port preserves its texture interpolation. Both retain measured
+geometry, camera intrinsics and capture sampling.
 
 For a rig overview, select **View → Workflow → Camera Guides**. **Positions**
 shows camera optical origins with repeating red, green and blue markers;

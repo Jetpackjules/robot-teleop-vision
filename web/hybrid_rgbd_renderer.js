@@ -1,4 +1,6 @@
-import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261013";
+import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_blendpcr2";
+
+import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_blendpcr2";
 
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},
@@ -23,6 +25,7 @@ const state = {
   program: null,
   uniforms: null,
   cameraFusion: null,
+  blendPCR: null,
   robotProgram: null,
   robotUniforms: null,
   robotVao: null,
@@ -104,6 +107,7 @@ const state = {
     fov: 55,
     splat_fill: 1.3,
     geometry_mode: "mesh",
+    blendpcr_enabled: false,
     overlap_suppression_enabled: false,
     camera_color_fusion_enabled: false,
     mesh_depth_delta: 0.035,
@@ -179,6 +183,10 @@ uniform float u_fusion_depth_tolerance;
 out vec3 v_color;
 out float v_valid;
 out vec3 v_world_position;
+flat out uint v_triangle_id;
+uniform highp sampler2DArray u_rig_quality;
+uniform highp int u_rig_index;
+uniform highp int u_quality_enabled;
 
 bool depth_supported(ivec2 pixel, uint depth_mm) {
   float tolerance_mm = max(2.0, u_mesh_depth_delta * float(depth_mm) * 0.5);
@@ -195,6 +203,7 @@ bool depth_supported(ivec2 pixel, uint depth_mm) {
 
 void main() {
   v_world_position = vec3(0.0);
+  v_triangle_id = uint(gl_VertexID / 3 + 1);
   ivec2 pixel_coord;
   bool triangle_valid = true;
   if (u_render_mode == 1) {
@@ -221,6 +230,10 @@ void main() {
       triangle_c = bottom_left;
       pixel_coord = vertex_in_cell == 3 ? triangle_a : (vertex_in_cell == 4 ? triangle_b : triangle_c);
     }
+    if (u_quality_enabled == 1) {
+      vec4 quality = texelFetch(u_rig_quality, ivec3(top_left,u_rig_index), 0);
+      triangle_valid = (vertex_in_cell < 3 ? quality.r : quality.g) > 0.5;
+    } else {
     uint depth_a = texelFetch(u_depth, triangle_a, 0).r;
     uint depth_b = texelFetch(u_depth, triangle_b, 0).r;
     uint depth_c = texelFetch(u_depth, triangle_c, 0).r;
@@ -241,6 +254,7 @@ void main() {
       && depth_supported(triangle_a, depth_a)
       && depth_supported(triangle_b, depth_b)
       && depth_supported(triangle_c, depth_c);
+    }
   } else {
     pixel_coord = ivec2(gl_VertexID % u_size.x, gl_VertexID / u_size.x);
   }
@@ -327,7 +341,7 @@ void main() {
     vec2 centered = gl_PointCoord * 2.0 - 1.0;
     if (dot(centered, centered) > 1.0) discard;
   }
-  out_color = vec4(v_color, 1.0);
+  out_color = vec4(rig_color(v_color), 1.0);
 }
 `;
 
@@ -1075,6 +1089,11 @@ function findUniforms(gl, program) {
     rigIndex: gl.getUniformLocation(program, "u_rig_index"),
     rigDepth: gl.getUniformLocation(program, "u_rig_depth"),
     rigData: gl.getUniformLocation(program, "u_rig_data"),
+    rigCount: gl.getUniformLocation(program, "u_rig_count"),
+    rigQuality: gl.getUniformLocation(program, "u_rig_quality"),
+    rigColor: gl.getUniformLocation(program, "u_rig_color"),
+    rigColorEnabled: gl.getUniformLocation(program, "u_rig_color_enabled"),
+    qualityEnabled: gl.getUniformLocation(program, "u_quality_enabled"),
     renderMode: gl.getUniformLocation(program, "u_render_mode"),
     meshDepthDelta: gl.getUniformLocation(program, "u_mesh_depth_delta"),
     meshMaxEdge: gl.getUniformLocation(program, "u_mesh_max_edge"),
@@ -1598,6 +1617,7 @@ function uploadCamera(decoded) {
   }
   Object.assign(camera, decoded);
   camera.lastUpdateMs = performance.now();
+  camera.uploadRevision = (previous?.uploadRevision || 0) + 1;
   camera.intrinsicsArray = new Float32Array(camera.metadata.intrinsics);
 
   gl.bindTexture(gl.TEXTURE_2D, camera.depthTexture);
@@ -2133,6 +2153,12 @@ function resizeCanvas() {
 
 function render() {
   if (!state.running || !state.gl || !state.baseViewer) return;
+  if (state.settings.display_mode === "rgb_camera") {
+    if (state.blendPCR?.signature) state.blendPCR.clearTargets();
+    state.stats.renderWarning = "";
+    state.stats.renderMethod = "rgb_camera";
+    return;
+  }
   const gl = state.gl;
   const dimensions = resizeCanvas();
   const headDelta = currentHeadDelta();
@@ -2156,41 +2182,60 @@ function render() {
   gl.enable(gl.DEPTH_TEST);
   gl.depthFunc(gl.LEQUAL);
   gl.disable(gl.BLEND);
-  gl.useProgram(state.program);
-  gl.uniformMatrix4fv(state.uniforms.viewProjection, false, viewProjection);
   const maskCapsules = state.settings.robot_overlay_enabled && state.settings.robot_overlay_mask_scanned_robot
-    ? robotMaskCapsules()
-    : null;
+    ? robotMaskCapsules() : null;
+  const meshMode = state.settings.geometry_mode === "mesh";
+  const now = performance.now();
+  let cached = false;
+  state.stats.renderWarning = "";
+  if (state.cameras.length) {
+    try {
+      state.cameraFusion.update(state.cameras, inverseRigidTransform, now, state.settings);
+      cached = true;
+    } catch (error) {
+      state.stats.renderWarning = `${error.message || error}; using independent rendering`;
+    }
+  }
+  let blended = false;
+  if (meshMode && state.settings.blendpcr_enabled && cached) {
+    try {
+      state.blendPCR ||= new BrowserBlendPCR(gl, VERTEX_SHADER);
+      state.blendPCR.render(state.cameraFusion, state.cameras, {
+        ...dimensions, now, viewer: viewerTransform, inverseViewer: inverseRigidTransform(viewerTransform),
+        projection, viewProjection,
+      }, maskCapsules, state.settings);
+      blended = true;
+    } catch (error) {
+      state.stats.renderWarning = `BlendPCR: ${error.message || error}; using independent mesh`;
+      // A failure must not leave half a frame of private-pass output or depth.
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, dimensions.width, dimensions.height);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    }
+  } else if (state.blendPCR?.signature) {
+    state.blendPCR.clearTargets();
+  }
+  state.stats.renderMethod = blended ? "blendpcr" : (state.settings.blendpcr_enabled ? "independent_mesh" : state.settings.display_mode || "independent_mesh");
+  const unified = meshMode && state.settings.overlap_suppression_enabled && cached && state.cameras.length >= 2;
+  const fusionReference = !cached && state.settings.camera_color_fusion_enabled ? chooseColorReference(state.cameras, now) : null;
+  gl.useProgram(state.program);
+  if (cached) state.cameraFusion.bind(state.program);
+  else gl.uniform1i(state.uniforms.rigCount, 0);
+  gl.uniformMatrix4fv(state.uniforms.viewProjection, false, viewProjection);
   gl.uniform1i(state.uniforms.robotMaskEnabled, maskCapsules ? 1 : 0);
   if (maskCapsules) {
     gl.uniform4fv(state.uniforms.maskCapsuleA, maskCapsules.starts);
     gl.uniform4fv(state.uniforms.maskCapsuleB, maskCapsules.ends);
   }
-  const meshMode = state.settings.geometry_mode === "mesh";
   gl.uniform1f(state.uniforms.meshDepthDelta, Number(state.settings.mesh_depth_delta || 0.045));
   gl.uniform1f(state.uniforms.meshMaxEdge, Number(state.settings.mesh_max_edge || 0.08));
-  const now = performance.now();
-  const fusionReference = state.settings.camera_color_fusion_enabled
-    ? chooseColorReference(state.cameras, now)
-    : null;
-  let unified = meshMode && state.settings.overlap_suppression_enabled && state.cameras.length >= 2;
-  if (unified) {
-    try {
-      state.cameraFusion.update(state.cameras, inverseRigidTransform, now);
-      state.stats.renderWarning = "";
-    } catch (error) {
-      unified = false;
-      state.stats.renderWarning = String(error.message || error);
-    }
-  } else {
-    state.cameraFusion.clear();
-    state.stats.renderWarning = "";
-  }
+  gl.uniform1i(state.uniforms.qualityEnabled, cached ? 1 : 0);
   gl.uniform1i(state.uniforms.rigEnabled, unified ? 1 : 0);
+  gl.uniform1i(state.uniforms.rigColorEnabled, cached && state.settings.camera_color_fusion_enabled ? 1 : 0);
   gl.uniform1f(state.uniforms.fusionDepthTolerance, 0.035);
 
   for (const [cameraIndex, camera] of state.cameras.entries()) {
-    if (unified && !cameraIsFresh(camera, now)) continue;
+    if (blended || !cameraIsFresh(camera, now)) continue;
     gl.uniform1i(state.uniforms.rigIndex, cameraIndex);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, camera.depthTexture);
@@ -2713,6 +2758,8 @@ export async function startGodotHybridRenderer(options = {}) {
   gl.uniform1i(state.uniforms.fusionColor, 3);
   gl.uniform1i(state.uniforms.rigDepth, 4);
   gl.uniform1i(state.uniforms.rigData, 5);
+  gl.uniform1i(state.uniforms.rigQuality, 6);
+  gl.uniform1i(state.uniforms.rigColor, 7);
   gl.uniform1f(state.uniforms.maxPointSize, Math.min(32, gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]));
   state.running = true;
   state.robotLoadToken += 1;
@@ -2813,6 +2860,8 @@ export function stopGodotHybridRenderer() {
   state.persistentMetadata = null;
   for (const camera of state.cameras) deleteCameraTextures(camera);
   state.cameras = [];
+  state.blendPCR?.dispose();
+  state.blendPCR = null;
   state.cameraFusion?.clear();
   state.cameraFusion = null;
   const gl = state.gl;
@@ -2855,10 +2904,11 @@ export function setGodotHybridViewSettings(settings = {}) {
       ? "alignment"
       : state.settings.robot_overlay_style,
   };
-  if (["point_cloud", "shader_mesh", "independent_mesh", "unified_mesh"].includes(settings.display_mode)) {
+  if (["point_cloud", "shader_mesh", "independent_mesh", "unified_mesh", "blendpcr"].includes(settings.display_mode)) {
     state.settings.geometry_mode = settings.display_mode === "point_cloud" ? "points" : "mesh";
     state.settings.camera_color_fusion_enabled = ["point_cloud", "shader_mesh"].includes(settings.display_mode);
     state.settings.overlap_suppression_enabled = settings.display_mode === "unified_mesh";
+    state.settings.blendpcr_enabled = settings.display_mode === "blendpcr";
   }
   if (settings.recenter) recenterGodotHybridRenderer();
 }
