@@ -52,6 +52,11 @@ def test_render_mode_migration_and_diagnostic_fallback(tmp_path):
     run_probe(tmp_path, "blendpcr_modes_probe.gd")
 
 
+def test_camera_guides_follow_calibrated_cameras_and_intrinsics(tmp_path):
+    output = run_probe(tmp_path, "camera_rig_guides_probe.gd")
+    assert "CAMERA_GUIDES" in output
+
+
 @pytest.mark.skipif(os.environ.get("ROBOT_TELEOP_TEST_BLENDPCR_GPU") != "1", reason="Opt in to the actual Godot editor")
 def test_blendpcr_uses_visible_editor_viewport(tmp_path):
     godot = find_godot(os.environ.get("ROBOT_TELEOP_TEST_GODOT", ""))

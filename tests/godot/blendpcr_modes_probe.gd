@@ -1,5 +1,6 @@
 extends SceneTree
 const View = preload("res://godot/runtime/point_cloud/unified_point_cloud_view.gd")
+const BlendPCR = preload("res://godot/runtime/point_cloud/blendpcr/blendpcr_renderer.gd")
 var checks := 0
 var failures := 0
 class QuietView extends View:
@@ -11,6 +12,12 @@ func check(ok: bool, label: String) -> void:
         failures += 1
         push_error(label)
 func _initialize() -> void:
+    var lut := BlendPCR.compatibility_lut_image()
+    for byte in 256:
+        var value := lut.get_pixel(byte, 0).r
+        var linear := value * (value * (value * 0.305306011 + 0.682171111) + 0.012522878)
+        var recovered := 1.055 * pow(linear, 1.0 / 2.4) - 0.055
+        check(absi(int(round(recovered * 255.0)) - byte) == 0, "packed metadata byte survives color conversion: %d" % byte)
     var view := QuietView.new()
     check(view.render_mode == "independent_mesh" and view.rendering_mode == 2, "existing default retained")
     view.render_mode = "prefer_d435"

@@ -4,6 +4,7 @@ extends Node3D
 const RigCalibration = preload("res://godot/runtime/point_cloud/realsense_rig_calibration.gd")
 const MeshFusion = preload("res://godot/runtime/point_cloud/realsense_mesh_fusion.gd")
 const BlendPCR = preload("res://godot/runtime/point_cloud/blendpcr/blendpcr_renderer.gd")
+const CameraRigGuides = preload("res://godot/runtime/point_cloud/camera_rig_guides.gd")
 const RENDERING_MODES := ["points", "point_splats", "independent_mesh", "shader_mesh", "unified_mesh", "blendpcr"]
 
 const CAMERA_REALSENSE := "realsense"
@@ -134,6 +135,11 @@ const DORMANT_OAKD_PROPERTIES := [
 			_poll_alignment_result(true)
 ## Restores the intended simple defaults for this new view. Performance impact: applies settings that favor clarity and stable FPS over maximum mesh detail.
 @export_tool_button("Apply Clean Defaults") var apply_clean_defaults_action: Callable = _apply_clean_defaults
+## Optional positions and calibrated depth-camera view cones. Colors repeat red, green, blue.
+@export_enum("Hidden", "Positions", "Positions and view cones") var camera_guides: int = 0:
+	set(value):
+		camera_guides = clampi(value, 0, 2)
+		_update_camera_guides()
 
 @export_group("Universal Point Cloud")
 ## Rejects points closer than this distance. Performance impact: low; changing it updates the renderer and stream clipping.
@@ -840,6 +846,7 @@ var _native_realsense_calibration_target_id := ""
 var _native_realsense_rig: RigCalibration
 var _mesh_fusion := MeshFusion.new()
 var _blendpcr: Node3D
+var _camera_rig_guides: Node
 var _mesh_fusion_status := ""
 var _debug_viewport: SubViewport
 var _debug_sprite: Sprite3D
@@ -913,6 +920,8 @@ func _validate_property(property: Dictionary) -> void:
 		property["usage"] = PROPERTY_USAGE_STORAGE
 
 func _exit_tree() -> void:
+	if is_instance_valid(_camera_rig_guides):
+		_camera_rig_guides.clear()
 	if is_instance_valid(_blendpcr):
 		_blendpcr.clear()
 	if _native_realsense_calibrator != null and _native_realsense_calibrator.has_method("cancel"):
@@ -1215,6 +1224,7 @@ func _world_level_transform_from_dictionary(payload: Dictionary) -> Transform3D:
 
 func _apply_clean_defaults() -> void:
 	render_mode = "independent_mesh"
+	camera_guides = 0
 	point_pixel_size = 2.5
 	cleanup_enabled = false
 	cleanup_depth_delta_m = 0.055
@@ -2958,6 +2968,43 @@ func _update_camera_renderers() -> void:
 	_update_unified_mesh_fusion()
 	_update_robot_renderer_masks()
 	_update_blendpcr_rendering()
+	_update_camera_guides()
+
+func get_camera_stream_info() -> Array[Dictionary]:
+	var info: Array[Dictionary] = []
+	var ids := _realsense_camera_ids()
+	ids.sort()
+	for id in ids:
+		var source := _camera_nodes.get(id) as MeshInstance3D
+		if not is_instance_valid(source) or not _camera_enabled(id):
+			continue
+		var depth := source.call("get_depth_texture") as Texture2D
+		var color := source.call("get_color_texture") as Texture2D
+		info.append({"id": id, "label": _camera_label(id),
+			"depth_size": Vector2i(depth.get_width(), depth.get_height()) if depth != null else Vector2i.ZERO,
+			"color_size": Vector2i(color.get_width(), color.get_height()) if color != null else Vector2i.ZERO,
+			"stride": int(source.call("get_current_grid_stride")),
+			"capture_fps": float(source.call("get_direct_realsense_capture_fps")),
+			"render_fps": float(source.call("get_render_fps"))})
+	return info
+
+func _update_camera_guides() -> void:
+	if not is_inside_tree():
+		return
+	if camera_guides == 0:
+		if is_instance_valid(_camera_rig_guides):
+			_camera_rig_guides.clear()
+		return
+	if not is_instance_valid(_camera_rig_guides):
+		_camera_rig_guides = CameraRigGuides.new()
+		add_child(_camera_rig_guides)
+	var cameras: Array[Dictionary] = []
+	for info in get_camera_stream_info():
+		var source := _camera_nodes.get(info.id) as MeshInstance3D
+		cameras.append({"source": source, "label": info.label,
+			"intrinsics": source.call("get_current_intrinsics"), "size": info.depth_size,
+			"stride": info.stride, "near": _camera_min_depth(info.id), "far": _camera_max_depth(info.id)})
+	_camera_rig_guides.update_cameras(cameras, camera_guides)
 
 func _update_unified_mesh_fusion() -> void:
 	var renderers: Array[MeshInstance3D] = []

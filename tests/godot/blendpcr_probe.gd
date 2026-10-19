@@ -106,6 +106,7 @@ shader_type spatial;
 render_mode unshaded, cull_disabled, fog_disabled;
 uniform float depth_m = 1.0;
 uniform vec3 rgb = vec3(1.0,0.0,0.0);
+uniform mat4 calibration_transform = mat4(1.0);
 varying vec3 point_position_local;
 void vertex() { VERTEX.z = -depth_m; point_position_local = VERTEX; }
 void fragment() { ALBEDO = rgb; }
@@ -127,6 +128,18 @@ void fragment() { ALBEDO = rgb; }
     surfaces[1].fill(1.006,Color.GREEN)
     surfaces[2].fill(1.004,Color.BLUE)
     await sample("higher sampling density wins overlap", Color.RED)
+    # Native camera uniforms replace their initial mat4 Projection defaults
+    # with Transform3D values after frames start arriving.
+    for surface in surfaces:
+        (surface.material_override as ShaderMaterial).set_shader_parameter("calibration_transform", Transform3D.IDENTITY)
+    await sample("native matrix uniform type changes keep rendering", Color.RED)
+    # An already-running @tool renderer retains its entry dictionaries when a
+    # new cache field is introduced by an editor script reload.
+    renderer._compat_lut = null
+    for entry in renderer._entries.values():
+        entry.erase("material")
+        entry.erase("camera_settings")
+    await sample("editor reload rebuilds metadata lookup and material caches", Color.RED)
     var metadata: Image = renderer._entries[surfaces[0].get_instance_id()].meta_view.get_texture().get_image()
     var encoded := metadata.get_pixel(viewport.size.x / 2, viewport.size.y / 2)
     var decoded_depth := (encoded.r * 255.0 * 256.0 + encoded.g * 255.0) / 65535.0 * viewer.far

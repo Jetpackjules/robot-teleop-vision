@@ -11,20 +11,14 @@ const CompositeShader = preload("res://godot/runtime/point_cloud/blendpcr/compos
 const METADATA_DECLARATIONS := """
 uniform float blendpcr_depth_span = 100.0;
 uniform float blendpcr_sample_density = 1.0;
+uniform sampler2D blendpcr_compat_lut : filter_nearest, repeat_disable;
 vec3 blendpcr_compat_data(vec3 c) {
-    // Invert Compatibility's cubic sRGB approximation before the engine's
-    // final conversion. Ordinary color is unaffected; only packed data uses it.
-    vec3 wanted = pow((c + vec3(0.055)) / 1.055, vec3(2.4));
-    vec3 lo = vec3(0.0);
-    vec3 hi = vec3(1.0);
-    for (int i = 0; i < 14; i++) {
-        vec3 mid = (lo + hi) * 0.5;
-        vec3 converted = mid * (mid * (mid * 0.305306011 + 0.682171111) + 0.012522878);
-        vec3 below = step(converted, wanted);
-        lo = mix(lo, mid, below);
-        hi = mix(mid, hi, below);
-    }
-    return (lo + hi) * 0.5;
+    // Packed metadata contains only byte values. Precompute the inverse
+    // conversion once instead of solving it 14 times per rendered fragment.
+    vec3 u = (floor(c * 255.0 + 0.5) + vec3(0.5)) / 256.0;
+    return vec3(texture(blendpcr_compat_lut, vec2(u.r, 0.5)).r,
+                texture(blendpcr_compat_lut, vec2(u.g, 0.5)).r,
+                texture(blendpcr_compat_lut, vec2(u.b, 0.5)).r);
 }
 vec3 blendpcr_to_linear(vec3 c) {
     return mix(c / 12.92, pow((c + vec3(0.055)) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
@@ -53,6 +47,23 @@ var _dominant_material: ShaderMaterial
 var _source_size := Vector2i.ZERO
 var _dummy: Texture2D
 var _last_viewer: Camera3D
+var _compat_lut: Texture2D
+
+static func compatibility_lut_image() -> Image:
+    var image := Image.create(256, 1, false, Image.FORMAT_RF)
+    for byte in 256:
+        var wanted := pow((float(byte) / 255.0 + 0.055) / 1.055, 2.4)
+        var low := 0.0
+        var high := 1.0
+        for iteration in 14:
+            var mid := (low + high) * 0.5
+            var converted := mid * (mid * (mid * 0.305306011 + 0.682171111) + 0.012522878)
+            if converted <= wanted:
+                low = mid
+            else:
+                high = mid
+        image.set_pixel(byte, 0, Color((low + high) * 0.5, 0, 0, 1))
+    return image
 
 func clear() -> void:
     for entry in _entries.values():
@@ -72,6 +83,7 @@ func clear() -> void:
     _composite = null
     _dominant_material = null
     _last_viewer = null
+    _compat_lut = null
     _source_size = Vector2i.ZERO
 
 func _exit_tree() -> void:
@@ -128,6 +140,8 @@ static func _pass_material(viewport: SubViewport) -> ShaderMaterial:
 
 func _ensure_passes(viewer: Camera3D, size: Vector2i) -> void:
     var small := Vector2i(maxi(1, size.x / 4), maxi(1, size.y / 4))
+    if _compat_lut == null:
+        _compat_lut = ImageTexture.create_from_image(compatibility_lut_image())
     if _output == null:
         _dominance = _screen_pass(DominanceShader, small)
         _dominant_material = _pass_material(_dominance)
@@ -169,7 +183,7 @@ func _entry(source: MeshInstance3D, size: Vector2i) -> Dictionary:
         return _entries[id]
     var color_view := _viewport(size, true)
     var meta_view := _viewport(size, true)
-    var entry := {"source": source, "layers": source.layers, "color_view": color_view, "meta_view": meta_view, "shader": null}
+    var entry := {"source": source, "layers": source.layers, "color_view": color_view, "meta_view": meta_view, "shader": null, "material": null, "uniform_names": [], "uniform_values": {}, "camera_settings": []}
     for kind in ["color", "meta"]:
         var viewport: SubViewport = entry[kind + "_view"]
         var camera := Camera3D.new()
@@ -222,6 +236,8 @@ func update_surfaces(sources: Array[MeshInstance3D], viewer: Camera3D, scale: fl
             entry.meta_view.queue_free()
             _entries.erase(id)
     _ensure_passes(viewer, size)
+    var camera_settings := [viewer.projection, viewer.fov, viewer.size, viewer.keep_aspect,
+        viewer.near, viewer.far, viewer.frustum_offset, viewer.h_offset, viewer.v_offset, viewer.global_transform]
     var active := 0
     for i in sources.size():
         var source := sources[i]
@@ -230,38 +246,59 @@ func update_surfaces(sources: Array[MeshInstance3D], viewer: Camera3D, scale: fl
         if material == null:
             _restore(entry)
             continue
-        if entry.shader != material.shader:
+        if entry.shader != material.shader or entry.get("material") != material:
             var shader := metadata_shader(material.shader)
             if shader == null:
                 status = "BlendPCR needs a depth-mesh shader; showing independent meshes."
                 clear()
                 return false
             entry.shader = material.shader
+            entry.material = material
+            entry.uniform_names = []
+            entry.uniform_values = {}
+            for uniform in material.shader.get_shader_uniform_list():
+                if str(uniform.name) not in ["fusion_enabled", "rig_fusion_enabled"]:
+                    entry.uniform_names.append(str(uniform.name))
             entry.color_surface.material_override = material.duplicate()
             var meta := ShaderMaterial.new()
             meta.shader = shader
+            meta.set_shader_parameter("blendpcr_compat_lut", _compat_lut)
             entry.meta_surface.material_override = meta
+            for target in [entry.color_surface.material_override, meta]:
+                target.set_shader_parameter("fusion_enabled", false)
+                target.set_shader_parameter("rig_fusion_enabled", false)
+        var changed := {}
+        for name in entry.uniform_names:
+            var value = material.get_shader_parameter(name)
+            # Native mat4 uniforms can initially report Projection defaults and
+            # later receive Transform3D values. Comparing those directly throws.
+            if value != null and (not entry.uniform_values.has(name)
+                    or typeof(entry.uniform_values[name]) != typeof(value)
+                    or entry.uniform_values[name] != value):
+                changed[name] = value
+                entry.uniform_values[name] = value
         for kind in ["color", "meta"]:
             var viewport: SubViewport = entry[kind + "_view"]
-            viewport.size = size
-            _sync_camera(entry[kind + "_camera"], viewer)
+            if viewport.size != size:
+                viewport.size = size
+            if entry.get("camera_settings", []) != camera_settings:
+                _sync_camera(entry[kind + "_camera"], viewer)
             var surface: MeshInstance3D = entry[kind + "_surface"]
-            surface.mesh = source.mesh
-            surface.global_transform = source.global_transform
-            surface.custom_aabb = source.custom_aabb
+            if surface.mesh != source.mesh:
+                surface.mesh = source.mesh
+            if surface.global_transform != source.global_transform:
+                surface.global_transform = source.global_transform
+            if surface.custom_aabb != source.custom_aabb:
+                surface.custom_aabb = source.custom_aabb
             var target := surface.material_override as ShaderMaterial
-            for uniform in material.shader.get_shader_uniform_list():
-                var name := str(uniform.name)
-                var value = material.get_shader_parameter(name)
-                if value != null:
-                    target.set_shader_parameter(name, value)
-            target.set_shader_parameter("fusion_enabled", false)
-            target.set_shader_parameter("rig_fusion_enabled", false)
+            for name in changed:
+                target.set_shader_parameter(name, changed[name])
             if kind == "meta":
                 target.set_shader_parameter("blendpcr_depth_span", viewer.far)
                 var k: Vector4 = source.call("get_current_intrinsics")
                 var stride := maxf(1, float(source.call("get_current_grid_stride")))
                 target.set_shader_parameter("blendpcr_sample_density", k.x * k.y / (stride * stride * 1000000.0))
+        entry.camera_settings = camera_settings
         var fresh := not source.has_method("get_display_frame_age_ms") or float(source.call("get_display_frame_age_ms")) < 1000.0
         if source.is_visible_in_tree() and fresh and (int(entry.layers) & viewer.cull_mask) != 0:
             active |= 1 << i

@@ -6,6 +6,14 @@ masks, and RGB-D streaming use their existing paths. The browser point-cloud
 renderer does not gain BlendPCR in this change; its existing `shader_mesh` value
 is simply labelled **Shared-color mesh**.
 
+For a rig overview, select **View → Workflow → Camera Guides**. **Positions**
+shows camera optical origins with repeating red, green and blue markers;
+**Positions and view cones** also shows the depth fields of view between the
+configured near and far limits. The cones use each live depth grid's intrinsics
+and stride. Guides follow the calibrated camera transforms, are transient
+children of the camera renderers, and do not alter or save calibration. They are
+hidden by default and also work while BlendPCR hides the original mesh layers.
+
 This is a Godot/RealSense adaptation of the core rendering approach from
 [BlendPCR](https://github.com/muehlenb/BlendPCR), Mühlenbrock, Weller and Zachmann,
 ICAT-EGVE 2024 ([paper DOI](https://doi.org/10.2312/egve.20241366)). Adapted against
@@ -53,6 +61,10 @@ The default 100 m far plane gives approximately 1.5 mm depth quantization.
 Metadata emission compensates for Godot 4.6 Compatibility's approximate sRGB
 conversion, so packed depth bytes are not treated as ordinary image colors.
 Both backend tests assert metric depth as well as image color.
+The inverse conversion is precomputed for all 256 possible byte values in a
+small floating-point lookup texture. Shader uniforms, camera state and mesh
+bindings are updated only when their inputs change. These optimizations do not
+reduce capture or rendering resolution, sampling density or seam quality.
 
 The runtime uses the viewport's active camera; editor preview follows the first
 3D editor viewport, even when the edited scene has its own current camera in
