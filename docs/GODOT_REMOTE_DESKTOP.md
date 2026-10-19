@@ -12,6 +12,11 @@ on a private Xvfb display). The video encoder uses a separate VAAPI video engine
 it cannot turn a slow Godot renderer into a 30 FPS scene. The toolbar reports
 decoded video FPS separately from scene FPS and buffering delay.
 
+Check VirtualGL's image-transport limit separately: an inherited `VGL_FPS=1`
+will repeat the desktop at one update per second even when Godot and the video
+encoder run faster. Remove that cap or set it to the desired desktop rate.
+See [VirtualGL's frame-rate governor](https://github.com/VirtualGL/virtualgl/blob/main/doc/advancedconfig.txt).
+
 ## Existing private desktop
 
 Install FFmpeg with `h264_vaapi`, a working VAAPI driver, x11vnc, noVNC and

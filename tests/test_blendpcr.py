@@ -17,6 +17,9 @@ def run_probe(tmp_path, probe, rendering_method=None):
         pytest.skip("Set ROBOT_TELEOP_TEST_GODOT to run Godot probes")
     shutil.copytree(ROOT / "godot/runtime/point_cloud", tmp_path / "godot/runtime/point_cloud")
     shutil.copy2(ROOT / "tests/godot" / probe, tmp_path / "probe.gd")
+    if probe == "mesh_quality_rig_probe.gd":
+        (tmp_path / "tests/godot").mkdir(parents=True)
+        shutil.copy2(ROOT / "tests/godot/blendpcr_probe.gd",tmp_path / "tests/godot/blendpcr_probe.gd")
     (tmp_path / "project.godot").write_text(
         'config_version=5\n[application]\nconfig/name="BlendPCR Test"\n', encoding="utf-8"
     )
@@ -95,3 +98,17 @@ def test_blendpcr_multi_camera_rendering(tmp_path, rendering_method):
     output = run_probe(tmp_path, "blendpcr_probe.gd", rendering_method)
     assert "BLENDPCR_PROBE" in output
     assert f"BLENDPCR_RENDERER={rendering_method}" in output, output
+
+
+@pytest.mark.skipif(os.environ.get("ROBOT_TELEOP_TEST_BLENDPCR_GPU") != "1", reason="Opt in to Godot GPU composition")
+@pytest.mark.parametrize("rendering_method", ["gl_compatibility","forward_plus"])
+def test_separable_weights_match_original_square_filter(tmp_path,rendering_method):
+    output = run_probe(tmp_path, "blendpcr_weights_probe.gd", rendering_method)
+    assert "BLENDPCR_WEIGHTS failures=0" in output
+
+
+@pytest.mark.skipif(os.environ.get("ROBOT_TELEOP_TEST_BLENDPCR_GPU") != "1", reason="Opt in to Godot GPU composition")
+@pytest.mark.parametrize("rendering_method",["gl_compatibility","forward_plus"])
+def test_gpu_peer_cache_ownership_and_mode_switches(tmp_path,rendering_method):
+    output=run_probe(tmp_path,"mesh_quality_rig_probe.gd",rendering_method)
+    assert "MESH_QUALITY_RIG checks=" in output

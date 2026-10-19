@@ -8,13 +8,11 @@ uniform int seam_radius = 3;
 void fragment() {
     vec2 texel = 1.0 / vec2(textureSize(dominance, 0));
     vec4 weights = vec4(0.0);
-    float count = 0.0;
-    for (int y = -seam_radius; y <= seam_radius; y++) {
-        for (int x = -seam_radius; x <= seam_radius; x++) {
-            int owner = int(round(texture(dominance, UV + vec2(float(x),float(y)) * texel).r * 255.0)) - 1;
-            if (owner >= first_camera && owner < first_camera + 4) weights[owner - first_camera] += 1.0;
-            count += 1.0;
-        }
+    for (int x = -seam_radius; x <= seam_radius; x++) {
+        int owner = int(round(texture(dominance, UV + vec2(float(x),0.0) * texel).r * 255.0)) - 1;
+        if (owner >= first_camera && owner < first_camera + 4) weights[owner - first_camera] += 1.0;
     }
-    COLOR = weights / max(count, 1.0);
+    // Store integer counts exactly in RGBA8. The vertical pass reconstructs
+    // them before dividing, avoiding an intermediate rounding/quality loss.
+    COLOR = weights / 255.0;
 }

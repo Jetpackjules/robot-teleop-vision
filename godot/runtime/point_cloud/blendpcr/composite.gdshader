@@ -8,37 +8,51 @@ void vertex() { POSITION = vec4(VERTEX.xy, 1.0, 1.0); }
 void fragment() {
     vec2 uv = SCREEN_UV;
     float nearest = depth_span;
+    float depths[4];
+    float qualities[4];
+    vec4 colors[4];
     for (int i = 0; i < camera_count; i++) {
         vec4 m = sample_meta(i, uv);
-        if (camera_active(i) && valid_meta(m)) nearest = min(nearest, eye_depth(m));
+        float q=m.b,z=packed_value(m,i);
+        vec4 c=vec4(0.0);
+        bool valid=camera_active(i) && valid_meta(m,i);
+        if(valid && native_camera(i)) {
+            vec2 rgb_uv;float edge;
+            valid=native_sample(i,uv,z,rgb_uv,q,z,edge);
+            if(valid)c=native_color(i,rgb_uv,edge);
+        } else if(valid)c=sample_color(i,uv);
+        valid=valid && c.a>=0.5;
+        depths[i]=z;
+        qualities[i]=valid?q:-1.0;
+        colors[i]=c;
+        if(valid)nearest=min(nearest,z);
     }
     vec4 wa = texture(weights_a, uv);
     float total = 0.0;
-    float sum_depth = 0.0;
     vec3 rgb = vec3(0.0);
     vec4 fallback = vec4(0.0);
     float fallback_quality = -1.0;
     float fallback_depth = nearest;
     for (int i = 0; i < camera_count; i++) {
-        vec4 m = sample_meta(i, uv);
-        if (!camera_active(i) || !valid_meta(m) || abs(eye_depth(m) - nearest) > surface_tolerance) continue;
-        vec4 c = sample_color(i, uv);
-        if (c.a < 0.5) continue;
+        float q=qualities[i],z=depths[i];
+        if(q<0.0 || abs(z-nearest)>agreement_tolerance(nearest))continue;
+        vec4 c=colors[i];
         float w = wa[i];
         // The source mesh already rejects invalid triangles. Give remaining
         // silhouette pixels a floor so seam smoothing cannot erase thin parts.
-        w *= max(m.b, 1.0 / 255.0);
+        w *= max(q, 1.0 / 255.0);
         rgb += c.rgb * w;
-        sum_depth += eye_depth(m) * w;
         total += w;
-        if (m.b > fallback_quality) {
+        if (q > fallback_quality) {
             fallback = c;
-            fallback_quality = m.b;
-            fallback_depth = eye_depth(m);
+            fallback_quality = q;
+            fallback_depth = z;
         }
     }
     if (fallback_quality < 0.0) discard;
-    float z = total > 0.00001 ? sum_depth / total : fallback_depth;
+    // Keep the best camera's measured geometry. Only color is smoothed: depth
+    // averaging invents intermediate surfaces at cube/table silhouettes.
+    float z = fallback_depth;
     ALBEDO = total > 0.00001 ? rgb / total : fallback.rgb;
     vec4 ray = INV_PROJECTION_MATRIX * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0);
     vec3 point = ray.xyz / ray.w;

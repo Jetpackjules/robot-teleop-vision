@@ -20,6 +20,10 @@ func _initialize() -> void:
         check(absi(int(round(recovered * 255.0)) - byte) == 0, "packed metadata byte survives color conversion: %d" % byte)
     var view := QuietView.new()
     check(view.render_mode == "independent_mesh" and view.rendering_mode == 2, "existing default retained")
+    check(view.unified_camera_priority == 3, "new unified views automatically choose the best local camera")
+    for priority in [0,1,2,3]:
+        view.unified_camera_priority = priority
+        check(view.unified_camera_priority == priority, "saved camera priority retains its existing numeric value")
     view.render_mode = "prefer_d435"
     check(view.render_mode == "unified_mesh" and view.unified_camera_priority == 1, "legacy D435 mode migrates")
     view.render_mode = "prefer_d455"

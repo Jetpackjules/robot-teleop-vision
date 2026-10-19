@@ -180,9 +180,9 @@ const DORMANT_OAKD_PROPERTIES := [
 	set(value):
 		render_mode = RENDERING_MODES[clampi(value, 0, RENDERING_MODES.size() - 1)]
 ## Overlap owner preference used by Unified mesh. Alignment is unchanged.
-@export_enum("D455 first", "D435 first", "Serial order") var unified_camera_priority: int = 0:
+@export_enum("D455 first", "D435 first", "Serial order", "Best local view") var unified_camera_priority: int = 3:
 	set(value):
-		unified_camera_priority = clampi(value, 0, 2)
+		unified_camera_priority = clampi(value, 0, 3)
 		_update_camera_renderers()
 ## BlendPCR rendering resolution relative to the active viewport.
 @export_enum("Balanced", "Full resolution", "Performance") var blendpcr_quality: int = 0
@@ -846,6 +846,7 @@ var _native_realsense_calibration_target_id := ""
 var _native_realsense_rig: RigCalibration
 var _mesh_fusion := MeshFusion.new()
 var _blendpcr: Node3D
+var _mesh_quality_rig: Node
 var _camera_rig_guides: Node
 var _mesh_fusion_status := ""
 var _debug_viewport: SubViewport
@@ -2966,6 +2967,7 @@ func _update_camera_renderers() -> void:
 		else:
 			_free_camera_renderer(camera_id)
 	_update_unified_mesh_fusion()
+	_update_mesh_quality()
 	_update_robot_renderer_masks()
 	_update_blendpcr_rendering()
 	_update_camera_guides()
@@ -3016,7 +3018,9 @@ func _update_unified_mesh_fusion() -> void:
 		if renderer != null and is_instance_valid(renderer) and _camera_enabled(camera_id) and _camera_diagnostic_visible(camera_id):
 			renderers.append(renderer)
 			depth_limits.append(Vector2(_camera_min_depth(camera_id), _camera_max_depth(camera_id)))
-	var rig_mode := render_mode in ["unified_mesh", "prefer_d455", "prefer_d435"] and renderers.size() >= 2
+	var rig_mode := render_mode in ["unified_mesh", "prefer_d455", "prefer_d435", "blendpcr"] and renderers.size() >= 2
+	if render_mode == "blendpcr" and renderers.size()>BlendPCR.MAX_CAMERAS:
+		rig_mode=false
 	if not rig_mode:
 		_mesh_fusion.clear()
 		if render_mode != "blendpcr":
@@ -3024,6 +3028,8 @@ func _update_unified_mesh_fusion() -> void:
 	for node in _camera_nodes.values():
 		if is_instance_valid(node) and node.has_method("set_fusion_camera_layers") and (not rig_mode or node not in renderers):
 			node.call("set_fusion_camera_layers", null, null, null, -1)
+			var inactive_material := node.get_active_material(0) as ShaderMaterial if node.mesh != null else null
+			if inactive_material != null: inactive_material.set_shader_parameter("rig_best_view",false)
 	for renderer in renderers:
 		if renderer.has_method("set_fusion_enabled"):
 			renderer.call("set_fusion_enabled", false)
@@ -3071,6 +3077,11 @@ func _update_unified_mesh_fusion() -> void:
 	for index in renderers.size():
 		renderers[index].call("set_fusion_camera_layers", _mesh_fusion.depth_layers, _mesh_fusion.color_layers, _mesh_fusion.camera_data, index if ready else -1)
 		renderers[index].call("set_fusion_depth_tolerance", mesh_fusion_depth_tolerance_m)
+		var material := renderers[index].get_active_material(0) as ShaderMaterial if renderers[index].mesh != null else null
+		if material != null:
+			preload("res://godot/runtime/point_cloud/best_view_fusion.gd").adapt(material)
+			material.set_shader_parameter("rig_best_view",ready and (render_mode == "blendpcr" or unified_camera_priority == 3))
+			material.set_shader_parameter("rig_select_owner",render_mode != "blendpcr")
 	_set_mesh_fusion_status(_mesh_fusion.error)
 
 func _blendpcr_viewer() -> Camera3D:
@@ -3080,6 +3091,23 @@ func _blendpcr_viewer() -> Camera3D:
 		var editor_viewport := EditorInterface.get_editor_viewport_3d(0)
 		return editor_viewport.get_camera_3d() if editor_viewport != null else null
 	return get_viewport().get_camera_3d()
+
+func _update_mesh_quality() -> void:
+	var enabled := render_mode in ["unified_mesh","blendpcr"]
+	if not enabled:
+		if is_instance_valid(_mesh_quality_rig): _mesh_quality_rig.clear()
+		return
+	if not is_instance_valid(_mesh_quality_rig):
+		_mesh_quality_rig=preload("res://godot/runtime/point_cloud/mesh_quality_rig.gd").new()
+		add_child(_mesh_quality_rig)
+	var sources: Array[MeshInstance3D]=[]
+	for id in _realsense_camera_ids():
+		var source:=_camera_nodes.get(id) as MeshInstance3D
+		if is_instance_valid(source) and _camera_enabled(id) and _camera_diagnostic_visible(id): sources.append(source)
+	if render_mode=="blendpcr" and sources.size()>BlendPCR.MAX_CAMERAS:
+		_mesh_quality_rig.clear()
+		return
+	_mesh_quality_rig.update(sources,render_mode=="unified_mesh")
 
 func _update_blendpcr_rendering() -> void:
 	if render_mode != "blendpcr":
@@ -3099,7 +3127,7 @@ func _update_blendpcr_rendering() -> void:
 			surfaces.append(surface)
 	var viewer := _blendpcr_viewer()
 	var scale := [0.75, 1.0, 0.5][clampi(blendpcr_quality, 0, 2)] as float
-	_blendpcr.update_surfaces(surfaces, viewer, scale, blendpcr_surface_tolerance_m, blendpcr_seam_radius)
+	_blendpcr.update_surfaces(surfaces, viewer, scale, blendpcr_surface_tolerance_m, blendpcr_seam_radius,_mesh_quality_rig)
 	_set_mesh_fusion_status(_blendpcr.status)
 
 func _set_mesh_fusion_status(message: String) -> void:
@@ -3116,7 +3144,7 @@ func _fusion_camera_precedes(left_camera_id: String, right_camera_id: String) ->
 
 func _fusion_camera_rank(camera_id: String) -> int:
 	var model := str(_realsense_setting(camera_id, "model", "")).to_lower()
-	if unified_camera_priority == 2:
+	if unified_camera_priority in [2,3]:
 		return 0
 	if unified_camera_priority == 1 and model.contains("435"):
 		return -1

@@ -1,5 +1,6 @@
 extends SceneTree
 const Renderer = preload("res://godot/runtime/point_cloud/blendpcr/blendpcr_renderer.gd")
+const BestView = preload("res://godot/runtime/point_cloud/best_view_fusion.gd")
 var checks := 0
 var failures := 0
 var renderer: Node3D
@@ -11,22 +12,34 @@ class Surface extends MeshInstance3D:
     var age := 0.0
     var focal := 600.0
     var image_size := 16
+    var image_height := 0
     var native_grid := false
+    var frame_sequence := 0
+    var color_enabled := true
+    var point_cleanup_enabled := false
+    var point_cleanup_depth_delta := 0.06
+    var point_cleanup_min_neighbors := 2
+    func get_frame_sequence() -> int: return frame_sequence
+    func get_depth_image() -> Image: return (material_override as ShaderMaterial).get_shader_parameter("depth_tex").get_image()
+    func get_color_image() -> Image: return (material_override as ShaderMaterial).get_shader_parameter("color_tex").get_image()
     func get_display_frame_age_ms() -> float: return age
     func get_current_intrinsics() -> Vector4:
-        return Vector4(image_size,image_size,(image_size-1)*0.5,(image_size-1)*0.5) if native_grid else Vector4(focal,focal,32,32)
+        var height:=image_size if image_height==0 else image_height
+        return Vector4(image_size,height,(image_size-1)*0.5,(height-1)*0.5) if native_grid else Vector4(focal,focal,32,32)
     func get_current_grid_stride() -> int: return 1
     func fill(z: float, rgb: Color) -> void:
+        frame_sequence += 1
         var mat := material_override as ShaderMaterial
         if native_grid:
-            var depth := Image.create(image_size,image_size,false,Image.FORMAT_RF)
+            var height:=image_size if image_height==0 else image_height
+            var depth := Image.create(image_size,height,false,Image.FORMAT_RF)
             depth.fill(Color(z,0,0,1))
-            var color := Image.create(image_size,image_size,false,Image.FORMAT_RGBA8)
+            var color := Image.create(image_size,height,false,Image.FORMAT_RGBA8)
             color.fill(rgb)
             mat.set_shader_parameter("depth_tex", ImageTexture.create_from_image(depth))
             mat.set_shader_parameter("color_tex", ImageTexture.create_from_image(color))
             mat.set_shader_parameter("intrinsics", get_current_intrinsics())
-            mat.set_shader_parameter("texel_size", Vector2.ONE / float(image_size))
+            mat.set_shader_parameter("texel_size", Vector2(1.0/image_size,1.0/height))
             mat.set_shader_parameter("depth_range", Vector2(0.1,4))
             mat.set_shader_parameter("max_mesh_edge", 1.0)
             mat.set_shader_parameter("grid_stride", 1.0)
@@ -55,17 +68,18 @@ func sample(label: String, expected: Color) -> void:
     print(label, ": ", actual)
     check(Vector3(actual.r,actual.g,actual.b).distance_to(Vector3(expected.r,expected.g,expected.b)) < 0.10, "%s expected %s got %s" % [label,expected,actual])
 
-func grid_mesh(size: int = 16) -> ArrayMesh:
+func grid_mesh(size: int = 16,height: int = 0) -> ArrayMesh:
+    if height==0: height=size
     var vertices := PackedVector3Array()
     var uvs := PackedVector2Array()
     var triangle_a := PackedVector2Array()
     var other_corners := PackedFloat32Array()
-    for y in size - 1:
+    for y in height - 1:
         for x in size - 1:
-            var a := (Vector2(x, y) + Vector2(0.5, 0.5)) / float(size)
+            var a := (Vector2(x, y) + Vector2(0.5, 0.5)) / Vector2(size,height)
             var b := a + Vector2(1.0/float(size), 0)
-            var c := a + Vector2(0, 1.0/float(size))
-            var d := a + Vector2.ONE / float(size)
+            var c := a + Vector2(0, 1.0/float(height))
+            var d := a + Vector2(1.0/size,1.0/height)
             for tri in [[a, c, b], [b, c, d]]:
                 for uv in tri:
                     vertices.append(Vector3.ZERO)
@@ -186,6 +200,12 @@ void fragment() { ALBEDO = rgb; }
     await sample("robot overlay in front stays visible", Color.YELLOW)
     overlay.position.z = -2
     await sample("robot overlay behind stays hidden", Color.RED)
+    var fixed_weights := Image.create(1,1,false,Image.FORMAT_RGBA8)
+    fixed_weights.fill(Color(0.5,0.5,0,0))
+    renderer._composite.set_shader_parameter("weights_a",ImageTexture.create_from_image(fixed_weights))
+    overlay.position.z = -1.0077
+    await sample("seam geometry uses the winning camera instead of averaged depth",Color.YELLOW)
+    renderer._composite.set_shader_parameter("weights_a",renderer._weights[1].get_texture())
     overlay.queue_free()
     for surface in surfaces: surface.age = 1500
     await sample("all stale clears output", Color.BLACK)
@@ -217,9 +237,28 @@ void fragment() { ALBEDO = rgb; }
         surface.mesh = grid_mesh(surface.image_size)
         surface.material_override = ShaderMaterial.new()
         (surface.material_override as ShaderMaterial).shader = native_shader
+        BestView.adapt(surface.material_override)
         surface.age = 0
         surface.fill(1.0, Color.GREEN if i == 0 else Color.BLUE)
     await sample("production native shader accepts mixed RGBD resolutions", Color.GREEN)
+    var native_entry: Dictionary=renderer._entries[surfaces[0].get_instance_id()]
+    check(native_entry.direct and native_entry.color_view.render_target_update_mode==SubViewport.UPDATE_DISABLED,"native meshes rasterize once and sample original RGB")
+    var native_meta: Color=native_entry.meta_view.get_texture().get_image().get_pixel(viewport.size.x/2,viewport.size.y/2)
+    var native_tag: float=round(native_meta.r*255.0)*65536.0+round(native_meta.g*255.0)*256.0+round(native_meta.b*255.0)
+    check(native_tag>=1 and native_tag<32*32*2,"native metadata identifies an exact source primitive")
+    var depth_overlay:=MeshInstance3D.new()
+    depth_overlay.mesh=QuadMesh.new()
+    var depth_material:=StandardMaterial3D.new()
+    depth_material.shading_mode=BaseMaterial3D.SHADING_MODE_UNSHADED
+    depth_material.albedo_color=Color.YELLOW
+    depth_overlay.material_override=depth_material
+    world.add_child(depth_overlay)
+    depth_overlay.position.z=-0.9999
+    await sample("native primitive reconstructs metric depth in front",Color.YELLOW)
+    depth_overlay.position.z=-1.0001
+    await sample("native primitive reconstructs metric depth behind",Color.GREEN)
+    depth_overlay.queue_free()
+    check(renderer._depth_span<viewer.far and renderer._depth_span>4.0,"native depth span safely bounds every capture frustum")
     surfaces[0].age = 1500
     await sample("native RGBD stale B falls through to C", Color.BLUE)
     surfaces[0].age = 0
@@ -233,6 +272,67 @@ void fragment() { ALBEDO = rgb; }
         await RenderingServer.frame_post_draw
     var baseline := viewport.get_texture().get_image().get_pixel(viewport.size.x / 2, viewport.size.y / 2)
     await sample("native RGB color space preserved", baseline)
+    var same_texture: ImageTexture = (surfaces[0].material_override as ShaderMaterial).get_shader_parameter("depth_tex")
+    var empty := Image.create(32,32,false,Image.FORMAT_RF)
+    empty.fill(Color(0,0,0,1))
+    same_texture.update(empty)
+    surfaces[0].frame_sequence += 1
+    await sample("in-place capture update invalidates cached triangle validity",Color.BLACK)
+    empty.fill(Color(1,0,0,1))
+    same_texture.update(empty)
+    surfaces[0].frame_sequence += 1
+    await sample("in-place live depth resumes without recreating its texture",baseline)
+    # Compare original native RGB interpolation with direct reconstruction on
+    # a sloped, transformed mesh, different color/depth sizes, both projections,
+    # and active color correction. This catches UV drift and vertical flips.
+    renderer.clear()
+    var source_material:=surfaces[0].material_override as ShaderMaterial
+    var old_color: Texture2D=source_material.get_shader_parameter("color_tex")
+    var checker:=Image.create(64,64,false,Image.FORMAT_RGBA8)
+    for y in 64:
+        for x in 64: checker.set_pixel(x,y,Color(0.2+0.6*float(x)/63.0,0.2+0.6*float(y)/63.0,0.25 if (x/4+y/4)%2==0 else 0.75,1))
+    var slope:=Image.create(32,32,false,Image.FORMAT_RF)
+    for y in 32:
+        for x in 32: slope.set_pixel(x,y,Color(1.0+0.003*x,0,0,1))
+    same_texture.update(slope)
+    surfaces[0].frame_sequence+=1
+    source_material.set_shader_parameter("color_tex",ImageTexture.create_from_image(checker))
+    source_material.set_shader_parameter("color_match_enabled",true)
+    source_material.set_shader_parameter("color_gain",Vector3(1.07,0.95,1.02))
+    source_material.set_shader_parameter("color_bias",Vector3(0.01,0,-0.01))
+    surfaces[0].rotation=Vector3(0.11,-0.19,0.07)
+    surfaces[0].position=Vector3(0.04,-0.03,-0.15)
+    for projection in [Camera3D.PROJECTION_ORTHOGONAL,Camera3D.PROJECTION_PERSPECTIVE]:
+        renderer.clear()
+        viewer.projection=projection
+        for frame in 5:
+            await process_frame
+            await RenderingServer.frame_post_draw
+        var reference:=viewport.get_texture().get_image()
+        await settle()
+        var actual:=viewport.get_texture().get_image()
+        var error:=0.0
+        var pixels:=0
+        var coverage_errors:=0
+        for y in viewport.size.y:
+            for x in viewport.size.x:
+                var a:=reference.get_pixel(x,y)
+                var b:=actual.get_pixel(x,y)
+                if (a.a>0.5)!=(b.a>0.5): coverage_errors+=1
+                if a.a>0.5 and b.a>0.5:
+                    error+=abs(a.r-b.r)+abs(a.g-b.g)+abs(a.b-b.b)
+                    pixels+=3
+        print("NATIVE_REPROJECT projection=",projection," coverage=",coverage_errors," mean_error=",error/maxi(1,pixels))
+        check(coverage_errors==0,"native reconstruction retains transformed surface coverage")
+        check(pixels>100 and error/maxi(1,pixels)<1.0/255.0,"native reconstruction preserves RGB detail and correction")
+    renderer.clear()
+    viewer.projection=Camera3D.PROJECTION_ORTHOGONAL
+    surfaces[0].transform=Transform3D.IDENTITY
+    source_material.set_shader_parameter("color_tex",old_color)
+    source_material.set_shader_parameter("color_match_enabled",false)
+    empty.fill(Color(1,0,0,1))
+    same_texture.update(empty)
+    surfaces[0].frame_sequence+=1
     # A thin native depth strip survives; the port adds no hole filling/erosion.
     var thin := Image.create(32,32,false,Image.FORMAT_RF)
     thin.fill(Color(0,0,0,1))
@@ -241,6 +341,30 @@ void fragment() { ALBEDO = rgb; }
             thin.set_pixel(x,y,Color(1,0,0,1))
     (surfaces[0].material_override as ShaderMaterial).set_shader_parameter("depth_tex", ImageTexture.create_from_image(thin))
     await sample("thin native surface survives spatial weighting", baseline)
+    # Real sensors use non-square, non-power-of-two grids. Cross the 16-bit
+    # primitive-ID boundary as well, rather than only testing tiny square maps.
+    renderer.clear()
+    var rectangular:=surfaces[0] as Surface
+    rectangular.image_size=347
+    rectangular.image_height=193
+    rectangular.mesh=grid_mesh(347,193)
+    rectangular.fill(1.0,Color(0.25,0.5,0.75))
+    for frame in 5:
+        await process_frame
+        await RenderingServer.frame_post_draw
+    var rectangle_reference:=viewport.get_texture().get_image()
+    await settle()
+    var rectangle_actual:=viewport.get_texture().get_image()
+    var rectangle_errors:=0
+    for y in viewport.size.y:
+        for x in viewport.size.x:
+            var a:=rectangle_reference.get_pixel(x,y)
+            var b:=rectangle_actual.get_pixel(x,y)
+            if (a.a>0.5)!=(b.a>0.5) or Vector3(a.r-b.r,a.g-b.g,a.b-b.b).length()>1.0/255.0: rectangle_errors+=1
+    check(rectangle_errors==0,"rectangular sensor retains every original color and coverage pixel")
+    var rectangle_entry: Dictionary=renderer._entries[rectangular.get_instance_id()]
+    var rectangle_meta: Color=rectangle_entry.meta_view.get_texture().get_image().get_pixel(viewport.size.x/2,viewport.size.y/2)
+    check(round(rectangle_meta.r*255.0)>=1.0,"source primitive IDs retain their high byte")
     var none: Array[MeshInstance3D] = []
     check(renderer.update_surfaces(none, viewer) and renderer._entries.is_empty(), "empty rig restores and releases renderer")
     # Explicit capacity failure restores every original mesh.
