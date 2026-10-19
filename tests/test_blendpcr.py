@@ -52,6 +52,38 @@ def test_render_mode_migration_and_diagnostic_fallback(tmp_path):
     run_probe(tmp_path, "blendpcr_modes_probe.gd")
 
 
+@pytest.mark.skipif(os.environ.get("ROBOT_TELEOP_TEST_BLENDPCR_GPU") != "1", reason="Opt in to the actual Godot editor")
+def test_blendpcr_uses_visible_editor_viewport(tmp_path):
+    godot = find_godot(os.environ.get("ROBOT_TELEOP_TEST_GODOT", ""))
+    if godot is None:
+        pytest.skip("Set ROBOT_TELEOP_TEST_GODOT to run Godot probes")
+    shutil.copytree(ROOT / "godot/runtime/point_cloud", tmp_path / "godot/runtime/point_cloud")
+    plugin = tmp_path / "addons/editor_probe"
+    plugin.mkdir(parents=True)
+    shutil.copy2(ROOT / "tests/godot/blendpcr_editor_probe.gd", plugin / "probe.gd")
+    (plugin / "plugin.cfg").write_text(
+        '[plugin]\nname="BlendPCR editor probe"\ndescription="Viewport regression"\n'
+        'author="Robot Teleop"\nversion="1.0"\nscript="probe.gd"\n', encoding="utf-8"
+    )
+    (tmp_path / "project.godot").write_text(
+        'config_version=5\n[application]\nconfig/name="BlendPCR Editor Test"\n'
+        '[editor_plugins]\nenabled=PackedStringArray("res://addons/editor_probe/plugin.cfg")\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(godot_console_executable(godot)), "--editor", "--path", str(tmp_path),
+         "--rendering-method", "gl_compatibility", "--audio-driver", "Dummy", "--resolution", "960x640"],
+        capture_output=True, text=True, timeout=90, check=False,
+        env={**os.environ, "APPDATA": str(tmp_path / "appdata"), "XDG_DATA_HOME": str(tmp_path / "data"),
+             "XDG_CONFIG_HOME": str(tmp_path / "config")},
+    )
+    output = result.stdout + result.stderr
+    (tmp_path / "editor-probe.log").write_text(output, encoding="utf-8")
+    assert result.returncode == 0, output
+    assert "ERROR:" not in output, output
+    assert "BLENDPCR_EDITOR checks=5 failures=0" in output, output
+
+
 @pytest.mark.skipif(os.environ.get("ROBOT_TELEOP_TEST_BLENDPCR_GPU") != "1", reason="Opt in to Godot GPU composition")
 @pytest.mark.parametrize("rendering_method", ["gl_compatibility", "forward_plus"])
 def test_blendpcr_multi_camera_rendering(tmp_path, rendering_method):

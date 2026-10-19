@@ -55,7 +55,8 @@ conversion, so packed depth bytes are not treated as ordinary image colors.
 Both backend tests assert metric depth as well as image color.
 
 The runtime uses the viewport's active camera; editor preview follows the first
-3D editor viewport. Additional simultaneous editor views are not independently
+3D editor viewport, even when the edited scene has its own current camera in
+Godot's hidden 2x2 scene viewport. Additional simultaneous editor views are not independently
 composited. This path uses GPU-to-GPU viewport dependencies, without texture
 readback. The test harness reads output images only for assertions. It creates
 several render targets per camera and is not yet benchmarked on a physical rig
@@ -93,6 +94,8 @@ production static native shader from its C++ sources without loading a camera
 SDK or compiled extension, and exercises mixed RGB-D grids, seam blending, stale
 foreground B with live C, missing depth, color space, overlay depth, camera
 transforms, resize, removal, teardown/re-entry and explicit capacity fallback.
+An actual editor probe also checks that a current camera in a hidden 2x2 scene
+viewport cannot replace the visible editor camera or collapse render resolution.
 The mode probe verifies legacy settings and the CPU fallback. This does not
 validate device capture, real calibration accuracy, performance or visual
 quality on physical cameras.

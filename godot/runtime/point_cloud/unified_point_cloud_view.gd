@@ -3026,6 +3026,14 @@ func _update_unified_mesh_fusion() -> void:
 		renderers[index].call("set_fusion_depth_tolerance", mesh_fusion_depth_tolerance_m)
 	_set_mesh_fusion_status(_mesh_fusion.error)
 
+func _blendpcr_viewer() -> Camera3D:
+	# Edited scenes can have a current camera in the editor's hidden 2x2
+	# viewport. Always use the visible 3D editor camera for editor composition.
+	if Engine.is_editor_hint():
+		var editor_viewport := EditorInterface.get_editor_viewport_3d(0)
+		return editor_viewport.get_camera_3d() if editor_viewport != null else null
+	return get_viewport().get_camera_3d()
+
 func _update_blendpcr_rendering() -> void:
 	if render_mode != "blendpcr":
 		if is_instance_valid(_blendpcr):
@@ -3042,9 +3050,7 @@ func _update_blendpcr_rendering() -> void:
 		var surface := _camera_nodes.get(id) as MeshInstance3D
 		if is_instance_valid(surface) and _camera_enabled(id) and _camera_diagnostic_visible(id):
 			surfaces.append(surface)
-	var viewer := get_viewport().get_camera_3d()
-	if viewer == null and Engine.is_editor_hint():
-		viewer = EditorInterface.get_editor_viewport_3d(0).get_camera_3d()
+	var viewer := _blendpcr_viewer()
 	var scale := [0.75, 1.0, 0.5][clampi(blendpcr_quality, 0, 2)] as float
 	_blendpcr.update_surfaces(surfaces, viewer, scale, blendpcr_surface_tolerance_m, blendpcr_seam_radius)
 	_set_mesh_fusion_status(_blendpcr.status)
