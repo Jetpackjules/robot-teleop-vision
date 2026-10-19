@@ -6,6 +6,7 @@ import fractions
 import hashlib
 import hmac
 import html
+import http.client
 import ipaddress
 import json
 import os
@@ -23,7 +24,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import aiortc.codecs as aiortc_codecs
 import av
@@ -193,7 +194,9 @@ class TemporalRgbdDepthEncoder:
         color_tile_size: int = 16,
         color_quality: int = 68,
         persistent_reference: bool = False,
+        exact_depth: bool = False,
     ) -> None:
+        self.exact_depth = bool(exact_depth)
         self.keyframe_interval = max(1, int(keyframe_interval))
         self.tile_size = max(4, min(32, int(tile_size)))
         self.stability_mm = max(0, int(stability_mm))
@@ -204,6 +207,12 @@ class TemporalRgbdDepthEncoder:
         )
         self.plane_stabilization = bool(plane_stabilization)
         self.motion_confirmation = bool(motion_confirmation)
+        if self.exact_depth:
+            self.stability_mm = 0
+            self.minimum_changed_pixels = 1
+            self.single_pixel_change_mm = 0
+            self.plane_stabilization = False
+            self.motion_confirmation = False
         self.temporal_color = bool(temporal_color)
         self.color_tile_size = max(8, min(32, int(color_tile_size)))
         self.color_quality = max(1, min(100, int(color_quality)))
@@ -840,7 +849,7 @@ class TemporalRgbdDepthEncoder:
         )
         signed_difference[~(current_valid & keyframe_valid)] = 0
         validity_grid = validity_tiles.reshape(-1, tile, tile)
-        if self.persistent_reference:
+        if self.persistent_reference and not self.exact_depth:
             validity_change_count = np.count_nonzero(
                 validity_tiles,
                 axis=1,
@@ -1154,6 +1163,7 @@ class TemporalRgbdDepthEncoder:
                 metadata["temporal_reference_mode"] = "persistent_v1"
                 metadata["temporal_frame_id"] = persistent_result_id
             for index, camera in enumerate(metadata.get("cameras", [])):
+                camera["depth_exact"] = self.exact_depth
                 color_length = int(camera.get("color_length", 0))
                 depth_length = int(camera.get("depth_length", 0))
                 color_end = payload_offset + color_length
@@ -2300,6 +2310,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path == "/stream":
             self.proxy_stream(parsed.query)
             return
+        if parsed.path == "/camera-rgb":
+            self.serve_camera_rgb(parsed.query)
+            return
         if parsed.path == "/api/v1/robot-module":
             self.serve_json(self.server.robot_manifest)
             return
@@ -2330,6 +2343,49 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         rel = parsed.path.lstrip("/")
         self.serve_file(rel)
 
+    def serve_camera_rgb(self, query: str) -> None:
+        """Proxy original RGB from the fixed, trusted Godot capture endpoint."""
+
+        if not self.server.rgbd_http_slots.acquire(blocking=False):
+            self.send_error(503, "Camera request capacity reached")
+            return
+        connection = None
+        try:
+            params = parse_qs(query)
+            camera = params.get("camera", [""])[0]
+            if len(camera) > 64 or any(c not in "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-" for c in camera):
+                self.send_error(400, "Invalid camera ID")
+                return
+            options = {
+                "w": clamp_int(params.get("w", ["3840"])[0], 160, 3840),
+                "q": clamp_int(params.get("q", ["95"])[0], 1, 100),
+                "camera": camera,
+            }
+            connection = http.client.HTTPConnection(self.server.stream_host, self.server.stream_port, timeout=5)
+            connection.request("GET", "/camera-rgb?" + urlencode(options))
+            response = connection.getresponse()
+            body = response.read(16 * 1024 * 1024 + 1)
+            if len(body) > 16 * 1024 * 1024:
+                raise ValueError("Camera RGB frame too large")
+            if response.status != 200 or response.getheader("Content-Type") != "image/jpeg":
+                self.send_error(503, "Original camera RGB is not ready")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(body)))
+            for name in ("X-Camera-Id", "X-Frame-Width", "X-Frame-Height", "X-Source-Width", "X-Source-Height", "X-Frame-Sequence", "X-Capture-Unix-Ms"):
+                value = response.getheader(name, "")
+                if len(value) <= 128 and all(32 <= ord(c) < 127 for c in value):
+                    self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(body)
+        except (OSError, ValueError, http.client.HTTPException):
+            self.send_error(502, "Original camera RGB unavailable")
+        finally:
+            if connection is not None:
+                connection.close()
+            self.server.rgbd_http_slots.release()
+
     def serve_latest_rgbd(self, query: str) -> None:
         """Return one newly claimed packet; obsolete HTTP responses are disposable."""
 
@@ -2338,7 +2394,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             return
         try:
             params = parse_qs(query)
-            width = clamp_int(params.get("w", params.get("width", ["384"]))[0], 160, 960)
+            width = clamp_int(params.get("w", params.get("width", ["384"]))[0], 160, 3840)
             fps = clamp_int(params.get("fps", ["30"])[0], 1, 60)
             context_fps = clamp_int(params.get("context_fps", [str(fps)])[0], 1, 60)
             detail_fps = clamp_int(params.get("detail_fps", [str(fps)])[0], 1, 60)
@@ -3305,7 +3361,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         ):
             self.send_error(400, "Invalid RGB-D stream client")
             return
-        width = clamp_int(params.get("w", params.get("width", ["384"]))[0], 160, 960)
+        width = clamp_int(params.get("w", params.get("width", ["384"]))[0], 160, 3840)
         fps = clamp_int(params.get("fps", ["15"])[0], 1, 60)
         context_fps = clamp_int(params.get("context_fps", [str(fps)])[0], 1, 60)
         detail_fps = clamp_int(params.get("detail_fps", [str(fps)])[0], 1, 60)
@@ -3347,6 +3403,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 temporal_color=temporal_color,
                 color_quality=quality,
                 persistent_reference=persistent_reference,
+                exact_depth=params.get("depth_exact", ["0"])[0] in ("1", "true"),
             )
             if temporal_depth
             else None

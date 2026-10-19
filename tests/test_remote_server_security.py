@@ -65,6 +65,59 @@ def test_desktop_video_is_behind_existing_login_gate():
     assert redirected == [True]
 
 
+def test_original_camera_rgb_is_behind_existing_login_gate():
+    handler = bare_handler()
+    handler.path = "/camera-rgb?w=3840&q=95"
+    handler.auth_required = lambda: True
+    handler.is_authorized = lambda: False
+    handler.serve_camera_rgb = lambda _: pytest.fail("unauthorized camera access")
+    redirected = []
+    handler.redirect_to_login = lambda: redirected.append(True)
+    handler.do_GET()
+    assert redirected == [True]
+
+
+def test_original_rgb_proxy_uses_fixed_endpoint_and_bounded_options(monkeypatch):
+    from io import BytesIO
+    from threading import BoundedSemaphore
+    from urllib.parse import parse_qs, urlsplit
+    import lan_remote_view_server as remote
+
+    requests = []
+    class Response:
+        status = 200
+        def read(self, maximum): return b"jpeg-original"
+        def getheader(self, name, default=None):
+            return {"Content-Type": "image/jpeg", "X-Frame-Width": "1280",
+                    "X-Frame-Height": "720", "X-Camera-Id": "1234"}.get(name, default)
+    class Connection:
+        def __init__(self, host, port, timeout):
+            assert (host, port, timeout) == ("127.0.0.1", 8780, 5)
+        def request(self, method, path): requests.append((method, path))
+        def getresponse(self): return Response()
+        def close(self): pass
+    monkeypatch.setattr(remote.http.client, "HTTPConnection", Connection)
+    handler = bare_handler(server=SimpleNamespace(stream_host="127.0.0.1", stream_port=8780,
+        rgbd_http_slots=BoundedSemaphore(1)))
+    headers = {}
+    errors = []
+    handler.wfile = BytesIO()
+    handler.send_response = lambda code: headers.update(status=code)
+    handler.send_header = lambda name, value: headers.update({name: value})
+    handler.end_headers = lambda: None
+    handler.send_error = lambda code, _: errors.append(code)
+    handler.serve_camera_rgb("w=99999&q=999&camera=1234&url=https://untrusted.example")
+    assert requests[0][0] == "GET"
+    path = urlsplit(requests[0][1])
+    assert path.path == "/camera-rgb"
+    assert parse_qs(path.query) == {"w": ["3840"], "q": ["100"], "camera": ["1234"]}
+    assert headers["X-Frame-Width"] == "1280"
+    assert handler.wfile.getvalue() == b"jpeg-original"
+    handler.serve_camera_rgb("camera=bad%0d%0aHeader")
+    assert errors == [400] and len(requests) == 1
+    assert handler.server.rgbd_http_slots.acquire(blocking=False)
+
+
 def test_camera_locations_setting_is_typed_and_can_be_saved():
     handler = bare_handler()
     assert handler.validate_view_settings({"camera_locations_enabled": True})["camera_locations_enabled"] is True

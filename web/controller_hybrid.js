@@ -586,16 +586,12 @@
       if (typeof window.startGodotHybridRenderer !== "function") {
         throw new Error("hybrid RGB-D renderer did not load");
       }
+      applyStreamQualityPolicy();
       const hybridPreset = streamPresetSelect.value === "latency"
-        ? { width: 384, fps: 60, contextFps: 30, detailFps: 60, quality: 74, splatFill: 1.18 }
-        : (quickTunnel
-          // Plane-aware, keyframe-relative depth tiles carry the complete
-          // 666x526 workspace crop at a full 30 Hz source cadence. Requesting a
-          // larger image would only upscale the cropped sensor samples.
-          // Whole-scene motion automatically falls back to a fresh lossless
-          // keyframe, so the stream cannot accumulate temporal errors.
-          ? { width: 666, fps: 30, contextFps: 36, detailFps: 36, quality: 68, splatFill: 1.32 }
-          : { width: 720, fps: 30, contextFps: 15, detailFps: 36, quality: 90, splatFill: 1.32 });
+        ? { width: 384, fps: 60, contextFps: 30, detailFps: 60, quality: 74, splatFill: 1.18, exactDepth: false }
+        // This is a ceiling, not an upscale: the source retains its native
+        // depth grid. Quality also bypasses lossy temporal depth cleanup.
+        : { width: 3840, fps: 30, contextFps: 30, detailFps: 30, quality: 95, splatFill: 1.32, exactDepth: true };
       const persistentReference = document.getElementById(
         "persistent-temporal-reference-enabled"
       ).checked;
@@ -604,8 +600,10 @@
       ).checked;
       window.setGodotHybridViewSettings && window.setGodotHybridViewSettings(viewSettingsPayload({
         splat_fill: hybridPreset.splatFill,
-        mesh_depth_delta: 0.035,
-        mesh_max_edge: 0.055,
+        // Match Godot's clean mesh defaults in Quality; the smaller latency
+        // stream retains its stricter continuity limits.
+        mesh_depth_delta: hybridPreset.exactDepth ? 0.05 : 0.035,
+        mesh_max_edge: hybridPreset.exactDepth ? 0.08 : 0.055,
       }));
       // This async call creates all channels synchronously before its first
       // await, allowing the renderer to attach while ICE is negotiating.
@@ -1014,7 +1012,7 @@
         ] : []),
       ].join("\n");
       statusLines.textContent = [
-        `Stream ${streamMode} | ${size} | ${fps} | ${bitrate}`,
+        `Stream ${hybrid.displaySource === "original_rgb" ? `${currentPreset().label} RGB` : streamMode} | ${size} | ${fps} | ${bitrate}`,
         activeViewportMode === "hybrid" ? hybrid.renderWarning : "",
         headTrackingEnabled
           ? `Tracking ${latest.status || trackingState} | ${remote.connected ? "bridge on" : "bridge ..."}`
@@ -1025,7 +1023,15 @@
       if (activeViewportMode === "hybrid") updateRgbdLatencyGraph(hybrid);
     }
 
+    function applyStreamQualityPolicy() {
+      const fullRgb = document.getElementById("full-rgb-frame-updates-enabled");
+      const quality = streamPresetSelect.value !== "latency";
+      if (quality) fullRgb.checked = true;
+      fullRgb.disabled = quality;
+    }
+
     streamPresetSelect.addEventListener("change", () => {
+      applyStreamQualityPolicy();
       sendViewSettings();
       if (userStarted) startSelectedViewport();
       streamPresetSelect.blur();

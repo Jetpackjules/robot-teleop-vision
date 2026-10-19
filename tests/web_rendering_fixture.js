@@ -1,5 +1,5 @@
 // Actual production WebGL shaders, checked with synthetic asymmetric scenes.
-import {MultiCameraFusion} from './hybrid_camera_fusion.js?v=20261020_blendpcr2';
+import {MultiCameraFusion} from './hybrid_camera_fusion.js?v=20261020_native_quality';
 
 function setup() {
   const {state,createProgram,findUniforms,identityMatrix}=window.probe;
@@ -66,6 +66,18 @@ export async function runRenderingChecks() {
   const check=(ok,label)=>{checks++;if(!ok)throw new Error(label);passed.push(label);};
   const expect=(color,label)=>check(color.every((v,i)=>Math.abs(pixel()[i]-v)<4),label+': '+pixel());
   document.getElementById('gallery').replaceChildren();
+  const sourceDepth=new Uint16Array(25).fill(1000);sourceDepth[12]=0;
+  const compressed=await new Response(new Blob([sourceDepth]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer();
+  const rgbCanvas=document.createElement('canvas');rgbCanvas.width=5;rgbCanvas.height=5;
+  const rgb=await new Promise(resolve=>rgbCanvas.toBlob(resolve,'image/jpeg'));
+  const payload={color:new Uint8Array(await rgb.arrayBuffer()),depth:new Uint8Array(compressed),metadata:{id:'exact-depth',width:5,height:5,
+    transform:window.probe.identityMatrix(),depth_encoding:'u16_mm_deflate',depth_exact:true}};
+  let decoded=await window.probe.decodeCamera(payload);
+  check(decoded.depth[12]===0,'Quality decoder retains measured depth holes');decoded.bitmap?.close();
+  payload.metadata.depth_exact=false;decoded=await window.probe.decodeCamera(payload);
+  check(decoded.depth[12]===1000,'Low latency retains its optional small-hole repair');decoded.bitmap?.close();
+  state.socketOptions={exactDepth:true};decoded=await window.probe.decodeCamera(payload);
+  check(decoded.depth[12]===0,'Quality remains exact on HTTPS and direct transports without temporal metadata');decoded.bitmap?.close();state.socketOptions=null;
   fixture([1000,1000,1000,1000],[64,64,64,64]);
   draw('independent_mesh');expect(palette[3],'independent keeps nearest surface');
   draw('unified_mesh');expect(palette[0],'stable near-equal ownership with four cameras');
@@ -128,7 +140,36 @@ export async function runRenderingChecks() {
   draw('blendpcr');const blended=image();snapshot('BlendPCR exact reconstruction');
   let maximumError=0,badPixels=0;
   for(let i=0;i<cached.length;i+=4){let error=0;for(let c=0;c<3;c++)error=Math.max(error,Math.abs(cached[i+c]-blended[i+c]));maximumError=Math.max(maximumError,error);if(error>3)badPixels++;}
-  check(badPixels===0,'single-camera coverage and RGB match native mesh (max error '+maximumError+')');
+  // Nearest sampling is discontinuous exactly at texel boundaries. Raster
+  // interpolation and ray reconstruction may round a half-texel differently.
+  // Verify every mismatch lies on such a boundary, and selects an adjacent
+  // original texel, rather than tolerating arbitrary color/coverage errors.
+  let nonBoundaryErrors=0;const mismatchDetails=[];
+  if(badPixels) {
+    const savedProgram=state.program,savedUniforms=state.uniforms;
+    const uvProgram=window.probe.createProgram(gl,undefined,`#version 300 es
+      precision highp float;in float v_valid;in vec2 v_source_pixel;out vec4 color;
+      void main(){if(v_valid<0.9999)discard;vec2 uv=floor((v_source_pixel+vec2(.5))/vec2(79,53)*65535.);
+        color=vec4(mod(uv.x,256.),floor(uv.x/256.),mod(uv.y,256.),floor(uv.y/256.))/255.;}`);
+    state.program=uvProgram;state.uniforms=window.probe.findUniforms(gl,uvProgram);
+    gl.useProgram(uvProgram);
+    for(const [name,unit] of [['depth',0],['color',1],['fusionDepth',2],['fusionColor',3],['rigDepth',4],['rigData',5],['rigQuality',6],['rigColor',7]])gl.uniform1i(state.uniforms[name],unit);
+    draw('independent_mesh');const uv=image();
+    state.program=savedProgram;state.uniforms=savedUniforms;gl.deleteProgram(uvProgram);
+    const texel=(x,y)=>[(x*19)%256,(y*23)%256,((x+y)%2)*255];
+    for(let i=0;i<cached.length;i+=4) {
+      if(![0,1,2].some(c=>Math.abs(cached[i+c]-blended[i+c])>3))continue;
+      const x=(uv[i]+256*uv[i+1])/65535*79-.5,y=(uv[i+2]+256*uv[i+3])/65535*53-.5;
+      const nearX=Math.abs(x+.5-Math.round(x+.5))<.002;
+      const nearY=Math.abs(y+.5-Math.round(y+.5))<.002;
+      const xs=nearX?[Math.floor(x),Math.ceil(x)]:[Math.round(x)];
+      const ys=nearY?[Math.floor(y),Math.ceil(y)]:[Math.round(y)];
+      const matches=rgb=>xs.some(tx=>ys.some(ty=>texel(tx,ty).every((c,j)=>Math.abs(c-rgb[j])<=3)));
+      if(!(nearX||nearY)||!matches(cached.subarray(i,i+3))||!matches(blended.subarray(i,i+3))){nonBoundaryErrors++;if(mismatchDetails.length<3)mismatchDetails.push({x,y,reference:Array.from(cached.subarray(i,i+3)),blend:Array.from(blended.subarray(i,i+3)),uv:Array.from(uv.subarray(i,i+4))});}
+    }
+  }
+  if(badPixels)draw('blendpcr');
+  check(nonBoundaryErrors===0,'single-camera coverage and RGB match native mesh away from exact nearest-texel ties ('+badPixels+' ties, '+nonBoundaryErrors+' errors) '+JSON.stringify(mismatchDetails));
   const compositions=state.blendPCR.compositions;
   draw('blendpcr');
   check(state.blendPCR.compositions===compositions&&image().every((v,i)=>v===blended[i]),'unchanged input reuses exact full-resolution color and depth');
@@ -140,8 +181,8 @@ export async function runRenderingChecks() {
   draw('independent_mesh');const largeReference=image();draw('blendpcr');const largeBlend=image();
   check(largeReference.every((v,i)=>Math.abs(v-largeBlend[i])<=3),'primitive IDs remain exact beyond the 16-bit boundary');
 
-  const {RIG_SAMPLING_SHADER,FULLSCREEN_VERTEX_SHADER}=await import('./hybrid_camera_quality.js?v=20261020_blendpcr2');
-  const qualityProbe=(await import('./hybrid_camera_quality.js?v=20261020_blendpcr2')).compileGpuProgram(gl,FULLSCREEN_VERTEX_SHADER,
+  const {RIG_SAMPLING_SHADER,FULLSCREEN_VERTEX_SHADER}=await import('./hybrid_camera_quality.js?v=20261020_native_quality');
+  const qualityProbe=(await import('./hybrid_camera_quality.js?v=20261020_native_quality')).compileGpuProgram(gl,FULLSCREEN_VERTEX_SHADER,
     `#version 300 es\nprecision highp float;precision highp int;${RIG_SAMPLING_SHADER}\nout vec4 color;void main(){color=rig_veto(0,vec3(0,0,-1))?vec4(1,0,0,1):vec4(0,1,0,1);}`);
   function vetoProbe(peerDepth) {
     fixture([1000,peerDepth],[64,128],(x,y,i,w,h,value)=>({z:i===0?1000+(x-32)*10:peerDepth,color:palette[i]}));
@@ -157,7 +198,7 @@ export async function runRenderingChecks() {
   // Read depth through a normal overlay: a plane just behind the measured
   // source must remain hidden; one just in front must cover it.
   fixture([1000]);draw('blendpcr');
-  const {compileGpuProgram}=await import('./hybrid_camera_quality.js?v=20261020_blendpcr2');
+  const {compileGpuProgram}=await import('./hybrid_camera_quality.js?v=20261020_native_quality');
   const overlay=compileGpuProgram(gl,`#version 300 es\nprecision highp float;uniform float z;void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));gl_Position=vec4(p*2.-1.,z,1.);}`,
     '#version 300 es\nprecision highp float;out vec4 color;void main(){color=vec4(0,1,0,1);}');
   const p=window.probe.perspectiveMatrix(55,canvas.width/canvas.height,.01,10);

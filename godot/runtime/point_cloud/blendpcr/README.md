@@ -7,9 +7,11 @@ masks, and RGB-D streaming use their existing paths. The browser also offers
 **Shared-color mesh**. The browser implementation uses WebGL2 texture arrays,
 full-resolution integer primitive IDs and the same local quality/free-space
 principles. It supports rigs beyond four cameras when GPU capacity permits.
-Browser RGB reconstruction preserves its existing per-vertex color interpolation;
-Godot's native port preserves its texture interpolation. Both retain measured
-geometry, camera intrinsics and capture sampling.
+Browser RGB reconstruction samples the source texture per fragment, as Godot's
+native port does. Quality sends the native depth grid with exact depth deltas
+and full RGB frames at JPEG quality 95. RGB camera mode uses the original sensor
+image independently of depth masking. Both renderers retain measured geometry
+and camera intrinsics; the web stream still compresses color for transport.
 
 For a rig overview, select **View → Workflow → Camera Guides**. **Positions**
 shows camera optical origins with repeating red, green and blue markers;

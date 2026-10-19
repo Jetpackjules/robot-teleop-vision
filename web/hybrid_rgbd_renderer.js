@@ -1,6 +1,7 @@
-import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_blendpcr2";
+import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_native_quality";
 
-import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_blendpcr2";
+import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_native_quality";
+import { CameraRgbViewer } from "./camera_rgb_viewer.js?v=20261020_native_quality";
 
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},
@@ -46,6 +47,7 @@ const state = {
   rgbDisplayCanvas: null,
   rgbDisplayBaseCanvas: null,
   rgbDisplayCameraId: "",
+  rawRgbViewer: null,
   robotLoadToken: 0,
   dataChannel: null,
   dataChannelHandlers: null,
@@ -181,6 +183,7 @@ uniform ivec2 u_fusion_size;
 uniform float u_fusion_depth_tolerance;
 
 out vec3 v_color;
+out vec2 v_source_pixel;
 out float v_valid;
 out vec3 v_world_position;
 flat out uint v_triangle_id;
@@ -202,6 +205,7 @@ bool depth_supported(ivec2 pixel, uint depth_mm) {
 }
 
 void main() {
+  v_source_pixel = vec2(0.0);
   v_world_position = vec3(0.0);
   v_triangle_id = uint(gl_VertexID / 3 + 1);
   ivec2 pixel_coord;
@@ -260,6 +264,7 @@ void main() {
   }
   int x = pixel_coord.x;
   int y = pixel_coord.y;
+  v_source_pixel = vec2(pixel_coord);
   uint depth_mm = texelFetch(u_depth, ivec2(x, y), 0).r;
   bool reject_vertex = depth_mm == uint(0)
     || (u_render_mode == 1 && !triangle_valid);
@@ -322,10 +327,14 @@ void main() {
 
 const FRAGMENT_SHADER = `#version 300 es
 precision highp float;
+precision highp int;
 
 in vec3 v_color;
+in vec2 v_source_pixel;
 in float v_valid;
 uniform highp int u_render_mode;
+uniform sampler2D u_color;
+uniform ivec2 u_size;
 out vec4 out_color;
 
 ${FUSION_FRAGMENT_SHADER}
@@ -341,7 +350,10 @@ void main() {
     vec2 centered = gl_PointCoord * 2.0 - 1.0;
     if (dot(centered, centered) > 1.0) discard;
   }
-  out_color = vec4(rig_color(v_color), 1.0);
+  vec3 color = u_render_mode == 1
+    ? texelFetch(u_color, clamp(ivec2(floor(v_source_pixel + 0.5)), ivec2(0), u_size - 1), 0).rgb
+    : v_color;
+  out_color = vec4(rig_color(color), 1.0);
 }
 `;
 
@@ -1540,7 +1552,8 @@ async function decodeCamera(payload) {
     if (color.bitmap) color.bitmap.close();
     throw new Error(`invalid depth dimensions ${width}x${height}`);
   }
-  const depth = repairSmallDepthHoles(rawDepth, width, height);
+  const depth = payload.metadata.depth_exact === true || state.socketOptions?.exactDepth === true
+    ? rawDepth : repairSmallDepthHoles(rawDepth, width, height);
   return {
     metadata: payload.metadata,
     width,
@@ -1711,6 +1724,7 @@ function updateManualRgbBase(camera) {
 }
 
 function updateRgbDisplay(camera) {
+  if (state.rawRgbViewer) return;
   const visible = state.rgbDisplayCanvas;
   if (!(visible instanceof HTMLCanvasElement)) return;
   const model = String(camera.metadata.model || "").toLowerCase();
@@ -2351,6 +2365,7 @@ function latestRgbdUrl(options, afterSequence, worker) {
     context_fps: String(options.contextFps || options.fps || 30),
     detail_fps: String(options.detailFps || options.fps || 60),
     q: String(options.quality || 78),
+    depth_exact: options.exactDepth === true ? "1" : "0",
     client: state.httpClientId,
     after: String(Math.max(0, afterSequence || 0)),
     worker: String(worker),
@@ -2497,6 +2512,7 @@ function rgbdSocketUrl(options) {
     detail_fps: String(options.detailFps || options.fps || 30),
     q: String(options.quality || 78),
     temporal_depth: options.temporalDepth === false ? "0" : "1",
+    depth_exact: options.exactDepth === true ? "1" : "0",
     temporal_color: options.temporalColor === false ? "0" : "1",
     persistent_reference: options.persistentReference === true ? "1" : "0",
     client: state.rgbdClientId,
@@ -2794,6 +2810,7 @@ export async function startGodotHybridRenderer(options = {}) {
   };
   state.statsWindow = { timestamp: performance.now(), decoded: 0, bytes: 0, renderFrames: 0, cameraFrames: {} };
   state.socketOptions = { ...options };
+  configureOriginalRgb();
   state.rgbdClientId = String(window.robotTeleopPageId || "").replace(/[^A-Za-z0-9_-]/g, "");
   if (!state.rgbdClientId) throw new Error("browser page identity is missing");
   state.reconnectAttempt = 0;
@@ -2817,6 +2834,8 @@ export async function startGodotHybridRenderer(options = {}) {
 
 export function stopGodotHybridRenderer() {
   state.running = false;
+  state.rawRgbViewer?.stop();
+  state.rawRgbViewer = null;
   detachPointerNavigation();
   state.robotLoadToken += 1;
   if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
@@ -2911,6 +2930,18 @@ export function setGodotHybridViewSettings(settings = {}) {
     state.settings.blendpcr_enabled = settings.display_mode === "blendpcr";
   }
   if (settings.recenter) recenterGodotHybridRenderer();
+  configureOriginalRgb();
+}
+
+function configureOriginalRgb() {
+  const wanted = state.running && state.settings.display_mode === "rgb_camera" && state.rgbDisplayCanvas;
+  if (wanted && !state.rawRgbViewer) {
+    state.rawRgbViewer = new CameraRgbViewer(state.rgbDisplayCanvas, state.socketOptions || {});
+    state.rawRgbViewer.start();
+  } else if (!wanted && state.rawRgbViewer) {
+    state.rawRgbViewer.stop();
+    state.rawRgbViewer = null;
+  }
 }
 
 export function recenterGodotHybridRenderer() {
@@ -2990,6 +3021,7 @@ export function focusGodotHybridRendererAt(clientX, clientY) {
 }
 
 export function getGodotHybridRendererStatus() {
+  if (state.rawRgbViewer) return { ...state.stats, ...state.rawRgbViewer.status() };
   const captureAgeMs = state.stats.captureUnixMs > 0
     ? Math.max(0, Date.now() - state.stats.captureUnixMs)
     : -1;

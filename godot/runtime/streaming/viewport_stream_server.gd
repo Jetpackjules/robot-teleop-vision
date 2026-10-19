@@ -61,6 +61,7 @@ var _next_listen_retry_msec := 0
 var _tracking_source: Node
 var _async_capture_inflight := 0
 var _async_readback_available := true
+var _camera_rgb_cache: Dictionary = {}
 
 func _runs_in_current_context() -> bool:
 	# Opt in only for a dedicated remote editor session. Normal editors must
@@ -231,15 +232,28 @@ func _handle_http_request(client: Dictionary) -> void:
 		for renderer in _find_rgbd_renderers():
 			var depth: Texture2D = renderer.call("get_depth_texture")
 			var color: Texture2D = renderer.call("get_color_texture")
+			var raw_color: Image = renderer.call("get_raw_color_image") if renderer.has_method("get_raw_color_image") else null
 			cameras.append({"id":str(renderer.call("get_direct_realsense_serial")),
 				"depth_size":[depth.get_width(),depth.get_height()] if depth != null else [],
 				"color_size":[color.get_width(),color.get_height()] if color != null else [],
+				"raw_color_size":[raw_color.get_width(),raw_color.get_height()] if raw_color != null else [],
 				"stride":int(renderer.call("get_current_grid_stride")),
 				"capture_fps":float(renderer.call("get_direct_realsense_capture_fps")),
 				"render_fps":float(renderer.call("get_render_fps")),
 				"age_ms":float(renderer.call("get_display_frame_age_ms"))})
 		var body := JSON.stringify({"scene_fps":Engine.get_frames_per_second(),"cameras":cameras}).to_utf8_buffer()
 		_send_http_response(peer,"200 OK","application/json",body)
+		client["headers_sent"] = true
+		client["snapshot_sent"] = true
+	elif path.get_slice("?", 0) == "/camera-rgb":
+		var options: Dictionary = {}
+		for pair in path.get_slice("?", 1).split("&", false):
+			options[pair.get_slice("=", 0)] = pair.get_slice("=", 1).uri_decode()
+		var frame := _get_camera_rgb_frame(str(options.get("camera", "")), clampi(int(options.get("w", 3840)), 160, 3840), clampi(int(options.get("q", 95)), 1, 100))
+		if frame.is_empty():
+			_send_http_response(peer, "503 Service Unavailable", "text/plain", "original camera RGB not ready\n".to_utf8_buffer())
+		else:
+			_send_http_response(peer, "200 OK", "image/jpeg", frame["body"], frame["headers"])
 		client["headers_sent"] = true
 		client["snapshot_sent"] = true
 	elif path.begins_with("/stream") or path.begins_with("/raw") or path.begins_with("/rgbd"):
@@ -311,20 +325,54 @@ func _apply_rgbd_query(path: String) -> void:
 			"detail_fps":
 				hybrid_detail_fps = clampf(float(value), 1.0, 60.0)
 			"w", "width", "max_width":
-				hybrid_max_width = clampi(int(value), 160, 960)
+				hybrid_max_width = clampi(int(value), 160, 3840)
 			"q", "quality", "jpeg_quality":
 				hybrid_jpeg_quality = clampi(int(value), 1, 100)
 
-func _send_http_response(peer: StreamPeerTCP, status: String, content_type: String, body: PackedByteArray) -> void:
+func _get_camera_rgb_frame(camera_id: String = "", width_limit: int = 3840, quality: int = 95) -> Dictionary:
+	# Original sensor RGB, independent of depth validity, crop and alignment.
+	# Never modify the Image owned by the capture thread.
+	for renderer in _find_rgbd_renderers():
+		var serial := str(renderer.call("get_direct_realsense_serial"))
+		if not camera_id.is_empty() and camera_id != serial:
+			continue
+		if not renderer.has_method("get_raw_color_image"):
+			return {}
+		var source: Image = renderer.call("get_raw_color_image")
+		if source == null or source.is_empty():
+			return {}
+		var sequence := int(renderer.call("get_frame_sequence")) if renderer.has_method("get_frame_sequence") else -1
+		var key := "%s:%d:%d:%d:%d" % [serial, source.get_instance_id(), sequence, width_limit, quality]
+		# Bound cache age for providers without a capture sequence.
+		if _camera_rgb_cache.get("key", "") == key and Time.get_ticks_msec() - int(_camera_rgb_cache.get("time", 0)) < 1000:
+			return _camera_rgb_cache["frame"]
+		var image := source.duplicate() as Image
+		image.convert(Image.FORMAT_RGB8)
+		if image.get_width() > width_limit:
+			image.resize(width_limit, maxi(1, roundi(float(image.get_height()) * width_limit / image.get_width())), Image.INTERPOLATE_LANCZOS)
+		var age := float(renderer.call("get_display_frame_age_ms")) if renderer.has_method("get_display_frame_age_ms") else -1.0
+		var frame := {"body": image.save_jpg_to_buffer(float(quality) / 100.0), "headers": {
+			"X-Camera-Id": serial.uri_encode(),
+			"X-Frame-Width": str(image.get_width()), "X-Frame-Height": str(image.get_height()),
+			"X-Source-Width": str(source.get_width()), "X-Source-Height": str(source.get_height()),
+			"X-Frame-Sequence": str(sequence),
+			"X-Capture-Unix-Ms": str(roundi(Time.get_unix_time_from_system() * 1000.0 - age)) if age >= 0.0 else "0"}}
+		_camera_rgb_cache = {"key": key, "time": Time.get_ticks_msec(), "frame": frame}
+		return frame
+	return {}
+
+func _send_http_response(peer: StreamPeerTCP, status: String, content_type: String, body: PackedByteArray, extra_headers: Dictionary = {}) -> void:
 	var headers := (
 		"HTTP/1.1 %s\r\n" % status +
 		"Content-Type: %s\r\n" % content_type +
 		"Content-Length: %d\r\n" % body.size() +
 		"Cache-Control: no-cache, no-store, must-revalidate\r\n" +
 		"Access-Control-Allow-Origin: *\r\n" +
-		"Connection: close\r\n" +
-		"\r\n"
+		"Connection: close\r\n"
 	)
+	for key in extra_headers:
+		headers += "%s: %s\r\n" % [key, extra_headers[key]]
+	headers += "\r\n"
 	peer.put_data(headers.to_utf8_buffer())
 	if not body.is_empty():
 		peer.put_data(body)

@@ -275,7 +275,7 @@
     }
   </style>
   <script type="module" src="./godot_webcam_tracker_bridge.js?v=20260803_settings_cleanup_v1"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261020_blendpcr2"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261020_native_quality"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -380,7 +380,7 @@
           <h3>Troubleshooting</h3>
           <label class="toggle-row"><span>Persistent still-scene compression</span><input id="persistent-temporal-reference-enabled" type="checkbox" checked></label>
           <label class="toggle-row"><span>Full RGB frame updates</span><input id="full-rgb-frame-updates-enabled" type="checkbox"></label>
-          <p class="helper-text">Full RGB is a compatibility fallback for partial-update artifacts. Persistent compression normally reduces bandwidth in static scenes.</p>
+          <p class="helper-text">Quality keeps native depth samples and full RGB frames. Low latency can use partial RGB updates to reduce bandwidth. Persistent compression reduces unchanged depth data.</p>
           <div class="button-row">
             <a class="button" href="./webcam_tracker_test.html">Head Tracker Diagnostics</a>
             <a id="transport-link" class="button" href="/frame-stream">Frame Stream Fallback</a>
@@ -408,6 +408,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20261020_blendpcr2"></script>
+  <script type="module" src="./controller_hybrid.js?v=20261020_native_quality"></script>
 </body>
 </html>

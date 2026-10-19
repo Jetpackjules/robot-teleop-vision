@@ -8,6 +8,7 @@ from pathlib import Path
 
 import av
 import numpy as np
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -718,3 +719,37 @@ def test_persistent_reference_rejects_one_frame_depth_hole():
     assert camera["depth_changed_tiles"] == 0
     reference = decode_temporal_delta(packed, camera, reference)
     np.testing.assert_array_equal(reference, depth)
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.parametrize("predictive", [False, True])
+def test_exact_depth_preserves_every_sample_and_full_color(persistent, predictive):
+    # Odd dimensions exercise partial border tiles as well as thin changes.
+    reference = np.full((19, 27), 1000, dtype=np.uint16)
+    encoder = TemporalRgbdDepthEncoder(exact_depth=True, temporal_color=False,
+                                       persistent_reference=persistent)
+    packet, _ = encoder.encode(make_packet(reference, predictive))
+    metadata, _ = parse_persistent_packet(packet)
+    keyframe = reference.copy()
+    for index in range(1, 8):
+        current = reference.copy()
+        current[2, index] += 1  # A single millimetre must appear immediately.
+        current[-1, -1] = 0 if index % 2 else 1001
+        current[5:15, 7] = 800 + index  # Thin moving edge and disocclusion.
+        packet, _ = encoder.encode(make_packet(current, predictive))
+        metadata, packed = parse_persistent_packet(packet, metadata)
+        camera = metadata["cameras"][0]
+        assert camera["depth_exact"] is True
+        assert camera["depth_stability_mm"] == 0
+        assert not camera["depth_plane_stabilization"]
+        assert not camera["depth_motion_confirmation"]
+        if camera["depth_encoding"] == TEMPORAL_DEPTH_ENCODING:
+            decoded = decode_temporal_delta(packed, camera, reference if persistent else keyframe)
+        else:
+            decoded = encoder._decode_depth(packed, camera)
+            keyframe = decoded.copy()
+        np.testing.assert_array_equal(decoded, current)
+        # The supplied camera JPEG is forwarded without a second lossy encode.
+        start = 9 + struct.unpack_from("<I", packet, 5)[0]
+        assert packet[start:start + camera["color_length"]] == b"\xff\xd8test-jpeg\xff\xd9"
+        reference = current

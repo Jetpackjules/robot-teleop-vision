@@ -3,7 +3,7 @@ const http = require('node:http');
 const {readFileSync} = require('node:fs');
 const {resolve} = require('node:path');
 const root = resolve(__dirname,'..');
-const modules = new Set(['hybrid_rgbd_renderer.js','hybrid_camera_fusion.js','hybrid_camera_quality.js','hybrid_blendpcr.js']);
+const modules = new Set(['hybrid_rgbd_renderer.js','hybrid_camera_fusion.js','hybrid_camera_quality.js','hybrid_blendpcr.js','camera_rgb_viewer.js']);
 function createTestServer() {
   return http.createServer((req,res) => {
     const path = new URL(req.url,'http://localhost').pathname;
@@ -11,7 +11,7 @@ function createTestServer() {
     if(modules.has(path.slice(1))) {
       res.setHeader('Content-Type','text/javascript');
       let source=readFileSync(resolve(root,'web',path.slice(1)),'utf8');
-      if(path==='/hybrid_rgbd_renderer.js')source+='\nwindow.probe={state,createProgram,findUniforms,render,uploadCamera,identityMatrix,inverseRigidTransform,perspectiveMatrix,multiplyMatrix,deleteCameraTextures};';
+      if(path==='/hybrid_rgbd_renderer.js')source+='\nwindow.probe={state,createProgram,findUniforms,render,uploadCamera,decodeCamera,identityMatrix,inverseRigidTransform,perspectiveMatrix,multiplyMatrix,deleteCameraTextures};';
       res.end(source);
     } else if(path==='/web_rendering_fixture.js') {
       res.setHeader('Content-Type','text/javascript');res.end(readFileSync(resolve(__dirname,'web_rendering_fixture.js')));

@@ -176,9 +176,9 @@ bool rig_triangle(int camera,uint id,vec3 origin,vec3 ray,out RigHit hit) {
   if(det<=1e-25)return false;
   float v=(d11*dot(v2,v0)-d01*dot(v2,v1))/det,w=(d00*dot(v2,v1)-d01*dot(v2,v0))/det;
   hit.local=p3;hit.world=rig_world(camera,p3);hit.normal=normalize(n);
-  // Preserve the browser's perspective-correct, per-vertex RGB interpolation.
-  hit.color=(1.0-v-w)*texelFetch(u_rig_color,ivec3(a,camera),0).rgb
-    +v*texelFetch(u_rig_color,ivec3(b,camera),0).rgb+w*texelFetch(u_rig_color,ivec3(c,camera),0).rgb;
+  // Match Godot's nearest RGB texture sampling at the reconstructed UV.
+  ivec2 color_pixel=clamp(ivec2(floor((1.0-v-w)*vec2(a)+v*vec2(b)+w*vec2(c)+0.5)),ivec2(0),ivec2(rig_data(camera,4).xy)-1);
+  hit.color=texelFetch(u_rig_color,ivec3(color_pixel,camera),0).rgb;
   hit.confidence=second?cache.a:cache.b;
   float range_sq=max(dot(p3,p3),0.0001);
   hit.score=k.x*k.y*1e-6*hit.confidence*abs(dot(hit.normal,p3/sqrt(range_sq)))/range_sq;
