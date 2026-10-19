@@ -224,6 +224,24 @@ func _handle_http_request(client: Dictionary) -> void:
 			_send_http_response(peer, "200 OK", _last_frame_content_type, _last_frame_bytes)
 		client["headers_sent"] = true
 		client["snapshot_sent"] = true
+	elif path == "/diagnostics":
+		# Read-only counters for the private desktop viewer and bounded profiling.
+		# Do not trigger image encoding, GPU readback, or change capture settings.
+		var cameras: Array[Dictionary] = []
+		for renderer in _find_rgbd_renderers():
+			var depth: Texture2D = renderer.call("get_depth_texture")
+			var color: Texture2D = renderer.call("get_color_texture")
+			cameras.append({"id":str(renderer.call("get_direct_realsense_serial")),
+				"depth_size":[depth.get_width(),depth.get_height()] if depth != null else [],
+				"color_size":[color.get_width(),color.get_height()] if color != null else [],
+				"stride":int(renderer.call("get_current_grid_stride")),
+				"capture_fps":float(renderer.call("get_direct_realsense_capture_fps")),
+				"render_fps":float(renderer.call("get_render_fps")),
+				"age_ms":float(renderer.call("get_display_frame_age_ms"))})
+		var body := JSON.stringify({"scene_fps":Engine.get_frames_per_second(),"cameras":cameras}).to_utf8_buffer()
+		_send_http_response(peer,"200 OK","application/json",body)
+		client["headers_sent"] = true
+		client["snapshot_sent"] = true
 	elif path.begins_with("/stream") or path.begins_with("/raw") or path.begins_with("/rgbd"):
 		if path.begins_with("/rgbd"):
 			_apply_rgbd_query(path)

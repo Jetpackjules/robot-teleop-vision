@@ -51,6 +51,7 @@ if str(REPO_ROOT) not in sys.path:
 from robot_teleop.modules import public_robot_module
 from robot_teleop.operator import RobotCommandError, load_robot_operator
 from robot_teleop.state import godot_app_userdata_root
+from tools.godot_desktop_stream import DesktopStreamConfig, GodotDesktopStream
 
 h264.MAX_BITRATE = 24_000_000
 h264.DEFAULT_BITRATE = 4_000_000
@@ -1761,7 +1762,10 @@ class LanRemoteServer(ThreadingHTTPServer):
         robot_view_devices: dict[str, str] | None = None,
         robot_module: str = "",
         site_settings_path: Path | None = None,
+        godot_desktop_config: DesktopStreamConfig | None = None,
     ):
+        if godot_desktop_config is not None and not password:
+            raise ValueError("Desktop capture requires the existing password gate")
         super().__init__(address, handler)
         self.root = root
         self.udp_host = udp_host
@@ -1769,6 +1773,7 @@ class LanRemoteServer(ThreadingHTTPServer):
         self.stream_host = stream_host
         self.stream_port = stream_port
         self.password = password
+        self.godot_desktop_stream = GodotDesktopStream(godot_desktop_config) if godot_desktop_config else None
         self.robot_module = robot_module or os.environ.get("ROBOT_TELEOP_MODULE", "disabled")
         module_paths = tuple(
             item
@@ -2269,6 +2274,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             elif self.auth_required() and not self.is_authorized():
                 self.send_websocket_auth_required()
                 return
+            desktop = getattr(self.server,"godot_desktop_stream",None)
+            if desktop is not None and desktop.proxy_controls(self):
+                return
             self.handle_websocket()
             return
         if parsed.path == "/login":
@@ -2276,6 +2284,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             return
         if self.auth_required() and not self.is_authorized():
             self.redirect_to_login()
+            return
+        desktop = getattr(self.server, "godot_desktop_stream", None)
+        if desktop is not None and desktop.handle(self, parsed.path):
             return
         if parsed.path == "/video.mp4":
             self.proxy_encoded_video(parsed.query, "mp4")
@@ -4648,6 +4659,13 @@ def main():
     parser.add_argument("--stream-host", default="127.0.0.1")
     parser.add_argument("--stream-port", type=int, default=8780)
     parser.add_argument("--password", default=os.environ.get("GODOT_REMOTE_PASSWORD", ""))
+    parser.add_argument("--godot-desktop-display", default="", help="Opt in to GPU video of an explicit private X11 display, e.g. :99")
+    parser.add_argument("--godot-desktop-xauthority", default="")
+    parser.add_argument("--godot-desktop-ffmpeg", default="ffmpeg")
+    parser.add_argument("--godot-desktop-size", default="1440x900")
+    parser.add_argument("--godot-desktop-fps", type=int, default=30)
+    parser.add_argument("--godot-desktop-device", default="/dev/dri/renderD128")
+    parser.add_argument("--godot-desktop-vnc-port", type=int, default=6085, help="Existing loopback noVNC/websockify service")
     parser.add_argument("--robot-module", default=os.environ.get("ROBOT_TELEOP_MODULE", "disabled"))
     parser.add_argument("--robot-command-port", type=int)
     parser.add_argument("--robot-status-port", type=int)
@@ -4685,6 +4703,15 @@ def main():
         print(f"Could not create TLS certificate: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    desktop_config = None
+    if args.godot_desktop_display:
+        if not args.password:
+            parser.error("Desktop capture requires the existing password gate")
+        try:
+            desktop_config = DesktopStreamConfig(args.godot_desktop_display,args.godot_desktop_xauthority,
+                args.godot_desktop_ffmpeg,args.godot_desktop_size,args.godot_desktop_fps,args.godot_desktop_device,args.godot_desktop_vnc_port)
+        except ValueError as error:
+            parser.error(str(error))
     server = LanRemoteServer(
         (args.host, args.port),
         LanRemoteHandler,
@@ -4704,6 +4731,7 @@ def main():
         robot_calibration_status_port=args.robot_calibration_status_port,
         robot_view_devices=robot_view_devices,
         robot_module=args.robot_module,
+        godot_desktop_config=desktop_config,
     )
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile=cert, keyfile=key)

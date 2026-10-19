@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Godot GPU desktop</title>
+  <style>
+    *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#080a0d;color:#e6eaf0;font:14px system-ui,sans-serif;overflow:hidden}
+    header{height:40px;display:flex;align-items:center;gap:16px;padding:0 12px;background:#171b22}header strong{white-space:nowrap}
+    #status{flex:1;color:#b9c6d5;font-size:12px}a,button{color:#dceafa;background:#293444;border:1px solid #43516a;border-radius:5px;padding:4px 9px;text-decoration:none;font:inherit;white-space:nowrap}
+    #desktop{height:calc(100% - 40px);position:relative}#controls{position:absolute;inset:0;overflow:hidden}
+    #video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;background:transparent}
+    #notice{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-width:460px;padding:20px;background:#1c2533;border-radius:8px}
+    [hidden]{display:none!important}
+  </style>
+</head>
+<body>
+  <header><strong>Godot · GPU video</strong><span id="status" role="status">Connecting…</span><button id="reconnect">Reconnect</button><a href="/godot/vnc.html?autoconnect=1&amp;resize=scale&amp;path=godot/websockify">Standard desktop</a></header>
+  <main id="desktop"><div id="controls"></div><video id="video" autoplay muted playsinline></video><div id="notice" hidden></div></main>
+  <script type="module" src="/godot_live.js"></script>
+</body>
+</html>

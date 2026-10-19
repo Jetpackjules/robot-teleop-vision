@@ -53,6 +53,18 @@ def test_login_form_uses_post_and_does_not_put_password_in_query():
     assert 'name="password"' in page
 
 
+def test_desktop_video_is_behind_existing_login_gate():
+    handler = bare_handler(server=SimpleNamespace(godot_desktop_stream=SimpleNamespace(
+        handle=lambda *args: pytest.fail("unauthenticated desktop capture"))))
+    handler.path = "/godot/desktop.mp4"
+    handler.auth_required = lambda: True
+    handler.is_authorized = lambda: False
+    redirected = []
+    handler.redirect_to_login = lambda: redirected.append(True)
+    handler.do_GET()
+    assert redirected == [True]
+
+
 def test_camera_locations_setting_is_typed_and_can_be_saved():
     handler = bare_handler()
     assert handler.validate_view_settings({"camera_locations_enabled": True})["camera_locations_enabled"] is True
