@@ -25,7 +25,7 @@
       "workspace-surface-opacity",
     ];
     // v13 adds GPU mesh views while preserving older saved camera views.
-    const viewSettingsVersion = 13;
+    const viewSettingsVersion = 14;
 
     let peer = null;
     let trackingDataChannel = null;
@@ -56,9 +56,11 @@
     const displayModes = hybridMode
       ? ["point_cloud", "shader_mesh", "independent_mesh", "unified_mesh", "rgb_camera"]
       : ["point_cloud", "rgb_camera"];
+    const defaultDisplayMode = hybridMode ? "independent_mesh" : "point_cloud";
     for (const option of displayModeSelect.options) {
       option.hidden = option.disabled = !displayModes.includes(option.value);
     }
+    displayModeSelect.value = defaultDisplayMode;
     const quickTunnel = window.location.hostname.endsWith(".trycloudflare.com");
     if (!hybridMode && quickTunnel) {
       // WebRTC media cannot reliably traverse a TCP-only Quick Tunnel. Avoid
@@ -92,6 +94,7 @@
         white_background_enabled: document.getElementById("white-background-enabled").checked,
         persistent_temporal_reference_enabled: document.getElementById("persistent-temporal-reference-enabled").checked,
         full_rgb_frame_updates_enabled: document.getElementById("full-rgb-frame-updates-enabled").checked,
+        camera_locations_enabled: document.getElementById("camera-locations-enabled").checked,
         head_tracking_enabled: document.getElementById("head-tracking-enabled").checked,
         workspace_surface_enabled: document.getElementById("workspace-surface-enabled").checked,
         workspace_boundary_enabled: document.getElementById("workspace-boundary-enabled").checked,
@@ -144,8 +147,9 @@
     }
 
     function restoreViewSettings(savedInput = null) {
-      const saved = savedInput && Object.keys(savedInput).length ? savedInput : localSavedViewSettings();
-      if (!saved || ![6, 7, 8, 9, 10, 11, 12, viewSettingsVersion].includes(saved.settings_version)) {
+      const localSaved = localSavedViewSettings();
+      const saved = savedInput && Object.keys(savedInput).length ? { ...localSaved, ...savedInput } : localSaved;
+      if (!saved || ![6, 7, 8, 9, 10, 11, 12, 13, viewSettingsVersion].includes(saved.settings_version)) {
         updateHeadTrackingOptions();
         return updateViewLabels();
       }
@@ -161,12 +165,13 @@
       document.getElementById("persistent-temporal-reference-enabled").checked = saved.persistent_temporal_reference_enabled !== false;
       document.getElementById("full-rgb-frame-updates-enabled").checked = saved.full_rgb_frame_updates_enabled === true;
       document.getElementById("head-tracking-enabled").checked = saved.head_tracking_enabled !== false;
-      document.getElementById("workspace-surface-enabled").checked = saved.workspace_surface_enabled !== false;
-      document.getElementById("workspace-boundary-enabled").checked = saved.workspace_boundary_enabled !== false;
+      document.getElementById("camera-locations-enabled").checked = saved.camera_locations_enabled === true;
+      document.getElementById("workspace-surface-enabled").checked = saved.workspace_surface_enabled === true;
+      document.getElementById("workspace-boundary-enabled").checked = saved.workspace_boundary_enabled === true;
       document.getElementById("workspace-surface-offset").value = String(saved.workspace_surface_offset ?? 0);
       document.getElementById("workspace-surface-size").value = String(saved.workspace_surface_size ?? 1.2);
       document.getElementById("workspace-surface-opacity").value = String(saved.workspace_surface_opacity ?? 0.18);
-      displayModeSelect.value = displayModes.includes(saved.display_mode) ? saved.display_mode : "point_cloud";
+      displayModeSelect.value = displayModes.includes(saved.display_mode) ? saved.display_mode : defaultDisplayMode;
       streamPresetSelect.value = saved.stream_preset === "latency" ? "latency" : "quality";
       startupNavigation = saved.default_navigation || null;
       startupNavigationPending = startupNavigation !== null;
@@ -623,6 +628,7 @@
           transport: forceHttpsRgbd ? "https" : "websocket",
           persistentReference,
           temporalColor: !fullRgbFrames,
+          onFocus: () => sendViewSettings({ inspect_enabled: true }),
         }),
         peerPromise,
       ]);
@@ -1053,6 +1059,7 @@
     for (const id of [
       "dolly-enabled", "white-background-enabled",
       "workspace-surface-enabled", "workspace-boundary-enabled",
+      "camera-locations-enabled",
     ]) {
       const control = document.getElementById(id);
       control.addEventListener("change", () => {
@@ -1095,12 +1102,17 @@
       await loadSiteSettings({ apply: true });
       if (userStarted) await startSelectedViewport();
     });
-    viewportVideo.addEventListener("click", focusInspectAtStreamClick);
-    viewportImage.addEventListener("click", focusInspectAtStreamClick);
-    hybridCanvas.addEventListener("click", (event) => {
-      if (!window.focusGodotHybridRendererAt || !window.focusGodotHybridRendererAt(event.clientX, event.clientY)) return;
-      sendViewSettings({ inspect_enabled: true });
-    });
+    for (const element of [viewportVideo, viewportImage]) {
+      element.addEventListener("dblclick", focusInspectAtStreamClick);
+      element.addEventListener("auxclick", (event) => {
+        if (event.button !== 1) return;
+        event.preventDefault();
+        focusInspectAtStreamClick(event);
+      });
+      element.addEventListener("pointerdown", (event) => {
+        if (event.button === 1) event.preventDefault();
+      });
+    }
     startButton.addEventListener("click", startController);
 
     setInterval(() => {

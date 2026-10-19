@@ -53,6 +53,14 @@ def test_login_form_uses_post_and_does_not_put_password_in_query():
     assert 'name="password"' in page
 
 
+def test_camera_locations_setting_is_typed_and_can_be_saved():
+    handler = bare_handler()
+    assert handler.validate_view_settings({"camera_locations_enabled": True})["camera_locations_enabled"] is True
+    assert handler.validate_site_settings({"camera_locations_enabled": False})["camera_locations_enabled"] is False
+    with pytest.raises(ValueError, match="boolean"):
+        handler.validate_view_settings({"camera_locations_enabled": "yes"})
+
+
 def test_websocket_origin_must_match_request_host():
     handler = bare_handler({"Origin": "https://window.example.com", "Host": "window.example.com"})
     assert handler.websocket_origin_allowed()

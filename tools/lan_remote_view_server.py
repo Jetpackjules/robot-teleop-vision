@@ -90,6 +90,7 @@ CORE_PERSISTENT_VIEW_SETTINGS = frozenset(
         "full_rgb_frame_updates_enabled",
         "workspace_surface_enabled",
         "workspace_boundary_enabled",
+        "camera_locations_enabled",
         "workspace_surface_offset",
         "workspace_surface_size",
         "workspace_surface_opacity",
@@ -3816,6 +3817,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             "full_rgb_frame_updates_enabled",
             "workspace_surface_enabled",
             "workspace_boundary_enabled",
+            "camera_locations_enabled",
         }
         boolean_settings.update(self.server.robot_operator.boolean_view_settings())
         for key in boolean_settings:

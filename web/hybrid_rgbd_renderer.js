@@ -27,6 +27,9 @@ const state = {
   robotUniforms: null,
   robotVao: null,
   workspaceGuide: null,
+  cameraGuide: null,
+  cameraGuideLabels: new Map(),
+  cameraGuideLabelRoot: null,
   robotMeshes: {},
   robotRenderer: EMPTY_ROBOT_RENDERER,
   robotTransforms: {},
@@ -100,9 +103,9 @@ const state = {
     max_distance: 3.0,
     fov: 55,
     splat_fill: 1.3,
-    geometry_mode: "points",
+    geometry_mode: "mesh",
     overlap_suppression_enabled: false,
-    camera_color_fusion_enabled: true,
+    camera_color_fusion_enabled: false,
     mesh_depth_delta: 0.035,
     mesh_max_edge: 0.055,
     point_underlay: false,
@@ -110,8 +113,9 @@ const state = {
     robot_overlay_style: "alignment",
     robot_overlay_mask_scanned_robot: true,
     white_background_enabled: false,
-    workspace_surface_enabled: true,
-    workspace_boundary_enabled: true,
+    workspace_surface_enabled: false,
+    workspace_boundary_enabled: false,
+    camera_locations_enabled: false,
     workspace_surface_offset: 0,
     workspace_surface_size: 1.2,
     workspace_surface_opacity: 0.18,
@@ -839,8 +843,8 @@ function ensureWorkspaceGuide() {
 
 function drawWorkspaceGuide(viewProjection) {
   if (!state.robotProgram || !state.robotVao) return;
-  const showSurface = state.settings.workspace_surface_enabled !== false;
-  const showBoundary = state.settings.workspace_boundary_enabled !== false
+  const showSurface = state.settings.workspace_surface_enabled === true;
+  const showBoundary = state.settings.workspace_boundary_enabled === true
     && state.robotRenderer.workspaceBoundary;
   if (!showSurface && !showBoundary) return;
   const guide = ensureWorkspaceGuide();
@@ -875,6 +879,107 @@ function drawWorkspaceGuide(viewProjection) {
   }
   if (showBoundary) draw(guide.items.boundary, [1.0, 0.28, 0.08, 0.9]);
   gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(null);
+}
+
+function cameraMarkerGeometry(camera, depth = 0.12) {
+  const intrinsics = camera.metadata.intrinsics;
+  if (!Array.isArray(intrinsics) || intrinsics.length < 4 || intrinsics[0] <= 0 || intrinsics[1] <= 0) return [];
+  const corners = [[0, 0], [camera.width - 1, 0], [camera.width - 1, camera.height - 1], [0, camera.height - 1]]
+    .map(([u, v]) => [(u - intrinsics[2]) * depth / intrinsics[0], -(v - intrinsics[3]) * depth / intrinsics[1], -depth]);
+  const vertices = [];
+  const line = (a, b) => vertices.push(...a, ...b);
+  for (let index = 0; index < corners.length; index += 1) {
+    line([0, 0, 0], corners[index]);
+    line(corners[index], corners[(index + 1) % corners.length]);
+  }
+  const body = [[-0.025, -0.012, 0.018], [0.025, -0.012, 0.018], [0.025, 0.012, 0.018], [-0.025, 0.012, 0.018]];
+  for (let index = 0; index < body.length; index += 1) line(body[index], body[(index + 1) % body.length]);
+  line([-0.012, 0.012, 0.018], [0, 0.032, 0.018]);
+  line([0, 0.032, 0.018], [0.012, 0.012, 0.018]);
+  return vertices;
+}
+
+function cameraMarkerColor(id) {
+  const palette = [[0.25, 0.9, 1], [1, 0.65, 0.25], [0.85, 0.5, 1], [0.45, 1, 0.5], [1, 0.45, 0.65], [1, 0.95, 0.3]];
+  let hash = 0;
+  for (const character of String(id)) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return palette[hash % palette.length];
+}
+
+function deleteCameraGuides(gl) {
+  if (gl && state.cameraGuide) gl.deleteBuffer(state.cameraGuide);
+  state.cameraGuide = null;
+  state.cameraGuideLabelRoot?.remove();
+  state.cameraGuideLabelRoot = null;
+  state.cameraGuideLabels.clear();
+}
+
+function drawCameraGuides(viewProjection) {
+  if (state.cameraGuideLabelRoot) state.cameraGuideLabelRoot.hidden = state.settings.camera_locations_enabled !== true;
+  if (state.settings.camera_locations_enabled !== true || !state.robotProgram || !state.robotVao) return;
+  const gl = state.gl;
+  if (!state.cameraGuide) state.cameraGuide = gl.createBuffer();
+  if (!state.cameraGuideLabelRoot) {
+    const root = document.createElement("div");
+    root.setAttribute("aria-label", "Camera locations");
+    Object.assign(root.style, {position: "fixed", inset: "0", pointerEvents: "none", zIndex: "1"});
+    document.body.appendChild(root);
+    state.cameraGuideLabelRoot = root;
+  }
+  const rect = state.canvas.getBoundingClientRect();
+  const present = new Set();
+  gl.useProgram(state.robotProgram);
+  gl.bindVertexArray(state.robotVao);
+  gl.uniformMatrix4fv(state.robotUniforms.viewProjection, false, viewProjection);
+  gl.uniform2f(state.robotUniforms.viewport, Math.max(gl.canvas.width, 1), Math.max(gl.canvas.height, 1));
+  gl.uniform1f(state.robotUniforms.outlinePixels, 0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+  gl.disableVertexAttribArray(1);
+  gl.vertexAttrib3f(1, 0, 1, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, state.cameraGuide);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  // Camera locations remain visible through the scan while this debug aid is on.
+  gl.disable(gl.DEPTH_TEST);
+  gl.depthMask(false);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  for (const camera of state.cameras) {
+    const vertices = cameraMarkerGeometry(camera);
+    if (!vertices.length) continue;
+    const id = String(camera.metadata.id);
+    present.add(id);
+    const color = cameraMarkerColor(id);
+    const fresh = cameraIsFresh(camera);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.DYNAMIC_DRAW);
+    gl.uniformMatrix4fv(state.robotUniforms.model, false, camera.modelMatrix);
+    gl.uniform4fv(state.robotUniforms.color, [...color, fresh ? 1 : 0.4]);
+    gl.drawArrays(gl.LINES, 0, vertices.length / 3);
+    let label = state.cameraGuideLabels.get(id);
+    if (!label) {
+      label = document.createElement("span");
+      Object.assign(label.style, {position: "absolute", padding: "3px 6px", borderRadius: "4px",
+        background: "rgba(0,0,0,0.8)", font: "12px monospace", whiteSpace: "nowrap"});
+      state.cameraGuideLabelRoot.appendChild(label);
+      state.cameraGuideLabels.set(id, label);
+    }
+    const position = camera.modelMatrix.slice(12, 15);
+    const clip = transformPoint4(viewProjection, [...position, 1]);
+    const x = clip[0] / clip[3], y = clip[1] / clip[3];
+    label.hidden = clip[3] <= 0 || Math.abs(x) > 1 || Math.abs(y) > 1;
+    label.textContent = `${camera.metadata.model || "Camera"} ${id.slice(-4)}${fresh ? "" : " (stale)"}`;
+    label.style.color = `rgb(${color.map(value => Math.round(value * 255)).join(",")})`;
+    label.style.transform = `translate(${rect.left + (x + 1) * rect.width * 0.5 + 8}px, ${rect.top + (1 - y) * rect.height * 0.5 - 18}px)`;
+  }
+  for (const [id, label] of state.cameraGuideLabels) {
+    if (present.has(id)) continue;
+    label.remove();
+    state.cameraGuideLabels.delete(id);
+  }
+  gl.depthMask(true);
+  gl.enable(gl.DEPTH_TEST);
   gl.disable(gl.BLEND);
   gl.bindVertexArray(null);
 }
@@ -1888,9 +1993,8 @@ function orbitViewer(base, headDelta) {
     -80,
     80,
   ) * Math.PI / 180;
-  let direction = rotateAroundAxis(baseDirection, worldUp, -yaw);
+  const direction = rotateAroundAxis(baseDirection, worldUp, -yaw);
   const pitchAxis = rotateAroundAxis(baseRight, worldUp, -yaw);
-  direction = normalize(rotateAroundAxis(direction, pitchAxis, pitch));
   let distance = Number(settings.orbit_distance || 0.65);
   if (settings.dolly_enabled) distance += (relativeHead[2] * 100) * Number(settings.dolly_gain || 0);
   distance += state.manualDolly;
@@ -1902,20 +2006,34 @@ function orbitViewer(base, headDelta) {
     : robotFocus || state.focusWorld || add(base.slice(12, 15), scale(levelBack, -settings.focus_distance));
   const focus = add(baseFocus, state.manualPan);
   const virtualHeadOffset = scale(worldUp, verticalLiftForFocus(focus));
-  const cameraPosition = add(add(focus, scale(direction, distance)), virtualHeadOffset);
+  // Rotate the complete camera offset, including its configured height.
+  // Adding height after pitching changes the orbit radius as the mouse moves.
+  const offset = add(scale(direction, distance), virtualHeadOffset);
+  const baseElevation = Math.atan2(offset[1], Math.hypot(offset[0], offset[2]));
+  const elevationLimit = 80 * Math.PI / 180;
+  const elevation = clamp(baseElevation - pitch, -elevationLimit, elevationLimit);
+  const orbitOffset = rotateAroundAxis(offset, pitchAxis, baseElevation - elevation);
+  const cameraPosition = add(focus, orbitOffset);
   return lookAtTransform(cameraPosition, focus, worldUp);
 }
 
-function attachPointerNavigation() {
+function attachPointerNavigation(options = {}) {
   const canvas = state.canvas;
   if (!canvas || state.pointerNavigation) return;
-  const drag = { active: false, id: -1, x: 0, y: 0, mode: "orbit" };
+  const drag = { active: false, id: -1, x: 0, y: 0, startX: 0, startY: 0, button: 0, moved: false, mode: "orbit" };
+  const focusAt = (event) => {
+    if (focusGodotHybridRendererAt(event.clientX, event.clientY)) options.onFocus?.();
+  };
   const pointerDown = (event) => {
     if (![0, 1, 2].includes(event.button)) return;
     drag.active = true;
     drag.id = event.pointerId;
     drag.x = event.clientX;
     drag.y = event.clientY;
+    drag.startX = event.clientX;
+    drag.startY = event.clientY;
+    drag.button = event.button;
+    drag.moved = false;
     drag.mode = event.button !== 0 || event.shiftKey ? "pan" : "orbit";
     state.settings.inspect_enabled = true;
     canvas.setPointerCapture(event.pointerId);
@@ -1923,13 +2041,15 @@ function attachPointerNavigation() {
   };
   const pointerMove = (event) => {
     if (!drag.active || event.pointerId !== drag.id) return;
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
+    drag.moved = true;
     const dx = event.clientX - drag.x;
     const dy = event.clientY - drag.y;
     drag.x = event.clientX;
     drag.y = event.clientY;
     if (drag.mode === "orbit") {
       state.manualOrbitYaw = ((state.manualOrbitYaw + dx * 0.25 + 180) % 360) - 180;
-      state.manualOrbitPitch = clamp(state.manualOrbitPitch + dy * 0.2, -80, 80);
+      state.manualOrbitPitch = clamp(state.manualOrbitPitch - dy * 0.2, -80, 80);
     } else {
       const viewer = state.currentViewer || (state.baseViewer && state.baseViewer.transform);
       if (viewer) {
@@ -1953,6 +2073,7 @@ function attachPointerNavigation() {
   };
   const pointerUp = (event) => {
     if (event.pointerId !== drag.id) return;
+    if (drag.active && drag.button === 1 && !drag.moved && event.type !== "pointercancel") focusAt(event);
     drag.active = false;
     drag.id = -1;
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
@@ -1971,7 +2092,7 @@ function attachPointerNavigation() {
   };
   const contextMenu = (event) => event.preventDefault();
   const doubleClick = (event) => {
-    recenterGodotHybridRenderer();
+    if (!drag.moved) focusAt(event);
     event.preventDefault();
   };
   canvas.addEventListener("pointerdown", pointerDown);
@@ -2109,6 +2230,7 @@ function render() {
     }
   }
   drawWorkspaceGuide(viewProjection);
+  drawCameraGuides(viewProjection);
   drawRobotOverlay(viewProjection);
   state.stats.renderFrames += 1;
 }
@@ -2569,7 +2691,7 @@ export async function startGodotHybridRenderer(options = {}) {
   state.rgbDisplayBaseCanvas = null;
   state.rgbDisplayCameraId = "";
   state.robotRenderer = activeRobotRenderer();
-  attachPointerNavigation();
+  attachPointerNavigation(options);
   const manualView = state.robotRenderer.manualView || {};
   const manualRgbCanvas = options.manualRgbCanvas ?? manualView.rgbCanvas;
   const manualCropCanvas = options.manualCropCanvas ?? manualView.cropCanvas;
@@ -2695,6 +2817,7 @@ export function stopGodotHybridRenderer() {
   state.cameraFusion = null;
   const gl = state.gl;
   deleteWorkspaceGuide(gl);
+  deleteCameraGuides(gl);
   deleteRobotMeshes(gl);
   if (gl && state.robotProgram) gl.deleteProgram(state.robotProgram);
   if (gl && state.robotVao) gl.deleteVertexArray(state.robotVao);

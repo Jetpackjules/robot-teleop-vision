@@ -275,7 +275,7 @@
     }
   </style>
   <script type="module" src="./godot_webcam_tracker_bridge.js?v=20260803_settings_cleanup_v1"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261013_multicamera"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261019_navigation_guides"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -290,9 +290,9 @@
         <div class="settings-body">
           <label>View
             <select id="display-mode">
-              <option value="point_cloud" selected>3D point cloud</option>
+              <option value="point_cloud">3D point cloud</option>
               <option value="shader_mesh">Shared-color mesh</option>
-              <option value="independent_mesh">Independent mesh</option>
+              <option value="independent_mesh" selected>Independent mesh</option>
               <option value="unified_mesh">Unified mesh</option>
               <option value="rgb_camera">RGB camera</option>
             </select>
@@ -329,13 +329,15 @@
         <section class="advanced-section">
           <h3>Camera and streaming</h3>
           <label class="toggle-row"><span>White background</span><input id="white-background-enabled" type="checkbox"></label>
+          <label class="toggle-row"><span>Show camera locations</span><input id="camera-locations-enabled" type="checkbox"></label>
+          <p class="helper-text">Camera bodies, labels, and viewing directions. Zoom out to see the full rig.</p>
           <p class="helper-text">Stream quality and latency remain in the Controller panel so operators can switch profiles without opening setup.</p>
         </section>
 
         <section class="advanced-section">
           <h3>Head and mouse navigation</h3>
           <label class="toggle-row"><span>Head tracking</span><input id="head-tracking-enabled" type="checkbox" checked></label>
-          <div class="navigation-guide">Left-drag orbit · right-drag or Shift-drag pan · wheel zoom · double-click focus</div>
+          <div class="navigation-guide">Left-drag orbit · right-drag or Shift-drag pan · wheel zoom · double-click or middle-click set orbit center</div>
           <div id="head-tracking-options" class="conditional-controls">
             <p class="helper-text">Head tracking response</p>
             <label>Orbit span <span id="orbit-span-value" class="value-label">160 deg</span><input id="orbit-span" type="range" min="30" max="360" step="5" value="160"></label>
@@ -351,8 +353,8 @@
 
         <section class="advanced-section">
           <h3>Workspace guide</h3>
-          <label class="toggle-row"><span>Flat support surface</span><input id="workspace-surface-enabled" type="checkbox" checked></label>
-          <label class="toggle-row"><span>Robot workspace guide</span><input id="workspace-boundary-enabled" type="checkbox" checked></label>
+          <label class="toggle-row"><span>Flat support surface</span><input id="workspace-surface-enabled" type="checkbox"></label>
+          <label class="toggle-row"><span>Robot workspace guide</span><input id="workspace-boundary-enabled" type="checkbox"></label>
           <label>Surface height offset <span id="workspace-surface-offset-value" class="value-label">0 mm</span><input id="workspace-surface-offset" type="range" min="-0.25" max="0.25" step="0.001" value="0"></label>
           <label>Surface size <span id="workspace-surface-size-value" class="value-label">1.20 m</span><input id="workspace-surface-size" type="range" min="0.25" max="4" step="0.05" value="1.2"></label>
           <label>Surface opacity <span id="workspace-surface-opacity-value" class="value-label">18%</span><input id="workspace-surface-opacity" type="range" min="0.04" max="0.5" step="0.01" value="0.18"></label>
@@ -405,6 +407,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20261013_multicamera"></script>
+  <script type="module" src="./controller_hybrid.js?v=20261019_navigation_guides"></script>
 </body>
 </html>

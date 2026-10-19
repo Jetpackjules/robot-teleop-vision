@@ -1,9 +1,10 @@
+@tool
 extends Node
 
 @export_storage var stream_enabled: bool = true:
 	set(value):
 		stream_enabled = value
-		if is_inside_tree():
+		if is_inside_tree() and _runs_in_current_context():
 			if stream_enabled:
 				_start_server()
 			else:
@@ -61,7 +62,15 @@ var _tracking_source: Node
 var _async_capture_inflight := 0
 var _async_readback_available := true
 
+func _runs_in_current_context() -> bool:
+	# Opt in only for a dedicated remote editor session. Normal editors must
+	# leave the runtime's streaming port and camera ownership alone.
+	return not Engine.is_editor_hint() or OS.get_environment("ROBOT_TELEOP_EDITOR_STREAM") == "1"
+
 func _ready() -> void:
+	if not _runs_in_current_context():
+		set_process(false)
+		return
 	if stream_enabled:
 		_start_server()
 	set_process(true)
@@ -75,13 +84,14 @@ func _exit_tree() -> void:
 
 func _start_server() -> void:
 	_stop_server()
-	var err := _server.listen(port, bind_host)
+	var listen_host := "127.0.0.1" if Engine.is_editor_hint() else bind_host
+	var err := _server.listen(port, listen_host)
 	if err != OK:
-		stream_status = "Viewport stream failed on %s:%d error=%d" % [bind_host, port, err]
+		stream_status = "Viewport stream failed on %s:%d error=%d" % [listen_host, port, err]
 		_next_listen_retry_msec = Time.get_ticks_msec() + 1000
 		push_warning(stream_status)
 		return
-	stream_status = "Viewport stream listening at http://%s:%d/stream" % [bind_host, port]
+	stream_status = "Viewport stream listening at http://%s:%d/stream" % [listen_host, port]
 	print(stream_status)
 
 func _stop_server() -> void:
@@ -95,7 +105,7 @@ func _stop_server() -> void:
 	stream_status = "stopped"
 
 func _process(delta: float) -> void:
-	if not stream_enabled:
+	if not _runs_in_current_context() or not stream_enabled:
 		return
 	if not _server.is_listening():
 		if Time.get_ticks_msec() < _next_listen_retry_msec:
@@ -393,6 +403,8 @@ func _publish_captured_image(image: Image, needs_encoded: bool, needs_raw: bool)
 	_frame_counter += 1
 
 func _refresh_tracking_metadata() -> void:
+	if Engine.is_editor_hint():
+		return
 	if _tracking_source == null and not tracking_source_path.is_empty():
 		_tracking_source = get_node_or_null(tracking_source_path)
 	if _tracking_source == null or not _tracking_source.has_method("get_tracking_latency_metadata"):
@@ -571,6 +583,12 @@ func _publish_rgbd_packet(
 	if camera_metadata.is_empty():
 		return false
 	var viewport_camera := get_viewport().get_camera_3d()
+	if Engine.is_editor_hint() or viewport_camera == null:
+		var scene_root := get_node_or_null(rgbd_root_path)
+		if scene_root != null:
+			var scene_camera := scene_root.get_node_or_null("Camera3D") as Camera3D
+			if scene_camera != null:
+				viewport_camera = scene_camera
 	var viewer := {}
 	if viewport_camera != null:
 		var initial_transform := _transform_array(viewport_camera.global_transform)
