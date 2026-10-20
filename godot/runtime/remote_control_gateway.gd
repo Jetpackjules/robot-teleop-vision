@@ -1,3 +1,4 @@
+@tool
 extends Node
 
 ## Narrow bridge between the authenticated local web server and Godot. Camera
@@ -16,6 +17,11 @@ var _tracking_hz := 0.0
 
 
 func _ready() -> void:
+	# The opt-in live editor preview owns camera settings when a separate
+	# sensor process is running. Ordinary project editing opens no listener.
+	if Engine.is_editor_hint() and OS.get_environment("ROBOT_TELEOP_EDITOR_STREAM") != "1":
+		set_process(false)
+		return
 	var error := _udp.bind(listen_port, "127.0.0.1")
 	if error != OK:
 		push_error("Remote control gateway could not bind 127.0.0.1:%d (error %d)" % [listen_port, error])
@@ -44,12 +50,15 @@ func _process(_delta: float) -> void:
 
 
 func _apply_view_settings(payload: Dictionary) -> void:
+	if payload.has("stream_preset"):
+		get_tree().call_group("unified_point_cloud_view", "apply_remote_stream_preset", str(payload.stream_preset))
 	if payload.has("white_background_enabled"):
 		RenderingServer.set_default_clear_color(
 			Color.WHITE if bool(payload.white_background_enabled)
 			else Color(0.03, 0.035, 0.04, 1.0)
 		)
-	get_tree().call_group("robot_module", "apply_remote_settings", payload)
+	if not Engine.is_editor_hint():
+		get_tree().call_group("robot_module", "apply_remote_settings", payload)
 
 
 func _record_tracking(payload: Dictionary) -> void:

@@ -1,4 +1,5 @@
 #include "realsense_direct_frame_source.h"
+#include "realsense_capture_profiles.h"
 
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/core/class_db.hpp>
@@ -1033,37 +1034,48 @@ bool RealSenseDirectFrameSource::open() {
     try {
         reset_post_processing_filters();
         StreamSettings settings = resolve_stream_settings();
-        // Keep the native depth grid and select the largest RGB mode at the
-        // same cadence. D435 supports 960x540 color at 60, versus 848x480 depth.
-        if (stream_profile == "fast60" && color_output_enabled) {
+        std::vector<realsense_capture::Mode> depth_modes, color_modes;
+        // Enumerate the actual device instead of assuming every RealSense has
+        // D435 dimensions. The SDK validates candidate stream pairs below.
+        if (stream_profile == "fast60" || stream_profile == "highres30") {
             rs2::context context;
             for (const auto &device : context.query_devices()) {
                 if (!device_serial.is_empty() && device_serial != String(device.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER))) continue;
                 for (const auto &sensor : device.query_sensors()) {
                     for (const auto &profile : sensor.get_stream_profiles()) {
-                        if (profile.stream_type() != RS2_STREAM_COLOR || profile.fps() != 60 || profile.format() != RS2_FORMAT_BGR8) continue;
                         const auto video = profile.as<rs2::video_stream_profile>();
-                        if (video && video.width() * video.height() > settings.color_width * settings.color_height) {
-                            settings.color_width = video.width();
-                            settings.color_height = video.height();
-                        }
+                        if (!video) continue;
+                        const realsense_capture::Mode mode{video.width(), video.height(), profile.fps()};
+                        if (profile.stream_type() == RS2_STREAM_DEPTH && profile.format() == RS2_FORMAT_Z16)
+                            depth_modes.push_back(mode);
+                        if (profile.stream_type() == RS2_STREAM_COLOR && profile.format() == RS2_FORMAT_BGR8)
+                            color_modes.push_back(mode);
                     }
                 }
                 break;
             }
         }
-        rs2::config config;
-        if (!device_serial.is_empty()) {
-            config.enable_device(std::string(device_serial.utf8().get_data()));
-        }
-        if (is_fast_foundation_source()) {
-            config.enable_stream(RS2_STREAM_INFRARED, 1, settings.depth_width, settings.depth_height, RS2_FORMAT_Y8, settings.depth_fps);
-            config.enable_stream(RS2_STREAM_INFRARED, 2, settings.depth_width, settings.depth_height, RS2_FORMAT_Y8, settings.depth_fps);
-        } else {
-            config.enable_stream(RS2_STREAM_DEPTH, settings.depth_width, settings.depth_height, RS2_FORMAT_Z16, settings.depth_fps);
-        }
-        if (color_output_enabled) {
-            config.enable_stream(RS2_STREAM_COLOR, settings.color_width, settings.color_height, RS2_FORMAT_BGR8, settings.color_fps);
+        const auto configure = [&](const StreamSettings &s) {
+            rs2::config config;
+            if (!device_serial.is_empty()) config.enable_device(std::string(device_serial.utf8().get_data()));
+            if (is_fast_foundation_source()) {
+                config.enable_stream(RS2_STREAM_INFRARED, 1, s.depth_width, s.depth_height, RS2_FORMAT_Y8, s.depth_fps);
+                config.enable_stream(RS2_STREAM_INFRARED, 2, s.depth_width, s.depth_height, RS2_FORMAT_Y8, s.depth_fps);
+            } else config.enable_stream(RS2_STREAM_DEPTH, s.depth_width, s.depth_height, RS2_FORMAT_Z16, s.depth_fps);
+            if (color_output_enabled) config.enable_stream(RS2_STREAM_COLOR, s.color_width, s.color_height, RS2_FORMAT_BGR8, s.color_fps);
+            return config;
+        };
+        rs2::config config = configure(settings);
+        // Experimental stereo models retain their established input size.
+        if (is_fast_foundation_source()) depth_modes = {{settings.depth_width, settings.depth_height, settings.depth_fps}};
+        for (const auto &pair : realsense_capture::ranked_modes(depth_modes, color_modes, settings.depth_fps, color_output_enabled)) {
+            StreamSettings candidate = settings;
+            candidate.depth_width = pair.depth.width; candidate.depth_height = pair.depth.height; candidate.depth_fps = pair.depth.fps;
+            if (color_output_enabled) {
+                candidate.color_width = pair.color.width; candidate.color_height = pair.color.height; candidate.color_fps = pair.color.fps;
+            }
+            auto proposed = configure(candidate);
+            if (proposed.can_resolve(pipeline)) { settings = candidate; config = proposed; break; }
         }
         pipeline_profile = pipeline.start(config);
         pipeline_started = true;

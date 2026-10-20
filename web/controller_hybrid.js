@@ -1,4 +1,5 @@
     import { robotModuleReady } from "./robot_module_host.js";
+    import { CapturePresetControl, nativeStreamPreset } from "./capture_presets.js?v=20261020_native_modes";
 
     const robotModule = await robotModuleReady;
     const viewportVideo = document.getElementById("viewport-video");
@@ -28,6 +29,8 @@
     const viewSettingsVersion = 14;
 
     let peer = null;
+    let capturePresetControl = null;
+    let viewportGeneration = 0;
     let trackingDataChannel = null;
     let viewSettingsDataChannel = null;
     let rgbdDataChannel = null;
@@ -94,7 +97,7 @@
         white_background_enabled: document.getElementById("white-background-enabled").checked,
         // Retire the old live-view default, including previously saved true values.
         persistent_temporal_reference_enabled: false,
-        full_rgb_frame_updates_enabled: document.getElementById("full-rgb-frame-updates-enabled").checked,
+        full_rgb_frame_updates_enabled: true,
         camera_locations_enabled: document.getElementById("camera-locations-enabled").checked,
         head_tracking_enabled: document.getElementById("head-tracking-enabled").checked,
         workspace_surface_enabled: document.getElementById("workspace-surface-enabled").checked,
@@ -163,7 +166,6 @@
       document.getElementById("white-background-enabled").checked = saved.white_background_enabled === true;
       document.getElementById("head-height").value = String(saved.focus_vertical_offset ?? 0.35);
       document.getElementById("orbit-elevation").value = String(saved.orbit_pitch_offset ?? 0);
-      document.getElementById("full-rgb-frame-updates-enabled").checked = saved.full_rgb_frame_updates_enabled === true;
       document.getElementById("head-tracking-enabled").checked = saved.head_tracking_enabled !== false;
       document.getElementById("camera-locations-enabled").checked = saved.camera_locations_enabled === true;
       document.getElementById("workspace-surface-enabled").checked = saved.workspace_surface_enabled === true;
@@ -197,6 +199,7 @@
             startupNavigationPending = false;
           }
           applyDisplayMode();
+          if (userStarted) await startSelectedViewport();
         }
         siteSettingsStatus.textContent = Object.keys(saved).length
           ? "Saved installation defaults loaded."
@@ -295,7 +298,7 @@
       if (window.location.protocol === "https:") {
         return `wss://${window.location.host}/head-tracking`;
       }
-      return `ws://${pageHost()}:8766`;
+      return `ws://${pageHost()}:8766/head-tracking`;
     }
 
     function streamBaseUrl() {
@@ -374,6 +377,8 @@
     }
 
     function stopViewport() {
+      viewportGeneration += 1;
+      capturePresetControl?.cancel();
       window.stopGodotHybridRenderer && window.stopGodotHybridRenderer();
       if (peer) {
         peer.close();
@@ -572,6 +577,7 @@
 
     async function startHybridViewport() {
       stopViewport();
+      const generation = viewportGeneration;
       activeViewportMode = "hybrid";
       showHybrid();
       const forceHttpsRgbd = new URLSearchParams(window.location.search)
@@ -586,21 +592,15 @@
       if (typeof window.startGodotHybridRenderer !== "function") {
         throw new Error("hybrid RGB-D renderer did not load");
       }
-      applyStreamQualityPolicy();
-      const hybridPreset = streamPresetSelect.value === "latency"
-        ? { width: 384, fps: 60, contextFps: 30, detailFps: 60, quality: 74, splatFill: 1.18, exactDepth: false }
-        // This is a ceiling, not an upscale: the source retains its native
-        // depth grid. Quality also bypasses lossy temporal depth cleanup.
-        : { width: 3840, fps: 60, contextFps: 60, detailFps: 60, quality: 95, splatFill: 1.32, exactDepth: true };
-      const fullRgbFrames = document.getElementById(
-        "full-rgb-frame-updates-enabled"
-      ).checked;
+      capturePresetControl ||= new CapturePresetControl(remoteUrl());
+      if (!await capturePresetControl.request(streamPresetSelect.value) || generation !== viewportGeneration) return;
+      // Both profiles preserve full native samples. The capture owner selects
+      // each device's largest jointly supported depth/RGB pair at this cadence.
+      const hybridPreset = nativeStreamPreset(streamPresetSelect.value);
       window.setGodotHybridViewSettings && window.setGodotHybridViewSettings(viewSettingsPayload({
         splat_fill: hybridPreset.splatFill,
-        // Match Godot's clean mesh defaults in Quality; the smaller latency
-        // stream retains its stricter continuity limits.
-        mesh_depth_delta: hybridPreset.exactDepth ? 0.05 : 0.035,
-        mesh_max_edge: hybridPreset.exactDepth ? 0.08 : 0.055,
+        mesh_depth_delta: 0.05,
+        mesh_max_edge: 0.08,
       }));
       // This async call creates all channels synchronously before its first
       // await, allowing the renderer to attach while ICE is negotiating.
@@ -624,16 +624,14 @@
           // Persistent recompression is experimental and too slow for live
           // capture. Old saved settings must not silently re-enable it.
           persistentReference: false,
-          // Native Quality depth is already losslessly predicted/compressed.
-          // Rebuilding exact tile deltas in the gateway costs a full decode +
-          // encode per packet without shrinking noisy live depth. Keep that
-          // work only in the latency profile's smaller stream.
-          temporalDepth: !hybridPreset.exactDepth,
-          temporalColor: !fullRgbFrames,
+          // Native JPEG/depth are already compressed; avoid a second codec.
+          temporalDepth: false,
+          temporalColor: false,
           onFocus: () => sendViewSettings({ inspect_enabled: true }),
         }),
         peerPromise,
       ]);
+      if (generation !== viewportGeneration) return;
       if (startupNavigationPending && startupNavigation && window.setGodotHybridNavigationState) {
         window.setGodotHybridNavigationState(startupNavigation);
         startupNavigationPending = false;
@@ -809,7 +807,7 @@
         await Promise.all([startSelectedViewport(), startTracking()]);
       } catch (err) {
         trackingState = `needs start: ${err && err.message ? err.message : err}`;
-        startMessage.textContent = "Camera permission needs a tap.";
+        startMessage.textContent = err?.message || "Could not start the viewer. Please retry.";
         startOverlay.hidden = false;
         updateStatus();
       }
@@ -1030,6 +1028,7 @@
       ].join("\n");
       statusLines.textContent = [
         `Stream ${hybrid.displaySource === "original_rgb" ? `${currentPreset().label} RGB` : streamMode} | ${size} | ${fps} | ${bitrate}`,
+        !connected ? streamState : "",
         activeViewportMode === "hybrid" ? hybrid.renderWarning : "",
         headTrackingEnabled
           ? `Tracking ${latest.status || trackingState} | ${remote.connected ? "bridge on" : "bridge ..."}`
@@ -1040,17 +1039,12 @@
       if (activeViewportMode === "hybrid") updateRgbdLatencyGraph(hybrid);
     }
 
-    function applyStreamQualityPolicy() {
-      const fullRgb = document.getElementById("full-rgb-frame-updates-enabled");
-      const quality = streamPresetSelect.value !== "latency";
-      if (quality) fullRgb.checked = true;
-      fullRgb.disabled = quality;
-    }
-
     streamPresetSelect.addEventListener("change", () => {
-      applyStreamQualityPolicy();
       sendViewSettings();
-      if (userStarted) startSelectedViewport();
+      if (userStarted) startSelectedViewport().catch(error => {
+        streamState = error?.message || "Camera mode change failed";
+        updateStatus();
+      });
       streamPresetSelect.blur();
       updateStatus();
     });
@@ -1058,11 +1052,6 @@
       applyDisplayMode();
       sendViewSettings();
       displayModeSelect.blur();
-    });
-    document.getElementById("full-rgb-frame-updates-enabled").addEventListener("change", (event) => {
-      sendViewSettings();
-      if (userStarted) startSelectedViewport();
-      event.currentTarget.blur();
     });
     document.getElementById("restart").addEventListener("click", startController);
     document.getElementById("recenter").addEventListener("click", () => {

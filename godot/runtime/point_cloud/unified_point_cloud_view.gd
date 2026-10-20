@@ -876,6 +876,8 @@ var _capture_control_previous: Dictionary = {}
 var _capture_paused := false
 var _capture_recovery_at: Dictionary = {}
 var _capture_view_cpu_ms := 0.0
+var _remote_capture_profile := ""
+var _requested_capture_profile := ""
 
 func _ready() -> void:
 	if _capture_only():
@@ -954,6 +956,7 @@ func _exit_tree() -> void:
 
 func _process(_delta: float) -> void:
 	var started := Time.get_ticks_usec()
+	_apply_pending_capture_profile()
 	_sync_capture_control()
 	_update_runtime_stream_owner_state()
 	_refresh_realsense_devices(false)
@@ -1547,6 +1550,8 @@ func _realsense_settings(camera_id: String) -> Dictionary:
 	return realsense_device_registry[serial] as Dictionary
 
 func _realsense_setting(camera_id: String, key: String, fallback):
+	if key == "stream_profile" and not _remote_capture_profile.is_empty():
+		return _remote_capture_profile
 	if _capture_only() and _capture_control_settings.has(camera_id):
 		return (_capture_control_settings[camera_id] as Dictionary).get(key,fallback)
 	var node_settings := _realsense_camera_node_settings(camera_id)
@@ -1901,6 +1906,25 @@ func _camera_shm_name(camera_id: String) -> String:
 func _capture_only() -> bool:
 	return OS.get_environment("ROBOT_TELEOP_CAPTURE_ONLY") == "1"
 
+func apply_remote_stream_preset(preset: String) -> void:
+	if preset not in ["quality", "latency"]:
+		return
+	_requested_capture_profile = "highres30" if preset == "quality" else "fast60"
+
+func _apply_pending_capture_profile() -> void:
+	if _requested_capture_profile.is_empty() or _requested_capture_profile == _remote_capture_profile:
+		return
+	# A preset changes live capture, never the saved scene or extrinsics. Keep
+	# an alignment worker's input stable until its existing pause lease ends.
+	if _realsense_cloud_alignment_running() or _capture_paused:
+		return
+	_remote_capture_profile = _requested_capture_profile
+
+func get_remote_stream_preset() -> String:
+	if _remote_capture_profile == "highres30": return "quality"
+	if _remote_capture_profile == "fast60": return "latency"
+	return "custom"
+
 func _shared_capture_preview() -> bool:
 	return not _capture_only() and not OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX").is_empty()
 
@@ -1927,6 +1951,7 @@ func _sync_capture_control() -> void:
 		for id in _realsense_camera_ids():
 			var settings := _realsense_settings(id).duplicate(true)
 			settings.merge(_realsense_camera_node_settings(id),true)
+			settings["stream_profile"] = _realsense_setting(id,"stream_profile",realsense_stream_profile)
 			settings["_capture_min_depth"]=_camera_min_depth(id)
 			settings["_capture_max_depth"]=_camera_max_depth(id)
 			var renderer := _camera_nodes.get(id) as Node3D

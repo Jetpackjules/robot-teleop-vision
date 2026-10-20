@@ -258,12 +258,14 @@ func _handle_http_request(client: Dictionary) -> void:
 				"depth_size":[depth.get_width(),depth.get_height()] if depth != null else [],
 				"color_size":[color.get_width(),color.get_height()] if color != null else [],
 				"raw_color_size":[raw_color.get_width(),raw_color.get_height()] if raw_color != null else [],
+				"stream_profile":str(renderer.call("get_direct_realsense_stream_profile")) if renderer.has_method("get_direct_realsense_stream_profile") else "custom",
 				"stride":int(renderer.call("get_current_grid_stride")),
 				"capture_fps":float(renderer.call("get_direct_realsense_capture_fps")),
 				"render_fps":float(renderer.call("get_render_fps")),
 				"age_ms":float(renderer.call("get_display_frame_age_ms"))})
 		var root_node := get_node_or_null(rgbd_root_path)
 		var body := JSON.stringify({"scene_fps":Engine.get_frames_per_second(),"cameras":cameras,
+			"stream_preset":root_node.call("get_remote_stream_preset") if root_node!=null and root_node.has_method("get_remote_stream_preset") else "custom",
 			"stream_cpu":_cpu_profile,"frame_cpu_ms":Performance.get_monitor(Performance.TIME_PROCESS)*1000.0,
 			"view_cpu_ms":root_node.get("_capture_view_cpu_ms") if root_node!=null else 0}).to_utf8_buffer()
 		_send_http_response(peer,"200 OK","application/json",body)

@@ -331,7 +331,7 @@
           <label class="toggle-row"><span>White background</span><input id="white-background-enabled" type="checkbox"></label>
           <label class="toggle-row"><span>Show camera locations</span><input id="camera-locations-enabled" type="checkbox"></label>
           <p class="helper-text">Camera bodies, labels, and viewing directions. Zoom out to see the full rig.</p>
-          <p class="helper-text">Stream quality and latency remain in the Controller panel so operators can switch profiles without opening setup.</p>
+          <p class="helper-text">Quality selects the largest native depth/RGB modes at 30 Hz; Low latency selects them at 60 Hz. Switching briefly restarts the shared cameras for all viewers. Capture targets may exceed delivered FPS.</p>
         </section>
 
         <section class="advanced-section">
@@ -377,8 +377,7 @@
 
         <section class="advanced-section wide">
           <h3>Troubleshooting</h3>
-          <label class="toggle-row"><span>Full RGB frame updates</span><input id="full-rgb-frame-updates-enabled" type="checkbox"></label>
-          <p class="helper-text">Quality keeps native depth samples and full RGB frames. Low latency can use partial RGB updates to reduce bandwidth.</p>
+          <p class="helper-text">Both stream profiles keep native depth precision and full RGB frames.</p>
           <div class="button-row">
             <a class="button" href="./webcam_tracker_test.html">Head Tracker Diagnostics</a>
             <a id="transport-link" class="button" href="/frame-stream">Frame Stream Fallback</a>
@@ -406,6 +405,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20261020_live_stream"></script>
+  <script type="module" src="./controller_hybrid.js?v=20261020_native_modes"></script>
 </body>
 </html>

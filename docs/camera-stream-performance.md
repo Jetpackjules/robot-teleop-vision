@@ -4,10 +4,38 @@ Measure fresh acquisitions, encoded frames and browser redraws separately.
 A 60 Hz redraw can reuse an older camera frame; the Controller's camera FPS
 counter counts newly decoded captures, not animation frames.
 
-On the three lab D435s, the SDK exposes 848×480 depth and 960×540 RGB at
-60 Hz. The `fast60` profile selects the largest available 60 Hz RGB mode.
-`highres30` uses 1280×720 at 30 Hz. These are sensor modes, not a guarantee
-that encoding, network delivery and rendering sustain their nominal rate.
+The existing browser Stream dropdown now switches the actual capture profile:
+
+| Preset | Native depth on the three lab D435s | Original RGB | Capture target |
+| --- | --- | --- | --- |
+| Low latency / `fast60` | 848×480 | 960×540 | 60 Hz |
+| Quality / `highres30` | 1280×720 | 1920×1080 | 30 Hz |
+
+These dimensions come from each device's advertised modes, with SDK validation
+of the depth/RGB pair. Other devices use their largest supported pair at the
+requested cadence, falling back to a lower advertised common cadence when
+necessary. Both presets preserve native depth samples, JPEG 95 and full RGB
+updates. A 3840-pixel transport ceiling does not upscale a smaller sensor image.
+Aligned mesh color follows the depth grid; RGB camera mode shows the original
+RGB image at its separate sensor resolution.
+
+Switching briefly restarts the cameras and affects every viewer sharing that
+capture owner. The request uses the existing authenticated view-settings
+WebSocket even with head tracking disabled. It waits for active calibration
+to finish and never changes saved transforms or the scene. Acquisition sizes,
+profile and actual capture rates appear in the private `/diagnostics` response.
+These are capture targets, not a guarantee that USB, encoding, network delivery,
+decoding or rendering sustain their nominal rate.
+
+The live three-camera dropdown check confirmed both native mode pairs, with
+stride 1 and fresh frames from every sensor. The public Low latency viewer
+reported 34–35 fresh FPS/camera in one boundary sample; Quality BlendPCR at the
+larger depth grid reported 17–19 FPS/camera (about 37 ms codec plus 5 ms upload
+submission). These are short diagnostic samples, not sustained guarantees or
+an identical-load comparison. Quality capture itself varied around 15–25 FPS
+in the sampled host window. The larger native mode therefore still needs
+capture/encoding and client decode profiling to sustain 30 fresh FPS. Saved
+scene and calibration hashes were unchanged after both switches.
 
 ## Independent capture for a private Godot preview
 
@@ -48,7 +76,8 @@ after a forced termination the launcher must clean up only its recorded prefix.
 
 ## Encoding and uncertain geometry
 
-Quality requests up to 60 Hz, native depth samples and JPEG quality 95.
+Quality requests up to 30 Hz; Low latency requests up to 60 Hz. Both preserve
+native depth samples and JPEG quality 95.
 Full-resolution encoding copies measured holes as zero. Neighbour halo repair
 is restricted to genuinely downsampled footprints. Direct JPEG scanlines avoid
 resampling unchanged dimensions; identity-resampler equivalence is tested.
@@ -101,7 +130,7 @@ the gateway unchanged. Rebuilding exact temporal depth tiles cost about 69 ms
 per packet in this lab run, with no size saving on noisy live depth. Persistent
 reference compression is disabled in the web viewer, including for old saved
 settings that enabled it. Its checkbox was removed; the backend codec remains
-available for controlled bandwidth experiments. The Low latency codec is unchanged.
+available for controlled bandwidth experiments. Both live presets bypass it.
 
 Up to three decoder workers run depth inflation and JPEG decoding in parallel.
 Native stateless frames transfer their buffers without cloning them; each
@@ -137,7 +166,8 @@ pauses, and backs off between attempts.
 
 The same public viewer on the Iris Xe laptop sustained the following fresh
 camera rates, calculated from cumulative frame counters over 65.163 seconds.
-The test used Quality BlendPCR, all three cameras, 848×480 depth/aligned RGB,
+The test used the previous Quality BlendPCR preset (before the native 30/60 Hz
+preset split), all three cameras, 848×480 depth/aligned RGB,
 JPEG 95 and exact uint16 depth. The canvas remained 2240×1260 physical pixels
 (1280×720 CSS pixels at Windows display scaling); it was not downscaled.
 
