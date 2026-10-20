@@ -1051,17 +1051,12 @@ bool RealSenseDirectFrameSource::open() {
         reset_post_processing_filters();
         StreamSettings settings = resolve_stream_settings();
         std::vector<realsense_capture::Mode> depth_modes, color_modes;
-        bool prefer_rectified_depth=false;
         // Enumerate the actual device instead of assuming every RealSense has
         // D435 dimensions. The SDK validates candidate stream pairs below.
         if (stream_profile == "fast60" || stream_profile == "highres30") {
             rs2::context context;
             for (const auto &device : context.query_devices()) {
                 if (!device_serial.is_empty() && device_serial != String(device.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER))) continue;
-                const String name=String(device.get_info(RS2_CAMERA_INFO_NAME)).to_upper();
-                // The vendor recommends 848x480 for D435/D455 depth accuracy.
-                // Larger RGB remains useful; a larger depth grid can add noise.
-                prefer_rectified_depth=stream_profile=="highres30" && (name.contains("D435")||name.contains("D455"));
                 for (const auto &sensor : device.query_sensors()) {
                     for (const auto &profile : sensor.get_stream_profiles()) {
                         const auto video = profile.as<rs2::video_stream_profile>();
@@ -1089,8 +1084,7 @@ bool RealSenseDirectFrameSource::open() {
         rs2::config config = configure(settings);
         // Experimental stereo models retain their established input size.
         if (is_fast_foundation_source()) depth_modes = {{settings.depth_width, settings.depth_height, settings.depth_fps}};
-        for (const auto &pair : realsense_capture::ranked_modes(depth_modes, color_modes, settings.depth_fps, color_output_enabled,
-                prefer_rectified_depth?848:0,prefer_rectified_depth?480:0)) {
+        for (const auto &pair : realsense_capture::ranked_modes(depth_modes, color_modes, settings.depth_fps, color_output_enabled)) {
             StreamSettings candidate = settings;
             candidate.depth_width = pair.depth.width; candidate.depth_height = pair.depth.height; candidate.depth_fps = pair.depth.fps;
             if (color_output_enabled) {

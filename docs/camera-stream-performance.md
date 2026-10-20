@@ -9,18 +9,23 @@ The existing browser Stream dropdown now switches the actual capture profile:
 | Preset | Native depth on the three lab D435s | Original RGB | Capture target |
 | --- | --- | --- | --- |
 | Low latency / `fast60` | 848×480 | 960×540 | 60 Hz |
-| Quality / `highres30` | 848×480 | 1920×1080 | 30 Hz |
+| Quality / `highres30` | 1280×720 | 1920×1080 | 30 Hz |
 
 These dimensions come from each device's advertised modes, with SDK validation
-of the depth/RGB pair. D435/D455 Quality prefers the vendor's recommended
-848×480 depth grid, which can be cleaner than its maximum 1280×720 grid; see
+of the depth/RGB pair. Quality maximizes both grids at 30 Hz; Low latency does
+the same at 60 Hz. The D435's recommended 848×480 depth mode is a separate
+accuracy recommendation, not its maximum resolution; see
 [RealSense depth post-processing guidance](https://dev.realsenseai.com/docs/depth-post-processing-for-intel-realsense-depth-camera-d400-series/).
-It retains maximum RGB resolution. Other devices use their largest supported pair at the
-requested cadence, falling back to a lower advertised common cadence when
+All devices use their largest supported pair at the requested cadence,
+falling back to a lower advertised common cadence when
 necessary. Both presets preserve native depth samples, JPEG 95 and full RGB
 updates. A 3840-pixel transport ceiling does not upscale a smaller sensor image.
 Aligned mesh color follows the depth grid; RGB camera mode shows the original
 RGB image at its separate sensor resolution.
+
+All three lab D435s advertise and resolve the 1280×720 depth + 1920×1080 RGB
+pair at 30 Hz. Their largest depth output at any frame rate is also 1280×720;
+reducing the target below 30 Hz does not expose an additional depth resolution.
 
 Switching briefly restarts the cameras and affects every viewer sharing that
 capture owner. The request uses the existing authenticated view-settings
@@ -39,15 +44,17 @@ an identical-load comparison. Quality capture itself varied around 15–25 FPS
 in the sampled host window. The larger native mode therefore still needs
 capture/encoding and client decode profiling to sustain 30 fresh FPS. Saved
 scene and calibration hashes were unchanged after both switches. Those figures
-describe the former 1280×720 Quality depth grid, not the recommended preset above.
+describe the maximum 1280×720 Quality depth grid.
 
-With the recommended Quality profile, the final 10-second loopback measurement
+During a separate test with 848×480 recommended depth, a 10-second loopback measurement
 delivered about 17–19 fresh encoded FPS per camera; Low latency delivered
 44–46 FPS. These are host-to-loopback measurements, not public-browser FPS.
 A separate six-second raw SDK check reached 29.5–29.7 and 59.5–59.7 FPS on
 all three cameras, respectively. Capture, alignment and encoding therefore
 still fall short of the sensor targets under the complete application load.
 Changing presets does not by itself establish sustained 30/60 FPS delivery.
+That recommended-depth measurement is historical and does not describe the
+current maximum-resolution Quality preset.
 
 Native BGR/RGBA, depth packing and lossless depth prediction use SIMD with scalar fallbacks. Equivalence
 tests cover every native 16-bit value, float rounding boundaries, non-finite
