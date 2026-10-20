@@ -3,7 +3,7 @@
 import {state,uploadCamera,VERTEX_SHADER,identityMatrix,perspectiveMatrix,inverseRigidTransform,multiplyMatrix} from './renderer.js';
 import {NativeRgbdDecoderPool} from './rgbd_decode_pool.js';
 import {BrowserBlendPCR} from './hybrid_blendpcr.js';
-import {GpuCameraRig,compileGpuProgram,FULLSCREEN_VERTEX_SHADER} from './hybrid_camera_quality.js';
+import {GpuCameraRig,compileGpuProgram,FULLSCREEN_VERTEX_SHADER,RIG_SAMPLING_SHADER} from './hybrid_camera_quality.js';
 const passed=[];let benchmarkMs={}; const check=(v,s)=>{if(!v)throw Error(s);passed.push(s)};
 try {
  const gl=document.getElementById('canvas').getContext('webgl2',{alpha:false,antialias:false});
@@ -98,6 +98,47 @@ try {
  }
  check(indexed.gridBuffers.size===1,'Three equal-resolution cameras share one static index buffer');
  indexed.clearTargets();check(indexed.gridBuffers.size===0,'Index buffers are released with targets');
+ // Exercise actual multi-view free-space evidence, including smooth ramps
+ // that the old neighbor-confidence shortcut exempted from validation.
+ rig.clear();state.cameras=[];
+ const evidenceSource=sampling=>`#version 300 es
+ precision highp float;precision highp int;${sampling}
+ out vec4 result;void main(){RigHit own;vec3 world=vec3(0,0,-.85);
+ bool valid=rig_surface(0,world,own);bool veto=valid&&rig_veto_hit(0,world,own);
+ result=vec4(valid?1.0:0.0,veto?1.0:0.0,valid?own.confidence:0.0,1.0);}`;
+ const evidence=compileGpuProgram(gl,FULLSCREEN_VERTEX_SHADER,evidenceSource(RIG_SAMPLING_SHADER));
+ const unbounded=RIG_SAMPLING_SHADER
+  .replace('if(p.z>=-0.001||k.x*k.y*1e-6/max(dot(p,p),0.0001)<=required)continue;','')
+  .replace('if(!rig_may_free_space(peer,p,rig_free_space_margin(own.confidence,-p.z)))continue;','');
+ const evidenceReference=compileGpuProgram(gl,FULLSCREEN_VERTEX_SHADER,evidenceSource(unbounded));
+ const evidenceCase=(peerZ,peerFocal,ready=true)=>{
+  const fixtures=[];
+  for(let c=0;c<2;c++) {
+   const width=32,height=24,model=identityMatrix();
+   const metadata={id:'evidence'+c,width,height,intrinsics:[c?peerFocal:16,c?peerFocal:16,16,12],transform:Array.from(model)};
+   fixtures.push(uploadCamera({metadata,width,height,modelMatrix:model,depth:new Uint16Array(width*height).fill(c?peerZ:850),colorPixels:new Uint8Array(width*height*3).fill(170)}));
+  }
+  state.cameras.push(...fixtures);const now=performance.now();fixtures.forEach(c=>c.lastUpdateMs=now);
+  if(!ready)fixtures[1].lastUpdateMs=now-2000;
+  rig.update(fixtures,inverseRigidTransform,now,settings);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.bindVertexArray(null);gl.viewport(0,0,1,1);gl.disable(gl.DEPTH_TEST);
+  const draw=program=>{
+   gl.useProgram(program);rig.bind(program);gl.uniform1f(gl.getUniformLocation(program,'u_fusion_depth_tolerance'),.035);
+   gl.drawArrays(gl.TRIANGLES,0,3);const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return pixel;
+  };
+  const pixel=draw(evidence);
+  check(same(pixel,draw(evidenceReference)),`Free-space bounds preserve reference pixels at ${peerZ} mm / focal ${peerFocal} / fresh ${ready}`);
+  check(pixel[0]===255&&pixel[2]===255,'The ramp fixture has valid, fully supported source geometry');
+  return pixel;
+ };
+ check(evidenceCase(1000,48)[1]===255,'A closer, coherent view rejects a smooth unsupported ramp');
+ check(evidenceCase(750,48)[1]===0,'A nearer occluder does not veto valid geometry behind it');
+ check(evidenceCase(850,48)[1]===0,'Agreeing views preserve measured geometry');
+ check(evidenceCase(858,48)[1]===0,'Small calibration differences cannot erode coherent surfaces');
+ check(evidenceCase(1000,8)[1]===0,'A coarser view cannot erase a better-resolved thin feature');
+ check(evidenceCase(1000,48,false)[1]===0,'A stale camera cannot reject a live surface');
+ check(evidenceCase(0,48)[1]===0,'A blind camera cannot infer or delete geometry');
+ gl.deleteProgram(evidence);gl.deleteProgram(evidenceReference);
  rig.clear();state.cameras=[];cameras.length=0;gl.canvas.width=2240;gl.canvas.height=1260;
  for(let c=0;c<3;c++) {
   const width=848,height=480,depth=new Uint16Array(width*height).fill(1000),color=new Uint8Array(width*height*3).fill(150+c*30);

@@ -216,17 +216,42 @@ bool rig_better(float q,int index,float other,int other_index) {
   float a=rig_rank(q),b=rig_rank(other);
   return a>b || (a==b&&index<other_index);
 }
+float rig_free_space_margin(float confidence,float expected) {
+  bool strong_support=confidence>=0.95;
+  return max(strong_support?0.012:0.008,rig_tolerance(expected)*(strong_support?3.0:2.0));
+}
+bool rig_may_free_space(int peer,vec3 p,float margin) {
+  vec4 info=rig_data(peer,4),k=rig_data(peer,3);
+  if(info.z<0.5||p.z>=-0.001)return false;
+  vec2 pixel=vec2(p.x*k.x/-p.z+k.z,-p.y*k.y/-p.z+k.w);
+  if(any(lessThan(pixel,vec2(0)))||any(greaterThanEqual(pixel,info.xy-vec2(1))))return false;
+  ivec2 cell=ivec2(floor(pixel)),a=cell,b=cell+ivec2(1,0),c=cell+ivec2(0,1);
+  if(fract(pixel.x)+fract(pixel.y)>1.0)a+=ivec2(1);
+  // A ray inside a projected triangle cannot meet it beyond its farthest
+  // vertex. Agreeing/nearer surfaces need no normal, color or support reads.
+  return max(rig_z(peer,a),max(rig_z(peer,b),rig_z(peer,c)))>-p.z+margin;
+}
 bool rig_free_space(RigHit own,int peer,vec3 world,RigHit other) {
   // A nearer peer means occlusion, never evidence that this surface is false.
   float expected=-rig_local(peer,world).z;
-  return own.confidence<0.95&&other.confidence>0.95&&other.score>own.score*1.15
-    &&-other.local.z>expected+rig_tolerance(expected);
+  // A smooth stereo error can have perfect local neighbor support. Allow a
+  // substantially better view to reject it, with a wider calibration margin.
+  bool strong_support=own.confidence>=0.95;
+  float ratio=strong_support?1.5:1.15;
+  float margin=rig_free_space_margin(own.confidence,expected);
+  return other.confidence>0.95&&other.score>own.score*ratio&&-other.local.z>expected+margin;
 }
 bool rig_veto_hit(int own_index,vec3 world,RigHit own) {
-  if(own.confidence>=0.95)return false;
+  float required=own.score*(own.confidence>=0.95?1.5:1.15);
   for(int peer=0;peer<u_rig_count;peer++) {
+    if(peer==own_index)continue;
+    vec3 p=rig_local(peer,world);vec4 k=rig_data(peer,3);
+    // Confidence and incidence cannot exceed one. This exact upper bound
+    // avoids depth/triangle reads for peers that cannot overturn this hit.
+    if(p.z>=-0.001||k.x*k.y*1e-6/max(dot(p,p),0.0001)<=required)continue;
+    if(!rig_may_free_space(peer,p,rig_free_space_margin(own.confidence,-p.z)))continue;
     RigHit other;
-    if(peer!=own_index&&rig_surface(peer,world,other)&&rig_free_space(own,peer,world,other))return true;
+    if(rig_surface(peer,world,other)&&rig_free_space(own,peer,world,other))return true;
   }
   return false;
 }

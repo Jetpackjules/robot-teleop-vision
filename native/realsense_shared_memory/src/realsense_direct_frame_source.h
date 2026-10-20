@@ -5,6 +5,7 @@
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/string.hpp>
+#include <godot_cpp/variant/vector2i.hpp>
 #include <godot_cpp/variant/vector4.hpp>
 
 #include <condition_variable>
@@ -69,6 +70,8 @@ public:
     uint64_t get_sequence() const;
     uint64_t get_frame_id() const;
     double get_capture_fps() const;
+    godot::Vector4 get_capture_stage_ms() const;
+    godot::Vector4 get_sensor_rates() const;
     int get_width() const;
     int get_height() const;
     int get_source_width() const;
@@ -77,6 +80,7 @@ public:
     godot::Ref<godot::Image> get_depth_image() const;
     godot::Ref<godot::Image> get_color_image() const;
     godot::Ref<godot::Image> get_raw_color_image() const;
+    godot::Vector2i get_raw_color_size() const;
     godot::Vector4 get_raw_color_intrinsics() const;
     godot::PackedFloat32Array get_depth_to_raw_color_extrinsics() const;
     godot::String get_status() const;
@@ -123,6 +127,8 @@ private:
     double capture_fps = 0.0;
     int capture_fps_frames = 0;
     double capture_fps_window_start = 0.0;
+    godot::Vector4 capture_stage_ms;
+    godot::Vector4 sensor_rates;
     int width = 0;
     int height = 0;
     int source_width = 0;
@@ -130,7 +136,13 @@ private:
     godot::Vector4 intrinsics;
     godot::Ref<godot::Image> depth_image;
     godot::Ref<godot::Image> color_image;
-    godot::Ref<godot::Image> raw_color_image;
+    mutable godot::Ref<godot::Image> raw_color_image;
+    mutable std::mutex raw_color_mutex;
+    godot::Vector2i raw_color_size;
+    std::vector<uint8_t> raw_color_pixels;
+    int raw_color_bpp = 0;
+    int raw_color_pitch = 0;
+    void clear_raw_color();
     godot::Vector4 raw_color_intrinsics;
     godot::PackedFloat32Array depth_to_raw_color_extrinsics;
     godot::String status = "RealSense direct capture is closed";

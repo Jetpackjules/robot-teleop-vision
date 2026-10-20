@@ -55,7 +55,7 @@ Browser points now scale with the camera intrinsics and viewing distance,
 reducing gaps when approaching the scene. The stream also accounts for depth
 sampling stride when exporting intrinsics, so lower-resolution grids retain
 the correct shape. This does not create missing depth detail. Prefer the
-existing Quality stream preset for maximum native detail at 30 Hz; Low latency
+existing Quality stream preset for recommended depth and maximum RGB at 30 Hz; Low latency
 selects the largest native depth/RGB pair at 60 Hz. Selecting either preset
 briefly restarts shared capture without changing the saved alignment. Neither
 point splats nor Unified Mesh performs learned 3D

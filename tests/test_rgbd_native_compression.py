@@ -24,6 +24,7 @@ def test_native_depth_compression_is_exact(tmp_path, fast):
 #include <memory>
 #include <cassert>
 #include <zlib.h>
+#include "rgbd_pixel_pack.h"
 #ifdef REALSENSE_RGBD_LIBDEFLATE
 #include <libdeflate.h>
 #endif
@@ -68,7 +69,7 @@ int main() {
     cpp = tmp_path / "depth.cpp"
     cpp.write_text(harness)
     executable = tmp_path / "depth"
-    command = [compiler, "-std=c++17", "-O2", str(cpp), "-lz", "-o", str(executable)]
+    command = [compiler, "-std=c++17", "-O2", "-I",str(root / "native/realsense_shared_memory/src"),str(cpp), "-lz", "-o", str(executable)]
     if fast:
         command += ["-DREALSENSE_RGBD_LIBDEFLATE", "-ldeflate"]
     subprocess.run(command, check=True, capture_output=True, text=True, timeout=60)

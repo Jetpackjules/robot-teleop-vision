@@ -1,6 +1,6 @@
-import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_native_pipeline";
+import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_depth_quality";
 
-import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_native_pipeline";
+import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_depth_quality";
 import { CameraRgbViewer } from "./camera_rgb_viewer.js?v=20261020_capture60";
 import { NativeRgbdDecoderPool, isIndependentNativeFrame, takeIndependentFrameBatch } from "./rgbd_decode_pool.js?v=20261020_native_pixels";
 

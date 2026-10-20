@@ -251,14 +251,21 @@ func _handle_http_request(client: Dictionary) -> void:
 		# Do not trigger image encoding, GPU readback, or change capture settings.
 		var cameras: Array[Dictionary] = []
 		for renderer in _find_rgbd_renderers():
+			var stages: Vector4 = renderer.call("get_direct_realsense_capture_stage_ms") if renderer.has_method("get_direct_realsense_capture_stage_ms") else Vector4.ZERO
+			var sensor: Vector4 = renderer.call("get_direct_realsense_sensor_rates") if renderer.has_method("get_direct_realsense_sensor_rates") else Vector4.ZERO
 			var depth: Image = renderer.call("get_depth_image")
 			var color: Image = renderer.call("get_color_image")
-			var raw_color: Image = renderer.call("get_raw_color_image") if renderer.has_method("get_raw_color_image") else null
+			var raw_size: Vector2i = renderer.call("get_raw_color_size") if renderer.has_method("get_raw_color_size") else Vector2i.ZERO
 			cameras.append({"id":str(renderer.call("get_direct_realsense_serial")),
 				"depth_size":[depth.get_width(),depth.get_height()] if depth != null else [],
 				"color_size":[color.get_width(),color.get_height()] if color != null else [],
-				"raw_color_size":[raw_color.get_width(),raw_color.get_height()] if raw_color != null else [],
+				"raw_color_size":[raw_size.x,raw_size.y] if raw_size.x>0 else [],
 				"stream_profile":str(renderer.call("get_direct_realsense_stream_profile")) if renderer.has_method("get_direct_realsense_stream_profile") else "custom",
+				"capture_stage_ms":{"align":stages.x,"filters":stages.y,"pack":stages.z,"total":stages.w},
+				"sensor_fps":[sensor.x if sensor.x>0 else null,sensor.y if sensor.y>0 else null],
+				"sensor_exposure_us":[sensor.z if sensor.z>0 else null,sensor.w if sensor.w>0 else null],
+				"encoder":renderer.call("get_rgbd_encoder_status") if renderer.has_method("get_rgbd_encoder_status") else {},
+				"sequence":int(renderer.call("get_frame_sequence")) if renderer.has_method("get_frame_sequence") else 0,
 				"stride":int(renderer.call("get_current_grid_stride")),
 				"capture_fps":float(renderer.call("get_direct_realsense_capture_fps")),
 				"render_fps":float(renderer.call("get_render_fps")),

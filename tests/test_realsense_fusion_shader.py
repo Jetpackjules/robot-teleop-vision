@@ -151,4 +151,8 @@ def test_free_space_requires_better_coherent_peer_and_preserves_occlusions(fusio
     assert fusion_gpu([0.98,0.90,0],[1,1,0],**options) == (255,0,0)
     assert fusion_gpu([0.98,1.05,0],[1,0,0],**options) == (255,0,0)
     options['maps']={}
+    assert fusion_gpu([0.98,1.05,0],[1,1,0],**options) == (0,0,0)
+    assert fusion_gpu([0.98,0.90,0],[1,1,0],**options) == (255,0,0)
+    assert fusion_gpu([0.98,0.988,0],[1,1,0],**options) == (255,0,0)
+    options['focal']=[24,10,16]
     assert fusion_gpu([0.98,1.05,0],[1,1,0],**options) == (255,0,0)

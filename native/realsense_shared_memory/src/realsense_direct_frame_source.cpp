@@ -1,5 +1,6 @@
 #include "realsense_direct_frame_source.h"
 #include "realsense_capture_profiles.h"
+#include "rgbd_pixel_pack.h"
 
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/core/class_db.hpp>
@@ -427,6 +428,8 @@ void RealSenseDirectFrameSource::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_sequence"), &RealSenseDirectFrameSource::get_sequence);
     ClassDB::bind_method(D_METHOD("get_frame_id"), &RealSenseDirectFrameSource::get_frame_id);
     ClassDB::bind_method(D_METHOD("get_capture_fps"), &RealSenseDirectFrameSource::get_capture_fps);
+    ClassDB::bind_method(D_METHOD("get_capture_stage_ms"), &RealSenseDirectFrameSource::get_capture_stage_ms);
+    ClassDB::bind_method(D_METHOD("get_sensor_rates"), &RealSenseDirectFrameSource::get_sensor_rates);
     ClassDB::bind_method(D_METHOD("get_width"), &RealSenseDirectFrameSource::get_width);
     ClassDB::bind_method(D_METHOD("get_height"), &RealSenseDirectFrameSource::get_height);
     ClassDB::bind_method(D_METHOD("get_source_width"), &RealSenseDirectFrameSource::get_source_width);
@@ -435,6 +438,7 @@ void RealSenseDirectFrameSource::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_depth_image"), &RealSenseDirectFrameSource::get_depth_image);
     ClassDB::bind_method(D_METHOD("get_color_image"), &RealSenseDirectFrameSource::get_color_image);
     ClassDB::bind_method(D_METHOD("get_raw_color_image"), &RealSenseDirectFrameSource::get_raw_color_image);
+    ClassDB::bind_method(D_METHOD("get_raw_color_size"), &RealSenseDirectFrameSource::get_raw_color_size);
     ClassDB::bind_method(D_METHOD("get_raw_color_intrinsics"), &RealSenseDirectFrameSource::get_raw_color_intrinsics);
     ClassDB::bind_method(D_METHOD("get_depth_to_raw_color_extrinsics"), &RealSenseDirectFrameSource::get_depth_to_raw_color_extrinsics);
     ClassDB::bind_method(D_METHOD("get_status"), &RealSenseDirectFrameSource::get_status);
@@ -568,7 +572,7 @@ void RealSenseDirectFrameSource::set_color_output_enabled(bool p_enabled) {
     color_output_enabled = p_enabled;
     if (!color_output_enabled) {
         color_image.unref();
-        raw_color_image.unref();
+        clear_raw_color();
     }
 #ifdef REALSENSE_DIRECT_ENABLED
     if (opened) {
@@ -756,12 +760,22 @@ void RealSenseDirectFrameSource::reset_post_processing_filters() {
 #endif
 }
 
+void RealSenseDirectFrameSource::clear_raw_color() {
+    std::lock_guard<std::mutex> lock(raw_color_mutex);
+    raw_color_image.unref();
+    raw_color_size = Vector2i();
+    raw_color_pixels.clear();
+    raw_color_bpp = raw_color_pitch = 0;
+}
+
 void RealSenseDirectFrameSource::clear_frame() {
     sequence = 0;
     frame_id = 0;
     capture_fps = 0.0;
     capture_fps_frames = 0;
     capture_fps_window_start = 0.0;
+    capture_stage_ms = Vector4();
+    sensor_rates = Vector4();
     width = 0;
     height = 0;
     source_width = 0;
@@ -769,7 +783,7 @@ void RealSenseDirectFrameSource::clear_frame() {
     intrinsics = Vector4();
     depth_image.unref();
     color_image.unref();
-    raw_color_image.unref();
+    clear_raw_color();
     raw_color_intrinsics = Vector4();
     depth_to_raw_color_extrinsics.clear();
     filter_status = "filters=off";
@@ -1035,12 +1049,17 @@ bool RealSenseDirectFrameSource::open() {
         reset_post_processing_filters();
         StreamSettings settings = resolve_stream_settings();
         std::vector<realsense_capture::Mode> depth_modes, color_modes;
+        bool prefer_rectified_depth=false;
         // Enumerate the actual device instead of assuming every RealSense has
         // D435 dimensions. The SDK validates candidate stream pairs below.
         if (stream_profile == "fast60" || stream_profile == "highres30") {
             rs2::context context;
             for (const auto &device : context.query_devices()) {
                 if (!device_serial.is_empty() && device_serial != String(device.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER))) continue;
+                const String name=String(device.get_info(RS2_CAMERA_INFO_NAME)).to_upper();
+                // The vendor recommends 848x480 for D435/D455 depth accuracy.
+                // Larger RGB remains useful; a larger depth grid can add noise.
+                prefer_rectified_depth=stream_profile=="highres30" && (name.contains("D435")||name.contains("D455"));
                 for (const auto &sensor : device.query_sensors()) {
                     for (const auto &profile : sensor.get_stream_profiles()) {
                         const auto video = profile.as<rs2::video_stream_profile>();
@@ -1068,7 +1087,8 @@ bool RealSenseDirectFrameSource::open() {
         rs2::config config = configure(settings);
         // Experimental stereo models retain their established input size.
         if (is_fast_foundation_source()) depth_modes = {{settings.depth_width, settings.depth_height, settings.depth_fps}};
-        for (const auto &pair : realsense_capture::ranked_modes(depth_modes, color_modes, settings.depth_fps, color_output_enabled)) {
+        for (const auto &pair : realsense_capture::ranked_modes(depth_modes, color_modes, settings.depth_fps, color_output_enabled,
+                prefer_rectified_depth?848:0,prefer_rectified_depth?480:0)) {
             StreamSettings candidate = settings;
             candidate.depth_width = pair.depth.width; candidate.depth_height = pair.depth.height; candidate.depth_fps = pair.depth.fps;
             if (color_output_enabled) {
@@ -1133,6 +1153,7 @@ bool RealSenseDirectFrameSource::open() {
 }
 
 void RealSenseDirectFrameSource::close() {
+    clear_raw_color();
     if (pipeline_started) {
         try {
             pipeline.stop();
@@ -1159,6 +1180,7 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
         return false;
     }
     try {
+        const auto capture_started = std::chrono::steady_clock::now();
         rs2::frameset frames;
         if (!pipeline.poll_for_frames(&frames)) {
             return false;
@@ -1175,9 +1197,18 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
             depth_to_raw_extrinsics = raw_depth_profile.get_extrinsics_to(raw_color_profile);
         }
         rs2::video_frame raw_color_frame(raw_color_frame_raw);
+        const auto metadata=[](const rs2::frame &frame,rs2_frame_metadata_value field) {
+            return frame && frame.supports_frame_metadata(field) ? double(frame.get_frame_metadata(field)) : 0.0;
+        };
+        const rs2::frame raw_depth_frame=frames.get_depth_frame();
+        sensor_rates=Vector4(metadata(raw_depth_frame,RS2_FRAME_METADATA_ACTUAL_FPS)*.001,
+            metadata(raw_color_frame_raw,RS2_FRAME_METADATA_ACTUAL_FPS)*.001,
+            metadata(raw_depth_frame,RS2_FRAME_METADATA_ACTUAL_EXPOSURE),metadata(raw_color_frame_raw,RS2_FRAME_METADATA_ACTUAL_EXPOSURE));
+        const auto alignment_started = std::chrono::steady_clock::now();
         if (color_output_enabled) {
             frames = align_to_depth.process(frames);
         }
+        const auto alignment_finished = std::chrono::steady_clock::now();
         rs2::depth_frame depth_frame = frames.get_depth_frame();
         rs2::frame color_frame_raw;
         if (color_output_enabled) {
@@ -1293,6 +1324,7 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
         }
 
         const int src_w = depth_frame.get_width();
+        const auto packing_started = std::chrono::steady_clock::now();
         const int src_h = depth_frame.get_height();
         rs2::video_frame color_frame = color_output_enabled ? color_frame_raw.as<rs2::video_frame>() : rs2::video_frame(color_frame_raw);
         const int color_w = color_output_enabled ? color_frame.get_width() : 0;
@@ -1319,28 +1351,22 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
         const int color_stride = color_output_enabled ? color_frame.get_stride_in_bytes() : 0;
         const float active_depth_units = depth_frame.get_units();
         int next_valid_depth_pixels = 0;
+        const bool full_crop = crop_rect == Vector4(0.0f,0.0f,1.0f,1.0f);
 
         if (color_output_enabled) {
-            const int raw_w = raw_color_frame.get_width();
-            const int raw_h = raw_color_frame.get_height();
-            const int raw_bpp = raw_color_frame.get_bytes_per_pixel();
-            const int raw_stride = raw_color_frame.get_stride_in_bytes();
-            const uint8_t *raw_data = static_cast<const uint8_t *>(raw_color_frame.get_data());
-            PackedByteArray raw_rgba;
-            raw_rgba.resize(raw_w * raw_h * 4);
-            uint8_t *raw_out = raw_rgba.ptrw();
-            for (int ry = 0; ry < raw_h; ++ry) {
-                const uint8_t *src_row = raw_data + ry * raw_stride;
-                for (int rx = 0; rx < raw_w; ++rx) {
-                    const uint8_t *bgr = src_row + rx * raw_bpp;
-                    const int dst = (ry * raw_w + rx) * 4;
-                    raw_out[dst + 0] = raw_bpp >= 3 ? bgr[2] : bgr[0];
-                    raw_out[dst + 1] = raw_bpp >= 2 ? bgr[1] : bgr[0];
-                    raw_out[dst + 2] = bgr[0];
-                    raw_out[dst + 3] = 255;
-                }
+            // Copy native BGR bytes into reusable storage, then release the
+            // SDK buffer promptly. Holding a UVC frame here can starve its
+            // small capture pool. RGBA conversion is needed only by RGB view
+            // or calibration, never by a mesh-only viewer.
+            {
+                std::lock_guard<std::mutex> lock(raw_color_mutex);
+                raw_color_size = Vector2i(raw_color_frame.get_width(),raw_color_frame.get_height());
+                raw_color_bpp = raw_color_frame.get_bytes_per_pixel();
+                raw_color_pitch = raw_color_frame.get_stride_in_bytes();
+                raw_color_pixels.resize(raw_color_frame.get_data_size());
+                std::memcpy(raw_color_pixels.data(),raw_color_frame.get_data(),raw_color_pixels.size());
+                raw_color_image.unref();
             }
-            raw_color_image = Image::create_from_data(raw_w, raw_h, false, Image::FORMAT_RGBA8, raw_rgba);
             raw_color_intrinsics = Vector4(raw_rs_intrinsics.fx, raw_rs_intrinsics.fy, raw_rs_intrinsics.ppx, raw_rs_intrinsics.ppy);
             depth_to_raw_color_extrinsics.resize(12);
             for (int element = 0; element < 9; ++element) {
@@ -1351,6 +1377,10 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
             }
             for (int cy = 0; cy < color_h; ++cy) {
                 const uint8_t *src_row = color_data + cy * color_stride;
+                if (full_crop && color_bpp == 3) {
+                    rgbd_pixels::bgr_to_rgba(src_row,color_out+cy*color_w*4,color_w,true);
+                    continue;
+                }
                 for (int cx = 0; cx < color_w; ++cx) {
                     const uint8_t *bgr = src_row + cx * color_bpp;
                     const int dst_offset = (cy * color_w + cx) * 4;
@@ -1370,7 +1400,9 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
             }
         }
 
-        for (int y = 0; y < grid_h; ++y) {
+        if (full_crop && grid_stride == 1 && depth_frame.get_stride_in_bytes() == src_w*2) {
+            next_valid_depth_pixels = rgbd_pixels::z16_to_rf(depth_data,depth_out,grid_w*grid_h,active_depth_units,filter_min_depth,filter_max_depth);
+        } else for (int y = 0; y < grid_h; ++y) {
             const int sy = std::min(y * grid_stride, src_h - 1);
             for (int x = 0; x < grid_w; ++x) {
                 const int sx = std::min(x * grid_stride, src_w - 1);
@@ -1415,6 +1447,11 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
         } else {
             color_image.unref();
         }
+        const auto capture_finished = std::chrono::steady_clock::now();
+        const auto milliseconds = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b-a).count(); };
+        capture_stage_ms = Vector4(milliseconds(alignment_started,alignment_finished),
+            milliseconds(alignment_finished,packing_started),milliseconds(packing_started,capture_finished),
+            milliseconds(capture_started,capture_finished));
         status = String("RealSense direct capture active: ") + stream_profile;
         const double valid_percent = width > 0 && height > 0 ? (100.0 * double(valid_depth_pixels) / double(width * height)) : 0.0;
         filter_status += String(" src=") + String::num_int64(src_w) + "x" + String::num_int64(src_h)
@@ -2033,6 +2070,8 @@ bool RealSenseDirectFrameSource::is_open() const { return opened; }
 uint64_t RealSenseDirectFrameSource::get_sequence() const { return sequence; }
 uint64_t RealSenseDirectFrameSource::get_frame_id() const { return frame_id; }
 double RealSenseDirectFrameSource::get_capture_fps() const { return capture_fps; }
+Vector4 RealSenseDirectFrameSource::get_capture_stage_ms() const { return capture_stage_ms; }
+Vector4 RealSenseDirectFrameSource::get_sensor_rates() const { return sensor_rates; }
 int RealSenseDirectFrameSource::get_width() const { return width; }
 int RealSenseDirectFrameSource::get_height() const { return height; }
 int RealSenseDirectFrameSource::get_source_width() const { return source_width; }
@@ -2040,7 +2079,33 @@ int RealSenseDirectFrameSource::get_source_height() const { return source_height
 Vector4 RealSenseDirectFrameSource::get_intrinsics() const { return intrinsics; }
 Ref<Image> RealSenseDirectFrameSource::get_depth_image() const { return depth_image; }
 Ref<Image> RealSenseDirectFrameSource::get_color_image() const { return color_image; }
-Ref<Image> RealSenseDirectFrameSource::get_raw_color_image() const { return raw_color_image; }
+Ref<Image> RealSenseDirectFrameSource::get_raw_color_image() const {
+    std::lock_guard<std::mutex> lock(raw_color_mutex);
+    if (raw_color_image.is_null() && !raw_color_pixels.empty()) {
+        const int w=raw_color_size.x,h=raw_color_size.y;
+        const int bpp=raw_color_bpp,pitch=raw_color_pitch;
+        const uint8_t *source=raw_color_pixels.data();
+        PackedByteArray rgba;rgba.resize(w*h*4);
+        uint8_t *out=rgba.ptrw();
+        for (int y=0;y<h;++y) {
+            const uint8_t *row=source+y*pitch;
+            if (bpp==3) rgbd_pixels::bgr_to_rgba(row,out+y*w*4,w,false);
+            else for (int x=0;x<w;++x) {
+                const uint8_t *pixel=row+x*bpp;
+                const int offset=(y*w+x)*4;
+                out[offset]=bpp>=3?pixel[2]:pixel[0];
+                out[offset+1]=bpp>=2?pixel[1]:pixel[0];
+                out[offset+2]=pixel[0];out[offset+3]=255;
+            }
+        }
+        raw_color_image=Image::create_from_data(w,h,false,Image::FORMAT_RGBA8,rgba);
+    }
+    return raw_color_image;
+}
+Vector2i RealSenseDirectFrameSource::get_raw_color_size() const {
+    std::lock_guard<std::mutex> lock(raw_color_mutex);
+    return raw_color_size;
+}
 Vector4 RealSenseDirectFrameSource::get_raw_color_intrinsics() const { return raw_color_intrinsics; }
 PackedFloat32Array RealSenseDirectFrameSource::get_depth_to_raw_color_extrinsics() const { return depth_to_raw_color_extrinsics; }
 String RealSenseDirectFrameSource::get_status() const { return status; }

@@ -82,7 +82,6 @@ bool rig_best_overlap_known(float own_quality,float own_confidence) {
     if (!rig_fusion_enabled) return false;
     if (rig_data(rig_camera_index,6).w<0.5) return true;
     vec4 world=vec4(rig_world_position,1.0);
-    if (!rig_select_owner && own_confidence>=0.95) return false;
     // Quantized scores form a transitive ordering. Pairwise "within 2%" ties
     // can form A->B->C->A cycles and make every camera discard the surface.
     int own_rank=int(floor(log(max(own_quality,0.000000000001))*50.4983498));
@@ -90,16 +89,27 @@ bool rig_best_overlap_known(float own_quality,float own_confidence) {
     for (int camera=0; camera<count; camera++) {
         if (camera==rig_camera_index) continue;
         vec3 point=rig_local_point(camera,world);
+        if (!rig_select_owner) {
+            vec4 k=rig_data(camera,3), grid=rig_data(camera,4);
+            float required=own_quality*(own_confidence>=0.95?1.5:1.15);
+            // A farther surface's confidence/incidence cannot exceed one.
+            // Skip peers that cannot supply enough evidence even at their
+            // theoretical best score, before reading triangle/depth support.
+            float upper=(k.x*k.y/(grid.z*grid.z*1000000.0))/max(dot(point,point),0.0001);
+            if (point.z>=-0.001 || upper<=required) continue;
+        }
         float error, quality, confidence;
         if (!rig_observe(camera,point,error,quality,confidence)) continue;
         float noise=max(0.003,0.004*point.z*point.z);
         float agreement=min(fusion_depth_tolerance,noise);
         // Closer peer depth means an occlusion, not evidence against this point.
-        // Only a coherent, better-resolved peer can contradict empty space,
-        // and only for an edge-uncertain source triangle. Isolated good data
-        // and thin parts are never eroded just for lacking a matching peer.
-        if (own_confidence<0.95 && confidence>0.99 && quality>own_quality*1.15
-                && error>max(0.008,noise*2.0)) return true;
+        // Smooth flying pixels can have perfect local support. A coherent,
+        // substantially better-resolved peer can still contradict their
+        // occupied space. Preserve occlusions, calibration-sized differences,
+        // and details that a coarser view cannot resolve.
+        bool strong_support=own_confidence>=0.95;
+        if (confidence>0.99 && quality>own_quality*(strong_support?1.5:1.15)
+                && error>max(strong_support?0.012:0.008,noise*(strong_support?3.0:2.0))) return true;
         if (!rig_select_owner || abs(error)>agreement) continue;
         int rank=int(floor(log(max(quality,0.000000000001))*50.4983498));
         if (rank>own_rank || (rank==own_rank && camera<rig_camera_index)) return true;

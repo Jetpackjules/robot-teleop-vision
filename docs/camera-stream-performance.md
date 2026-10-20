@@ -9,10 +9,13 @@ The existing browser Stream dropdown now switches the actual capture profile:
 | Preset | Native depth on the three lab D435s | Original RGB | Capture target |
 | --- | --- | --- | --- |
 | Low latency / `fast60` | 848×480 | 960×540 | 60 Hz |
-| Quality / `highres30` | 1280×720 | 1920×1080 | 30 Hz |
+| Quality / `highres30` | 848×480 | 1920×1080 | 30 Hz |
 
 These dimensions come from each device's advertised modes, with SDK validation
-of the depth/RGB pair. Other devices use their largest supported pair at the
+of the depth/RGB pair. D435/D455 Quality prefers the vendor's recommended
+848×480 depth grid, which can be cleaner than its maximum 1280×720 grid; see
+[RealSense depth post-processing guidance](https://dev.realsenseai.com/docs/depth-post-processing-for-intel-realsense-depth-camera-d400-series/).
+It retains maximum RGB resolution. Other devices use their largest supported pair at the
 requested cadence, falling back to a lower advertised common cadence when
 necessary. Both presets preserve native depth samples, JPEG 95 and full RGB
 updates. A 3840-pixel transport ceiling does not upscale a smaller sensor image.
@@ -27,7 +30,7 @@ profile and actual capture rates appear in the private `/diagnostics` response.
 These are capture targets, not a guarantee that USB, encoding, network delivery,
 decoding or rendering sustain their nominal rate.
 
-The live three-camera dropdown check confirmed both native mode pairs, with
+The earlier live three-camera dropdown check confirmed both maximum native mode pairs, with
 stride 1 and fresh frames from every sensor. The public Low latency viewer
 reported 34–35 fresh FPS/camera in one boundary sample; Quality BlendPCR at the
 larger depth grid reported 17–19 FPS/camera (about 37 ms codec plus 5 ms upload
@@ -35,7 +38,29 @@ submission). These are short diagnostic samples, not sustained guarantees or
 an identical-load comparison. Quality capture itself varied around 15–25 FPS
 in the sampled host window. The larger native mode therefore still needs
 capture/encoding and client decode profiling to sustain 30 fresh FPS. Saved
-scene and calibration hashes were unchanged after both switches.
+scene and calibration hashes were unchanged after both switches. Those figures
+describe the former 1280×720 Quality depth grid, not the recommended preset above.
+
+With the recommended Quality profile, the final 10-second loopback measurement
+delivered about 17–19 fresh encoded FPS per camera; Low latency delivered
+44–46 FPS. These are host-to-loopback measurements, not public-browser FPS.
+A separate six-second raw SDK check reached 29.5–29.7 and 59.5–59.7 FPS on
+all three cameras, respectively. Capture, alignment and encoding therefore
+still fall short of the sensor targets under the complete application load.
+Changing presets does not by itself establish sustained 30/60 FPS delivery.
+
+Native BGR/RGBA, depth packing and lossless depth prediction use SIMD with scalar fallbacks. Equivalence
+tests cover every native 16-bit value, float rounding boundaries, non-finite
+inputs and tight row buffers. Original RGB bytes use reusable owned storage;
+the full-resolution RGBA image is materialized only when RGB view/calibration
+requests it. An SDK frame is not retained between captures. The private
+diagnostics report sensor cadence, exposure availability and capture-stage
+timings without materializing that image.
+
+The vendor GPU alignment path was evaluated separately on identical captured
+frames. It took about 16–17 ms including CPU readback, versus 4–6 ms for CPU
+alignment, and changed color samples. It was not enabled. A range-pruning
+experiment also failed to improve delivered throughput and was removed.
 
 ## Independent capture for a private Godot preview
 
@@ -88,6 +113,12 @@ and CPU mesh use the same rule. A cube-sized step is rejected while a continuous
 oblique plane remains valid. Blind regions stay empty; blending does not infer
 surfaces outside the cameras' measurements. Incorrect but nonzero stereo depth
 can still require a better camera angle or sensor tuning.
+
+A smooth false slope can have perfect local neighbour support. Unified mesh
+and BlendPCR therefore also check coherent surfaces against a substantially
+better-resolved camera's measured free space. Wider confidence and calibration
+margins protect valid detail; a nearer occluder, blind camera, stale camera or
+coarser view cannot erase the surface. No replacement geometry is invented.
 
 Original RGB camera mode uses a persistent same-origin WebSocket and a bounded
 latest-frame decode queue. It pauses hidden RGB-D reconstruction unless its

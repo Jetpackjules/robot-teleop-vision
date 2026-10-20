@@ -1,5 +1,6 @@
 #include "realsense_shared_memory_point_cloud.h"
 #include "multi_camera_fusion_shader.h"
+#include "rgbd_pixel_pack.h"
 
 #include <godot_cpp/classes/rd_shader_source.hpp>
 #include <godot_cpp/classes/rd_shader_spirv.hpp>
@@ -257,25 +258,7 @@ static PackedByteArray deflate_depth_predictive_fast(
 	const int64_t sample_count = p_depth.size() / 2;
 	PackedByteArray predicted;
 	predicted.resize(p_depth.size());
-	const uint8_t *source = p_depth.ptr();
-	uint8_t *low_bytes = predicted.ptrw();
-	uint8_t *high_bytes = low_bytes + sample_count;
-	for (int64_t index = 0; index < sample_count; ++index) {
-		const uint16_t current = uint16_t(source[index * 2]) |
-				(uint16_t(source[index * 2 + 1]) << 8);
-		uint16_t previous = 0;
-		if (index >= p_width) {
-			const int64_t previous_offset = (index - p_width) * 2;
-			previous = uint16_t(source[previous_offset]) |
-					(uint16_t(source[previous_offset + 1]) << 8);
-		}
-		const int16_t delta = static_cast<int16_t>(uint16_t(current - previous));
-		const uint16_t zigzag = delta >= 0
-				? uint16_t(uint32_t(delta) * 2U)
-				: uint16_t(uint32_t(-int32_t(delta)) * 2U - 1U);
-		low_bytes[index] = uint8_t(zigzag & 0xff);
-		high_bytes[index] = uint8_t((zigzag >> 8) & 0xff);
-	}
+	rgbd_pixels::predict_vertical(p_depth.ptr(),predicted.ptrw(),int(sample_count),p_width);
 
 #ifdef REALSENSE_RGBD_LIBDEFLATE
 	// The compressor is private to each persistent depth worker. Reuse its
@@ -573,6 +556,9 @@ void RealSenseSharedMemoryPointCloud::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_depth_image"), &RealSenseSharedMemoryPointCloud::get_depth_image);
     ClassDB::bind_method(D_METHOD("get_color_image"), &RealSenseSharedMemoryPointCloud::get_color_image);
     ClassDB::bind_method(D_METHOD("get_raw_color_image"), &RealSenseSharedMemoryPointCloud::get_raw_color_image);
+    ClassDB::bind_method(D_METHOD("get_raw_color_size"), &RealSenseSharedMemoryPointCloud::get_raw_color_size);
+    ClassDB::bind_method(D_METHOD("get_direct_realsense_capture_stage_ms"), &RealSenseSharedMemoryPointCloud::get_direct_realsense_capture_stage_ms);
+    ClassDB::bind_method(D_METHOD("get_direct_realsense_sensor_rates"), &RealSenseSharedMemoryPointCloud::get_direct_realsense_sensor_rates);
     ClassDB::bind_method(D_METHOD("get_raw_color_intrinsics"), &RealSenseSharedMemoryPointCloud::get_raw_color_intrinsics);
     ClassDB::bind_method(D_METHOD("get_depth_to_raw_color_extrinsics"), &RealSenseSharedMemoryPointCloud::get_depth_to_raw_color_extrinsics);
     ClassDB::bind_method(
@@ -1644,6 +1630,18 @@ Ref<Image> RealSenseSharedMemoryPointCloud::get_raw_color_image() const {
     return direct_realsense.is_valid() ? direct_realsense->get_raw_color_image() : Ref<Image>();
 }
 
+Vector2i RealSenseSharedMemoryPointCloud::get_raw_color_size() const {
+    return direct_realsense.is_valid() ? direct_realsense->get_raw_color_size() : Vector2i();
+}
+
+Vector4 RealSenseSharedMemoryPointCloud::get_direct_realsense_capture_stage_ms() const {
+    return direct_realsense.is_valid() ? direct_realsense->get_capture_stage_ms() : Vector4();
+}
+
+Vector4 RealSenseSharedMemoryPointCloud::get_direct_realsense_sensor_rates() const {
+    return direct_realsense.is_valid() ? direct_realsense->get_sensor_rates() : Vector4();
+}
+
 Vector4 RealSenseSharedMemoryPointCloud::get_raw_color_intrinsics() const {
     return direct_realsense.is_valid() ? direct_realsense->get_raw_color_intrinsics() : Vector4();
 }
@@ -2019,13 +2017,7 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
     if (native_grid) {
         for (int y=0;y<target_height;++y) {
             const float *row=source_depth+(crop_top+y)*p_job.depth_width+crop_left;
-            for (int x=0;x<target_width;++x) {
-                const float depth=row[x];
-                const uint16_t mm=std::isfinite(depth) && depth>0.0f && depth<=p_job.max_depth
-                    ? uint16_t(std::min(65535.0,std::round(double(depth)*1000.0))) : 0;
-                const int offset=(y*target_width+x)*2;
-                destination[offset]=uint8_t(mm&255);destination[offset+1]=uint8_t(mm>>8);
-            }
+            rgbd_pixels::rf_to_mm(row,destination+y*target_width*2,target_width,p_job.max_depth);
         }
     } else {
     for (int y = 0; y < target_height; ++y) {

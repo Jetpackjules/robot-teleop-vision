@@ -2,7 +2,7 @@
 // Original approach: Andre Muehlenbrock, CGVR, University of Bremen, 2024.
 // Adapted from godot/runtime/point_cloud/blendpcr in this repository.
 // SPDX-License-Identifier: EUPL-1.2
-import { FULLSCREEN_VERTEX_SHADER, RIG_SAMPLING_SHADER, compileGpuProgram, gpuTexture } from "./hybrid_camera_quality.js?v=20261020_native_asyncgl";
+import { FULLSCREEN_VERTEX_SHADER, RIG_SAMPLING_SHADER, compileGpuProgram, gpuTexture } from "./hybrid_camera_quality.js?v=20261020_depth_quality";
 
 const METADATA_FRAGMENT_SHADER = `#version 300 es
 precision highp float;

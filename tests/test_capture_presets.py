@@ -37,6 +37,10 @@ int main() {
  assert((fast.front().color==Mode{960,540,60}));
  assert((quality.front().depth==Mode{1280,720,30}));
  assert((quality.front().color==Mode{1920,1080,30}));
+ auto recommended=ranked_modes(depth,color,30,true,848,480);
+ assert((recommended.front().depth==Mode{848,480,30}));
+ assert((recommended.front().color==Mode{1920,1080,30}));
+ assert((ranked_modes(depth,color,30,true,320,240).front().depth==Mode{1280,720,30}));
  assert(fast.size()==6 && quality.size()==4);
  assert(fast[1].depth.fps==60 && fast[2].depth.fps==30);
  assert((ranked_modes({{640,480,30}},color,60,true).front().color==Mode{1920,1080,30}));
