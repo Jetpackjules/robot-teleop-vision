@@ -430,6 +430,7 @@ void RealSenseDirectFrameSource::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_capture_fps"), &RealSenseDirectFrameSource::get_capture_fps);
     ClassDB::bind_method(D_METHOD("get_capture_stage_ms"), &RealSenseDirectFrameSource::get_capture_stage_ms);
     ClassDB::bind_method(D_METHOD("get_sensor_rates"), &RealSenseDirectFrameSource::get_sensor_rates);
+    ClassDB::bind_method(D_METHOD("get_color_diagnostics"), &RealSenseDirectFrameSource::get_color_diagnostics);
     ClassDB::bind_method(D_METHOD("get_width"), &RealSenseDirectFrameSource::get_width);
     ClassDB::bind_method(D_METHOD("get_height"), &RealSenseDirectFrameSource::get_height);
     ClassDB::bind_method(D_METHOD("get_source_width"), &RealSenseDirectFrameSource::get_source_width);
@@ -777,6 +778,9 @@ void RealSenseDirectFrameSource::clear_frame() {
     capture_fps_window_start = 0.0;
     capture_stage_ms = Vector4();
     sensor_rates = Vector4();
+    color_diagnostics = Dictionary();
+    color_first_frame_sec = color_diagnostics_sec = color_white_balance_restore_sec = 0.0;
+    color_white_balance_checked = color_white_balance_restore_needed = false;
     width = 0;
     height = 0;
     source_width = 0;
@@ -796,6 +800,92 @@ void RealSenseDirectFrameSource::clear_frame() {
 }
 
 #ifdef REALSENSE_DIRECT_ENABLED
+void RealSenseDirectFrameSource::restore_color_auto_white_balance() {
+    if (!color_white_balance_restore_needed || !pipeline_started) return;
+    try {
+        for (auto sensor : pipeline_profile.get_device().query_sensors()) {
+            if (!sensor.supports(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE)) continue;
+            sensor.set_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE, 1.0f);
+            color_white_balance_restore_needed = false;
+            break;
+        }
+    } catch (const rs2::error &e) {
+        UtilityFunctions::push_warning(String("RealSense auto white balance restore failed: ") + e.what());
+    }
+}
+
+void RealSenseDirectFrameSource::update_color_state(const rs2::video_frame &p_frame) {
+    if (!p_frame || p_frame.get_bytes_per_pixel() != 3) return;
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (color_first_frame_sec == 0.0) color_first_frame_sec = now;
+    // D435 can retain bad automatic WB gains when switching sensor modes.
+    // A bare auto off/on does not clear them. Seed the existing temperature
+    // after frames start, allow the ISP to apply it, then resume automatic WB.
+    // Never overwrite a user's manual WB mode, and restore auto on early close.
+    if (!color_white_balance_checked && now - color_first_frame_sec >= 0.25) {
+        color_white_balance_checked = true;
+        try {
+            for (auto sensor : pipeline_profile.get_device().query_sensors()) {
+                if (!sensor.supports(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE)) continue;
+                const bool automatic = p_frame.supports_frame_metadata(RS2_FRAME_METADATA_AUTO_WHITE_BALANCE_TEMPERATURE)
+                    ? p_frame.get_frame_metadata(RS2_FRAME_METADATA_AUTO_WHITE_BALANCE_TEMPERATURE) != 0
+                    : sensor.get_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE) != 0;
+                if (automatic && sensor.supports(RS2_OPTION_WHITE_BALANCE)) {
+                    const float temperature = sensor.get_option(RS2_OPTION_WHITE_BALANCE);
+                    color_white_balance_restore_needed = true;
+                    color_white_balance_restore_sec = now + 1.0;
+                    sensor.set_option(RS2_OPTION_WHITE_BALANCE, temperature);
+                }
+                break;
+            }
+        } catch (const rs2::error &e) {
+            restore_color_auto_white_balance();
+            UtilityFunctions::push_warning(String("RealSense white balance initialization failed: ") + e.what());
+        }
+    }
+    if (color_white_balance_restore_needed && now >= color_white_balance_restore_sec) {
+        restore_color_auto_white_balance();
+        color_white_balance_restore_sec = now + 1.0;
+    }
+    if (now - color_diagnostics_sec < 1.0) return;
+    color_diagnostics_sec = now;
+    Dictionary levels;
+    const auto metadata = [&](const char *key, rs2_frame_metadata_value field) {
+        if (p_frame.supports_frame_metadata(field)) levels[key] = double(p_frame.get_frame_metadata(field));
+    };
+    metadata("auto_exposure", RS2_FRAME_METADATA_AUTO_EXPOSURE);
+    metadata("auto_white_balance", RS2_FRAME_METADATA_AUTO_WHITE_BALANCE_TEMPERATURE);
+    metadata("white_balance_kelvin", RS2_FRAME_METADATA_MANUAL_WHITE_BALANCE);
+    metadata("exposure_control", RS2_FRAME_METADATA_ACTUAL_EXPOSURE);
+    metadata("gain", RS2_FRAME_METADATA_GAIN_LEVEL);
+    // Encoded-image brightness only: exposure, gain, framing and lighting all
+    // affect it. Sampling the original BGR avoids depth holes or fused colors.
+    const auto *pixels = static_cast<const uint8_t *>(p_frame.get_data());
+    int histogram[256] = {}, count = 0, dark = 0;
+    double sums[3] = {}, luma_sum = 0;
+    for (int y = 0; y < p_frame.get_height(); y += std::max(1, p_frame.get_height() / 36)) {
+        const uint8_t *row = pixels + y * p_frame.get_stride_in_bytes();
+        for (int x = 0; x < p_frame.get_width(); x += std::max(1, p_frame.get_width() / 64)) {
+            const uint8_t *bgr = row + x * 3;
+            const int luma = (54 * int(bgr[2]) + 183 * int(bgr[1]) + 19 * int(bgr[0])) / 256;
+            for (int c = 0; c < 3; ++c) sums[c] += bgr[2-c];
+            luma_sum += luma; ++histogram[luma]; ++count;
+            if (luma < 16) ++dark;
+        }
+    }
+    if (count > 0) {
+        int p95 = 0, cumulative = 0;
+        while (p95 < 255 && (cumulative += histogram[p95]) < count * .95) ++p95;
+        levels["mean_luma"] = luma_sum / count;
+        levels["p95_luma"] = p95;
+        levels["dark_percent"] = dark * 100.0 / count;
+        levels["green_ratio"] = sums[1] / std::max(1.0, (sums[0] + sums[2]) * .5);
+    }
+    levels["white_balance_state"] = color_white_balance_restore_needed ? "warming up" : "ready";
+    levels["sample_unix_ms"] = std::chrono::duration<double, std::milli>(std::chrono::system_clock::now().time_since_epoch()).count();
+    color_diagnostics = levels;
+}
+
 void RealSenseDirectFrameSource::apply_sensor_options() {
     if (!pipeline_started) {
         projector_status = "projector=pending";
@@ -1151,6 +1241,7 @@ bool RealSenseDirectFrameSource::open() {
 void RealSenseDirectFrameSource::close() {
     clear_raw_color();
     if (pipeline_started) {
+        restore_color_auto_white_balance();
         try {
             pipeline.stop();
         } catch (...) {
@@ -1193,6 +1284,7 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
             depth_to_raw_extrinsics = raw_depth_profile.get_extrinsics_to(raw_color_profile);
         }
         rs2::video_frame raw_color_frame(raw_color_frame_raw);
+        if (color_output_enabled) update_color_state(raw_color_frame);
         const auto metadata=[](const rs2::frame &frame,rs2_frame_metadata_value field) {
             return frame && frame.supports_frame_metadata(field) ? double(frame.get_frame_metadata(field)) : 0.0;
         };
@@ -2072,6 +2164,7 @@ uint64_t RealSenseDirectFrameSource::get_frame_id() const { return frame_id; }
 double RealSenseDirectFrameSource::get_capture_fps() const { return capture_fps; }
 Vector4 RealSenseDirectFrameSource::get_capture_stage_ms() const { return capture_stage_ms; }
 Vector4 RealSenseDirectFrameSource::get_sensor_rates() const { return sensor_rates; }
+Dictionary RealSenseDirectFrameSource::get_color_diagnostics() const { return color_diagnostics; }
 int RealSenseDirectFrameSource::get_width() const { return width; }
 int RealSenseDirectFrameSource::get_height() const { return height; }
 int RealSenseDirectFrameSource::get_source_width() const { return source_width; }

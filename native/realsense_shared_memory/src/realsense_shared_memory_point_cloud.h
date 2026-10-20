@@ -128,6 +128,7 @@ public:
     double get_direct_realsense_capture_fps() const;
     godot::Vector4 get_direct_realsense_capture_stage_ms() const;
     godot::Vector4 get_direct_realsense_sensor_rates() const;
+    godot::Dictionary get_color_diagnostics() const;
     bool is_connected() const;
     double get_render_fps() const;
     double get_display_frame_age_ms() const;

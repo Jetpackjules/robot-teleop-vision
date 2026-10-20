@@ -72,6 +72,7 @@ public:
     double get_capture_fps() const;
     godot::Vector4 get_capture_stage_ms() const;
     godot::Vector4 get_sensor_rates() const;
+    godot::Dictionary get_color_diagnostics() const;
     int get_width() const;
     int get_height() const;
     int get_source_width() const;
@@ -130,6 +131,12 @@ private:
     double capture_fps_window_start = 0.0;
     godot::Vector4 capture_stage_ms;
     godot::Vector4 sensor_rates;
+    godot::Dictionary color_diagnostics;
+    double color_first_frame_sec = 0.0;
+    double color_diagnostics_sec = 0.0;
+    double color_white_balance_restore_sec = 0.0;
+    bool color_white_balance_checked = false;
+    bool color_white_balance_restore_needed = false;
     int width = 0;
     int height = 0;
     int source_width = 0;
@@ -167,6 +174,8 @@ private:
 #ifdef REALSENSE_DIRECT_ENABLED
     bool opened = false;
     bool pipeline_started = false;
+    void update_color_state(const rs2::video_frame &p_frame);
+    void restore_color_auto_white_balance();
     float depth_scale = 0.001f;
     bool fast_foundation_loaded = false;
     int fast_foundation_input_width = 0;

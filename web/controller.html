@@ -274,7 +274,7 @@
     }
   </style>
   <script type="module" src="./godot_webcam_tracker_bridge.js?v=20260803_settings_cleanup_v1"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261020_color_coverage"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261020_color_recovery"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -388,6 +388,12 @@
         </section>
 
         <section class="advanced-section wide">
+          <h3>Camera image levels</h3>
+          <div id="camera-image-levels" class="network-stats">Camera levels not yet available.</div>
+          <p class="helper-text">Measured from original RGB, before mesh blending. Exposure, gain and framing affect brightness; these values are not room illuminance in lux.</p>
+        </section>
+
+        <section class="advanced-section wide">
           <h3>Diagnostics</h3>
           <div id="network-stats" class="network-stats">Network stats unavailable</div>
           <div class="latency-panel">
@@ -408,6 +414,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20261020_color_coverage"></script>
+  <script type="module" src="./controller_hybrid.js?v=20261020_color_recovery"></script>
 </body>
 </html>

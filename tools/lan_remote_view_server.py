@@ -19,6 +19,8 @@ import threading
 import time
 import uuid
 import zlib
+import select
+import math
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -2349,7 +2351,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         self.serve_file(rel)
 
     def serve_camera_list(self) -> None:
-        """Expose only the camera identities from the trusted capture process."""
+        """Expose camera identities and bounded image levels from capture."""
         connection = http.client.HTTPConnection(self.server.stream_host, self.server.capture_port, timeout=5)
         try:
             connection.request("GET", "/cameras")
@@ -2361,8 +2363,19 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             cameras = data.get("cameras", [])
             if not isinstance(cameras, list) or len(cameras) > 64:
                 raise ValueError("Invalid camera list")
-            self.serve_json({"cameras": [{key: str(camera.get(key, ""))[:256]
-                for key in ("id", "name", "model")} for camera in cameras]})
+            public = []
+            for camera in cameras:
+                entry = {key: str(camera.get(key, ""))[:256] for key in ("id", "name", "model")}
+                levels = camera.get("image_levels")
+                if isinstance(levels, dict):
+                    entry["image_levels"] = {key: value for key, value in levels.items()
+                        if key in {"mean_luma", "p95_luma", "dark_percent", "green_ratio", "auto_exposure",
+                            "auto_white_balance", "white_balance_kelvin", "exposure_control", "gain", "sample_unix_ms"}
+                        and type(value) in (int, float) and math.isfinite(value)}
+                    if levels.get("white_balance_state") in ("warming up", "ready"):
+                        entry["image_levels"]["white_balance_state"] = levels["white_balance_state"]
+                public.append(entry)
+            self.serve_json({"cameras": public})
         except (OSError, ValueError, TypeError, AttributeError):
             self.send_error(503, "Camera list not ready")
         finally:
@@ -3393,6 +3406,8 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         newest = None
         sequence = 0
         error = None
+        peer_thread = None
+        send_lock = threading.Lock()
 
         def drain():
             nonlocal newest, sequence, error
@@ -3424,21 +3439,23 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 f"http://{self.server.stream_host}:{self.server.capture_port}/camera-rgb-stream?{urlencode(options)}")
             self.connection.settimeout(5.0)
             worker = threading.Thread(target=drain, daemon=True)
+            peer_thread = self.watch_stream_peer(stop, [condition], send_lock)
             worker.start()
             sent = 0
             while not stop.is_set():
                 with condition:
-                    condition.wait_for(lambda: sequence != sent or error is not None, timeout=2.0)
-                    if error is not None:
+                    condition.wait_for(lambda: sequence != sent or error is not None or stop.is_set(), timeout=2.0)
+                    if error is not None or stop.is_set():
                         break
                     if sequence == sent:
                         packet = None
                     else:
                         packet, sent = newest, sequence
-                if packet is None:
-                    self.send_ws_frame(b"", 0x9)
-                else:
-                    self.send_ws_frame(packet, 0x2)
+                with send_lock:
+                    if packet is None:
+                        self.send_ws_frame(b"", 0x9)
+                    else:
+                        self.send_ws_frame(packet, 0x2)
         except (ConnectionError, OSError, ValueError):
             pass
         finally:
@@ -3447,7 +3464,39 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 reader.close()
             if worker is not None:
                 worker.join(timeout=1.0)
+            if peer_thread is not None:
+                peer_thread.join(timeout=1.0)
             self.server.rgbd_http_slots.release()
+
+    def watch_stream_peer(self, stop: threading.Event, conditions: list, send_lock) -> threading.Thread:
+        """Release capture readers promptly when the browser closes a stream.
+
+        Sending frames alone never consumes the peer's close/pong messages.
+        In particular, a mode switch during a capture pause could otherwise
+        leave obsolete readers occupying all four native stream slots.
+        """
+        def monitor():
+            try:
+                while not stop.is_set():
+                    buffered = getattr(self.connection, "pending", lambda: 0)()
+                    if not buffered and not select.select([self.connection], [], [], .25)[0]:
+                        continue
+                    frame = self.read_ws_frame()
+                    if frame is None or frame[0] == 0x8:
+                        break
+                    if frame[0] == 0x9:
+                        with send_lock:
+                            self.send_ws_frame(frame[1], 0xA)
+            except (ConnectionError, OSError, ValueError):
+                pass
+            finally:
+                stop.set()
+                for condition in conditions:
+                    with condition:
+                        condition.notify_all()
+        thread = threading.Thread(target=monitor, daemon=True)
+        thread.start()
+        return thread
 
     def handle_rgbd_websocket(self) -> None:
         params = parse_qs(urlsplit(self.path).query)
@@ -3512,6 +3561,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         peer = f"{self.client_address[0]}:{self.client_address[1]}"
         self.rgbd_preempted = threading.Event()
         self.rgbd_send_lock = threading.Lock()
+        peer_thread = None
 
         def drain_latest_packet() -> None:
             nonlocal newest_raw_packet, newest_raw_sequence, reader_error
@@ -3605,6 +3655,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             reader = MultipartRawFrameReader(source_url)
             reader_thread = threading.Thread(target=drain_latest_packet, daemon=True)
             encoder_thread = threading.Thread(target=encode_latest_packet, daemon=True)
+            peer_thread = self.watch_stream_peer(reader_stop, [newest_raw_lock, newest_lock], self.rgbd_send_lock)
             reader_thread.start()
             encoder_thread.start()
             print(
@@ -3621,6 +3672,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     newest_lock.wait_for(
                         lambda: (
                             self.rgbd_preempted.is_set()
+                            or reader_stop.is_set()
                             or
                             pending_keyframe is not None
                             or newest_sequence != sent_sequence
@@ -3630,6 +3682,8 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     )
                     if self.rgbd_preempted.is_set():
                         raise ConnectionError("superseded by newer browser")
+                    if reader_stop.is_set():
+                        break
                     if reader_error is not None:
                         raise reader_error
                     if pending_keyframe is not None:
@@ -3667,6 +3721,8 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 reader_thread.join(timeout=1.0)
             if encoder_thread is not None:
                 encoder_thread.join(timeout=1.0)
+            if peer_thread is not None:
+                peer_thread.join(timeout=1.0)
             if temporal_encoder is not None:
                 temporal_encoder.close()
             self.server.release_rgbd_client(client_id, self)
@@ -4566,6 +4622,12 @@ class MultipartRawFrameReader:
 
     def close(self) -> None:
         if self.sock is not None:
+            try:
+                # close() alone leaves another thread blocked in recv() on
+                # Linux, retaining a native capture slot until its timeout.
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 self.sock.close()
             except Exception:

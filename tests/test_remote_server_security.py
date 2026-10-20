@@ -161,6 +161,9 @@ def test_original_rgb_websocket_relays_latest_frame_from_capture_port(monkeypatc
     handler.path="/camera-rgb-stream?w=99999&q=101&camera=1234&url=https://untrusted.example"
     handler.accept_websocket=lambda: True
     handler.connection=SimpleNamespace(settimeout=lambda _:None)
+    # This test isolates packet forwarding; real peer close handling is
+    # exercised with sockets in test_camera_stream_recovery.py.
+    handler.watch_stream_peer=lambda *_args:None
     packets=[]
     def send(payload,opcode):
         packets.append((payload,opcode))

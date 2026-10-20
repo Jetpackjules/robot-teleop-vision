@@ -16,6 +16,7 @@ export class CameraRgbViewer {
     this.socket = null;
     this.pending = null;
     this.decoding = false;
+    this.watchdogTimer = 0;
   }
 
   start() {
@@ -43,6 +44,8 @@ export class CameraRgbViewer {
   }
 
   closeSocket() {
+    clearTimeout(this.watchdogTimer);
+    this.watchdogTimer = 0;
     if (!this.socket) return;
     this.socket.onmessage = this.socket.onclose = this.socket.onerror = null;
     this.socket.close();
@@ -61,13 +64,37 @@ export class CameraRgbViewer {
 
   connect(generation) {
     if (!this.running || generation !== this.generation || document.hidden) return;
-    if (typeof WebSocket === "undefined") { this.poll(generation); this.poll(generation); return; }
+    clearTimeout(this.retryTimer);
+    this.retryTimer = 0;
+    this.closeSocket();
+    if (typeof WebSocket === "undefined") {
+      if (this.pollingGeneration === generation) return;
+      this.pollingGeneration = generation;
+      this.poll(generation); this.poll(generation); return;
+    }
     const query = new URLSearchParams({ w: String(this.options.width || 3840), q: String(this.options.quality || 95), camera: this.options.camera || '' });
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${scheme}://${location.host}/camera-rgb-stream?${query}`);
     this.socket = socket;
     socket.binaryType = "arraybuffer";
     this.stats.transport = "Original RGB WebSocket";
+    const started = performance.now();
+    const reconnect = () => {
+      if (this.socket !== socket || !this.running || generation !== this.generation) return;
+      this.closeSocket();
+      this.stats.connected = false;
+      this.stats.status = "Original RGB reconnecting";
+      clearTimeout(this.retryTimer);
+      this.retryTimer = setTimeout(() => this.connect(generation), 500);
+    };
+    const watch = () => {
+      if (this.socket !== socket || !this.running || generation !== this.generation) return;
+      const hasFrame = this.lastPacketMs >= started && this.lastPacketMs > 0;
+      const age = performance.now() - (hasFrame ? this.lastPacketMs : started);
+      if (!document.hidden && age > (hasFrame ? 8000 : 20000)) { reconnect(); return; }
+      this.watchdogTimer = setTimeout(watch, 1000);
+    };
+    this.watchdogTimer = setTimeout(watch, 1000);
     socket.onmessage = event => {
       if (this.socket !== socket || !this.running || generation !== this.generation || document.hidden) return;
       if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 5) return;
@@ -80,13 +107,8 @@ export class CameraRgbViewer {
         this.drain(generation);
       } catch (_) { this.stats.renderWarning = "Invalid original RGB packet"; }
     };
-    socket.onerror = () => { this.stats.status = "Original RGB reconnecting"; };
-    socket.onclose = () => {
-      if (this.socket !== socket || !this.running || generation !== this.generation) return;
-      this.socket = null;
-      this.stats.connected = false;
-      this.retryTimer = setTimeout(() => this.connect(generation), 500);
-    };
+    socket.onerror = reconnect;
+    socket.onclose = reconnect;
   }
 
   async drain(generation) {

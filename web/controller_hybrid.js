@@ -389,7 +389,7 @@
         if (!response.ok) return;
         const { cameras } = await response.json();
         if (!Array.isArray(cameras)) return;
-        const signature = JSON.stringify(cameras);
+        const signature = JSON.stringify(cameras.map(({id,name,model}) => ({id,name,model})));
         if (signature !== rgbCameraListSignature) {
           rgbCameraListSignature = signature;
           rgbCameraSelect.replaceChildren(...cameras.map(camera => new Option(
@@ -399,6 +399,17 @@
           window.setGodotHybridRgbCamera?.(selectedRgbCamera);
         }
         rgbCameraListUpdated = Date.now();
+        const levelsDisplay = document.getElementById('camera-image-levels');
+        if (levelsDisplay) levelsDisplay.textContent = cameras.map(camera => {
+          const name = `${camera.name || camera.model || 'Camera'} · ${camera.id.slice(-4)}`;
+          const levels = camera.image_levels;
+          if (!levels || !Number.isFinite(levels.mean_luma)) return `${name}: image levels unavailable`;
+          const age = Date.now() - levels.sample_unix_ms;
+          const wb = levels.white_balance_state === 'warming up' ? 'warming up' :
+            levels.auto_white_balance === 1 ? 'auto' : levels.auto_white_balance === 0 ? 'manual' : 'unavailable';
+          return `${name}${age > 10000 ? ' (stale)' : ''}\n` +
+            `Brightness ${Math.round(levels.mean_luma / 255 * 100)}% | bright areas ${Math.round(levels.p95_luma / 255 * 100)}% | dark pixels ${Math.round(levels.dark_percent)}% | white balance ${wb}`;
+        }).join('\n\n') || 'No cameras available.';
         rgbCameraControl.hidden = displayModeSelect.value !== 'rgb_camera' || cameras.length < 2;
       } catch (_) { /* Keep the last usable camera list during reconnection. */ }
       finally {clearTimeout(timeout);rgbCameraListLoading = false;}
@@ -1137,6 +1148,7 @@
     });
     document.getElementById("open-advanced").addEventListener("click", () => {
       advancedSetup.hidden = false;
+      refreshRgbCameras();
       document.getElementById("close-advanced").focus();
     });
     document.getElementById("close-advanced").addEventListener("click", () => {
@@ -1168,7 +1180,7 @@
     startButton.addEventListener("click", startController);
 
     setInterval(() => {
-      if (displayModeSelect.value === 'rgb_camera') refreshRgbCameras();
+      if (displayModeSelect.value === 'rgb_camera' || !advancedSetup.hidden) refreshRgbCameras();
       collectStats().catch(() => {});
       updateStatus();
     }, 500);

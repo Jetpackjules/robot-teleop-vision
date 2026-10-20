@@ -282,7 +282,10 @@ func _handle_http_request(client: Dictionary) -> void:
 		for renderer in _find_rgbd_renderers():
 			var serial := str(renderer.call("get_direct_realsense_serial"))
 			var camera_name := str(renderer.get_parent().name) if renderer.get_parent() != null else str(renderer.name)
-			cameras.append({"id":serial,"name":camera_name.replace(serial, "").strip_edges(),"model":_renderer_model(renderer)})
+			var camera := {"id":serial,"name":camera_name.replace(serial, "").strip_edges(),"model":_renderer_model(renderer)}
+			if renderer.has_method("get_color_diagnostics"):
+				camera["image_levels"] = renderer.call("get_color_diagnostics")
+			cameras.append(camera)
 		_send_http_response(peer,"200 OK","application/json",JSON.stringify({"cameras":cameras}).to_utf8_buffer())
 		client["headers_sent"] = true
 		client["snapshot_sent"] = true
@@ -399,6 +402,11 @@ func _pump_camera_rgb_encoder() -> bool:
 		if not requests.has(serial):
 			continue
 		var options: Dictionary = requests[serial]
+		var profile := str(renderer.call("get_direct_realsense_stream_profile"))
+		var previous: Dictionary = _camera_rgb_stream_frames.get(serial, {})
+		if previous.get("profile", "") != profile:
+			_camera_rgb_stream_frames.erase(serial)
+			previous = {}
 		var frame: Dictionary
 		if renderer.has_method("request_camera_rgb_encode"):
 			renderer.call("request_camera_rgb_encode",options.w,options.q)
@@ -411,8 +419,14 @@ func _pump_camera_rgb_encoder() -> bool:
 				"height":int(fallback.headers["X-Frame-Height"]),"sequence":int(fallback.headers["X-Frame-Sequence"]),
 				"capture_unix_ms":float(fallback.headers["X-Capture-Unix-Ms"])}
 		if frame.is_empty(): continue
-		var previous: Dictionary = _camera_rgb_stream_frames.get(serial, {})
+		if renderer.has_method("get_raw_color_size"):
+			var size: Vector2i = renderer.call("get_raw_color_size")
+			var expected_width := mini(size.x, int(options.w))
+			var expected_height := roundi(float(size.y) * expected_width / maxf(1, size.x))
+			if int(frame.width) != expected_width or int(frame.height) != expected_height: continue
+		if Time.get_unix_time_from_system() * 1000.0 - float(frame.capture_unix_ms) > 2000.0: continue
 		if frame.get("sequence",-1)==previous.get("sequence",-2): continue
+		frame["profile"] = profile
 		frame["headers"] = {"X-Camera-Id":serial,"X-Frame-Width":str(frame.width),
 			"X-Frame-Height":str(frame.height),"X-Frame-Sequence":str(frame.sequence),
 			"X-Capture-Unix-Ms":str(roundi(frame.capture_unix_ms)),
@@ -918,6 +932,8 @@ func _write_stream_frame_to_clients() -> void:
 		var rgb_options: Dictionary = client.get("camera_rgb_options", {})
 		var rgb_frame: Dictionary = _camera_rgb_stream_frames.get(str(rgb_options.get("camera", "")), {})
 		if is_camera_rgb and (int(client.get("last_camera_rgb_frame",-1)) == int(rgb_frame.get("counter",-2)) or rgb_frame.is_empty()):
+			continue
+		if is_camera_rgb and Time.get_unix_time_from_system() * 1000.0 - float(rgb_frame.get("capture_unix_ms", 0)) > 2000.0:
 			continue
 		if is_rgbd and int(client.get("last_rgbd_frame", -1)) == _rgbd_frame_counter:
 			continue

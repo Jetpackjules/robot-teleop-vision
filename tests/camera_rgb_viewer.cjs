@@ -67,5 +67,25 @@ const response=id=>({ok:true,headers:{get:name=>({'Content-Type':'image/jpeg','X
   sockets.at(-1).onmessage(packet(5,'ownerB'));await settle();
   assert.equal(decodes.length,decodeCount,'mismatched camera frames are rejected before decoding');
   selected.stop();
+  let now=100,timerId=0;
+  const timers=new Map(),quietSockets=[];
+  const quietContext=vm.createContext({performance:{now:()=>now},AbortController,URLSearchParams,
+    setTimeout:(fn,ms)=>{const id=++timerId;timers.set(id,{fn,at:now+ms});return id;},
+    clearTimeout:id=>timers.delete(id),Blob,TextDecoder,ArrayBuffer,Uint8Array,DataView,
+    location:{protocol:'https:',host:'viewer.example'},document:context.document,
+    WebSocket:class {constructor(){quietSockets.push(this);}close(){this.closed=true;}}});
+  vm.runInContext(source+'\nthis.Viewer=CameraRgbViewer;',quietContext);
+  const quiet=new quietContext.Viewer(canvas);quiet.start();
+  const tick=ms=>{now+=ms;for(const [id,t] of [...timers])if(t.at<=now){timers.delete(id);t.fn();}};
+  tick(21000);assert.ok(quietSockets[0].closed,'socket with no first frame must recover automatically');
+  tick(500);assert.equal(quietSockets.length,2,'watchdog retries without reloading the page');
+  quiet.lastPacketMs=now;tick(1000);
+  assert.equal(quietSockets.length,2,'a fresh frame keeps the socket');
+  tick(8001);assert.ok(quietSockets[1].closed,'a previously live but silent socket must also recover');
+  quiet.visibilityHandler();
+  const countAfterVisible=quietSockets.length;
+  tick(600);
+  assert.equal(quietSockets.length,countAfterVisible,'visibility recovery cancels the already scheduled retry');
+  quiet.stop();assert.equal(timers.size,0,'mode exit cancels watchdog and reconnect timers');
   console.log('Original RGB viewer: ordering, native size, FPS, cancellation and disposal passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});
