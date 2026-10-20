@@ -99,7 +99,9 @@ render FPS remains separate from both packet rates.
 Normal Quality passes the native JPEG and losslessly compressed depth through
 the gateway unchanged. Rebuilding exact temporal depth tiles cost about 69 ms
 per packet in this lab run, with no size saving on noisy live depth. Persistent
-reference compression remains opt-in, and the Low latency codec is unchanged.
+reference compression is disabled in the web viewer, including for old saved
+settings that enabled it. Its checkbox was removed; the backend codec remains
+available for controlled bandwidth experiments. The Low latency codec is unchanged.
 
 Up to three decoder workers run depth inflation and JPEG decoding in parallel.
 Native stateless frames transfer their buffers without cloning them; each

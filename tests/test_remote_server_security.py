@@ -649,6 +649,4 @@ def test_controller_keeps_daily_controls_separate_from_advanced_setup():
     assert 'id="inspect-recenter"' not in page
     assert 'id="inspect-enabled"' not in page
     assert 'id="head-tracking-options"' in page
-    assert page.index('id="persistent-temporal-reference-enabled"') > page.index(
-        "<h3>Troubleshooting</h3>"
-    )
+    assert 'id="persistent-temporal-reference-enabled"' not in page

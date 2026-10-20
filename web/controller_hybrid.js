@@ -92,7 +92,8 @@
         max_distance: 3.0,
         fov: Number(document.getElementById("inspect-fov").value),
         white_background_enabled: document.getElementById("white-background-enabled").checked,
-        persistent_temporal_reference_enabled: document.getElementById("persistent-temporal-reference-enabled").checked,
+        // Retire the old live-view default, including previously saved true values.
+        persistent_temporal_reference_enabled: false,
         full_rgb_frame_updates_enabled: document.getElementById("full-rgb-frame-updates-enabled").checked,
         camera_locations_enabled: document.getElementById("camera-locations-enabled").checked,
         head_tracking_enabled: document.getElementById("head-tracking-enabled").checked,
@@ -162,7 +163,6 @@
       document.getElementById("white-background-enabled").checked = saved.white_background_enabled === true;
       document.getElementById("head-height").value = String(saved.focus_vertical_offset ?? 0.35);
       document.getElementById("orbit-elevation").value = String(saved.orbit_pitch_offset ?? 0);
-      document.getElementById("persistent-temporal-reference-enabled").checked = saved.persistent_temporal_reference_enabled !== false;
       document.getElementById("full-rgb-frame-updates-enabled").checked = saved.full_rgb_frame_updates_enabled === true;
       document.getElementById("head-tracking-enabled").checked = saved.head_tracking_enabled !== false;
       document.getElementById("camera-locations-enabled").checked = saved.camera_locations_enabled === true;
@@ -592,9 +592,6 @@
         // This is a ceiling, not an upscale: the source retains its native
         // depth grid. Quality also bypasses lossy temporal depth cleanup.
         : { width: 3840, fps: 60, contextFps: 60, detailFps: 60, quality: 95, splatFill: 1.32, exactDepth: true };
-      const persistentReference = document.getElementById(
-        "persistent-temporal-reference-enabled"
-      ).checked;
       const fullRgbFrames = document.getElementById(
         "full-rgb-frame-updates-enabled"
       ).checked;
@@ -612,24 +609,26 @@
       // exercise the same Cloudflare path used when direct peer connectivity
       // is unavailable on a remote network.
       const peerPromise = startHybridControlPeer(
-        forceRelayedRgbd || persistentReference ? null : hybridPreset
+        forceRelayedRgbd ? null : hybridPreset
       );
       await Promise.all([
         window.startGodotHybridRenderer({
           canvas: hybridCanvas,
           rgbDisplayCanvas: rgbCameraCanvas,
           ...hybridPreset,
-          dataChannel: forceRelayedRgbd || persistentReference ? null : rgbdDataChannel,
+          dataChannel: forceRelayedRgbd ? null : rgbdDataChannel,
           // Prefer direct unordered WebRTC when peer connectivity is possible.
           // A continuous latest-only WebSocket is the free public fallback;
           // HTTPS polling remains available as an explicit diagnostic mode.
           transport: forceHttpsRgbd ? "https" : "websocket",
-          persistentReference,
+          // Persistent recompression is experimental and too slow for live
+          // capture. Old saved settings must not silently re-enable it.
+          persistentReference: false,
           // Native Quality depth is already losslessly predicted/compressed.
           // Rebuilding exact tile deltas in the gateway costs a full decode +
           // encode per packet without shrinking noisy live depth. Keep that
-          // work opt-in for persistent references, or the latency profile.
-          temporalDepth: persistentReference || !hybridPreset.exactDepth,
+          // work only in the latency profile's smaller stream.
+          temporalDepth: !hybridPreset.exactDepth,
           temporalColor: !fullRgbFrames,
           onFocus: () => sendViewSettings({ inspect_enabled: true }),
         }),
@@ -1059,11 +1058,6 @@
       applyDisplayMode();
       sendViewSettings();
       displayModeSelect.blur();
-    });
-    document.getElementById("persistent-temporal-reference-enabled").addEventListener("change", (event) => {
-      sendViewSettings();
-      if (userStarted) startSelectedViewport();
-      event.currentTarget.blur();
     });
     document.getElementById("full-rgb-frame-updates-enabled").addEventListener("change", (event) => {
       sendViewSettings();

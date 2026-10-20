@@ -102,4 +102,45 @@ const changedReference = [packet('A', 1, true, 1), packet('A', 1, false, 2),
 trimIndependentFrameQueue(changedReference, 4);
 check(changedReference[0].sequence === 1,
   'a retained delta before a reference change keeps its own older keyframe');
-console.log(JSON.stringify({navigation_and_queue_checks: checks}));
+// Restore real legacy view settings and run real controller startup with a
+// stub renderer: saved compression must not switch live streams off the fast
+// path, while unrelated viewing preferences and Low latency remain intact.
+(async () => {
+  const controller = fs.readFileSync(path.join(__dirname, '../web/controller_hybrid.js'), 'utf8');
+  const section = (start, end) => controller.slice(controller.indexOf(start), controller.indexOf(end));
+  const controls = new Map();
+  const control = id => {
+    if (id === 'persistent-temporal-reference-enabled') return null;
+    if (!controls.has(id)) controls.set(id,{value:'1',checked:false});
+    return controls.get(id);
+  };
+  let options;
+  const policy = vm.createContext({URLSearchParams, document:{getElementById:control}, robotModule:{},
+    viewSettingsVersion:14,displayModes:['point_cloud','independent_mesh','blendpcr','rgb_camera'],
+    defaultDisplayMode:'independent_mesh',displayModeSelect:control('display-mode'),
+    streamPresetSelect:control('stream-preset'),localSavedViewSettings:()=>null,
+    updateHeadTrackingOptions(){},updateViewLabels(){},stopViewport(){},showHybrid(){},updateStatus(){},
+    currentPreset:()=>({label:'Quality'}),startHybridControlPeer:async()=>true,
+    hybridCanvas:{},rgbCameraCanvas:{},rgbdDataChannel:{},startupNavigation:null,startupNavigationPending:false,
+    applyDisplayMode(){},window:{location:{search:'?rgbd_transport=websocket'},
+      startGodotHybridRenderer:async value=>{options=value;}}});
+  vm.runInContext(section('function viewSettingsPayload(', 'function updateViewLabels(')
+    +section('function restoreViewSettings(', 'async function fetchSiteSettings(')
+    +section('async function startHybridViewport(', 'function startSelectedViewport(')
+    +section('function applyStreamQualityPolicy(', 'streamPresetSelect.addEventListener('),policy);
+  for(const legacy of [undefined,false,true]) {
+    policy.saved={settings_version:14,persistent_temporal_reference_enabled:legacy,
+      fov:71,orbit_distance:.83,display_mode:'blendpcr'};
+    vm.runInContext('restoreViewSettings(saved);payload=viewSettingsPayload();',policy);
+    check(policy.payload.persistent_temporal_reference_enabled===false,'old or absent saved compression stays off');
+    check(policy.payload.fov===71&&policy.payload.orbit_distance===.83,'unrelated saved camera preferences are preserved');
+    for(const mode of ['quality','latency']) {
+      control('stream-preset').value=mode;
+      await vm.runInContext('startHybridViewport()',policy);
+      check(options.persistentReference===false,'live startup never requests persistent compression');
+      check(options.temporalDepth===(mode==='latency'),'Quality uses native depth while Low latency keeps its existing codec');
+      if(mode==='quality')check(options.exactDepth&&options.quality===95&&options.temporalColor===false,'native Quality remains exact with full RGB');
+    }
+  }
+  console.log(JSON.stringify({navigation_and_queue_checks:checks}));
+})().catch(error=>{console.error(error);process.exitCode=1;});
