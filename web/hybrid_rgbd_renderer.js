@@ -131,6 +131,7 @@ const state = {
     status: "idle",
     connected: false,
     sourceFps: 0,
+    receiveFps: 0,
     bitrateKbps: 0,
     received: 0,
     decoded: 0,
@@ -142,6 +143,9 @@ const state = {
     captureAgeMs: -1,
     captureUnixMs: 0,
     decodeMs: 0,
+    codecMs: 0,
+    uploadMs: 0,
+    queueMs: 0,
     renderFps: 0,
     renderFrames: 0,
     cameraFrames: {},
@@ -153,7 +157,7 @@ const state = {
     robotLoadError: "",
     transport: "--",
   },
-  statsWindow: { timestamp: performance.now(), decoded: 0, bytes: 0, renderFrames: 0, cameraFrames: {} },
+  statsWindow: { timestamp: performance.now(), received: 0, decoded: 0, bytes: 0, renderFrames: 0, cameraFrames: {} },
 };
 
 const VERTEX_SHADER = `#version 300 es
@@ -1887,6 +1891,7 @@ async function decodeNewestPackets() {
       metadata.temporal_reference_mode === "persistent_v1"
     );
     const decodeStarted = performance.now();
+    const queueElapsed = Math.max(0, decodeStarted - (frame.receivedAtMs ?? decodeStarted));
     const robot = metadata.robot;
     if (robot && robot.available !== false && robot.links && typeof robot.links === "object") {
       state.robotTransforms = robot.links;
@@ -1897,13 +1902,19 @@ async function decodeNewestPackets() {
     }
     state.stats.robotTransforms = Object.keys(state.robotTransforms).length;
     const decoded = await Promise.all(payloads.map(decodeCamera));
+    const codecElapsed = performance.now() - decodeStarted;
     if (!state.running) {
       for (const camera of decoded) {
         if (camera.bitmap) camera.bitmap.close();
       }
       return;
     }
+    const uploadStarted = performance.now();
     const updatedCameras = decoded.map(uploadCamera);
+    const uploadElapsed = performance.now() - uploadStarted;
+    for (const [key, value] of [["codecMs", codecElapsed], ["uploadMs", uploadElapsed], ["queueMs", queueElapsed]]) {
+      state.stats[key] = state.stats[key] > 0 ? state.stats[key] * 0.8 + value * 0.2 : value;
+    }
     for (const camera of updatedCameras) {
       const id = String(camera.metadata.id || camera.metadata.model || "camera");
       state.stats.cameraFrames[id] = Number(state.stats.cameraFrames[id] || 0) + 1;
@@ -2301,6 +2312,7 @@ function updateStats() {
   const now = performance.now();
   const elapsed = now - state.statsWindow.timestamp;
   if (elapsed < 500) return;
+  state.stats.receiveFps = ((state.stats.received - state.statsWindow.received) * 1000) / elapsed;
   state.stats.sourceFps = ((state.stats.decoded - state.statsWindow.decoded) * 1000) / elapsed;
   state.stats.renderFps = ((state.stats.renderFrames - state.statsWindow.renderFrames) * 1000) / elapsed;
   state.stats.bitrateKbps = ((state.stats.bytes - state.statsWindow.bytes) * 8) / elapsed;
@@ -2314,6 +2326,7 @@ function updateStats() {
   }
   state.statsWindow = {
     timestamp: now,
+    received: state.stats.received,
     decoded: state.stats.decoded,
     bytes: state.stats.bytes,
     renderFrames: state.stats.renderFrames,
@@ -2435,6 +2448,7 @@ function handleRgbdPacket(arrayBuffer, transport) {
   // Parallel HTTPS requests can complete in small bursts. Preserve complete
   // chronological frames instead of overwriting one while its predecessor is
   // decoding. The hard cap still prevents latency from accumulating.
+  parsed.receivedAtMs = performance.now();
   state.pendingFrameQueue.push(parsed);
   if (
     parsed.metadata.temporal_reference_mode === "persistent_v1"
@@ -2852,6 +2866,11 @@ export async function startGodotHybridRenderer(options = {}) {
     captureUnixMs: 0,
     captureAgeMs: -1,
     decodeMs: 0,
+    codecMs: 0,
+    uploadMs: 0,
+    queueMs: 0,
+    sourceFps: 0,
+    receiveFps: 0,
     decodeErrors: 0,
     renderFrames: 0,
     renderFps: 0,
@@ -2864,7 +2883,7 @@ export async function startGodotHybridRenderer(options = {}) {
     robotLoadError: "",
     transport: "--",
   };
-  state.statsWindow = { timestamp: performance.now(), decoded: 0, bytes: 0, renderFrames: 0, cameraFrames: {} };
+  state.statsWindow = { timestamp: performance.now(), received: 0, decoded: 0, bytes: 0, renderFrames: 0, cameraFrames: {} };
   state.socketOptions = { ...options };
   configureOriginalRgb();
   state.rgbdClientId = String(window.robotTeleopPageId || "").replace(/[^A-Za-z0-9_-]/g, "");
@@ -3098,7 +3117,7 @@ export function getGodotHybridRendererStatus() {
     ? Math.max(0, performance.now() - state.lastPacketMs)
     : -1;
   const stalled = state.stats.connected === true && packetAgeMs > 1500;
-  return { ...state.stats, captureAgeMs, packetAgeMs, stalled };
+  return { ...state.stats, captureAgeMs, packetAgeMs, stalled, queueDepth: state.pendingFrameQueue.length, decodeBusy: state.decoding };
 }
 
 window.startGodotHybridRenderer = startGodotHybridRenderer;

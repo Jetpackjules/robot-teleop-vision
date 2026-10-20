@@ -1007,7 +1007,12 @@
         `Route       ${stats.connection}`,
         ...(activeViewportMode === "hybrid" ? [
           `RGB-D age   ${hybrid.captureAgeMs == null || hybrid.captureAgeMs < 0 ? "--" : `${Math.round(hybrid.captureAgeMs)}ms`} | packet ${hybrid.packetAgeMs == null || hybrid.packetAgeMs < 0 ? "--" : `${Math.round(hybrid.packetAgeMs)}ms`} | cameras ${hybrid.cameras || 0}`,
-          `Decode ${hybrid.decodeMs ? `${hybrid.decodeMs.toFixed(1)}ms` : "--"} | render ${hybrid.renderFps ? `${Math.round(hybrid.renderFps)} fps` : "--"}`,
+          ...(hybrid.displaySource === "original_rgb" ? [] : [
+            `Packets ${Number(hybrid.received || 0)} received / ${Number(hybrid.decoded || 0)} decoded`,
+            `Arrival ${Number(hybrid.receiveFps || 0).toFixed(1)}/s | decoded ${Number(hybrid.sourceFps || 0).toFixed(1)}/s | queue ${Number(hybrid.queueDepth || 0)}${hybrid.decodeBusy ? " + 1 in progress" : ""}`,
+            `Codec ${Number(hybrid.codecMs || 0).toFixed(1)}ms | upload submission ${Number(hybrid.uploadMs || 0).toFixed(1)}ms | queue wait ${Number(hybrid.queueMs || 0).toFixed(1)}ms`,
+          ]),
+          `Decode+upload ${hybrid.decodeMs ? `${hybrid.decodeMs.toFixed(1)}ms` : "--"} | render ${hybrid.renderFps ? `${Math.round(hybrid.renderFps)} fps` : "--"}`,
           ...(hybrid.decodeErrors ? [`Decode errors ${hybrid.decodeErrors} | ${hybrid.status}`] : []),
           `Camera FPS  ${Object.entries(hybrid.cameraFps || {}).map(([id, rate]) => `${id.slice(-4)}:${Math.round(rate)}`).join("  ") || "--"}`,
         ] : []),

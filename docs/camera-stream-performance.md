@@ -77,6 +77,20 @@ preview age, frame CPU time, view CPU time and stream-stage timings. Use these
 alongside Advanced Setup's decode, render and per-camera FPS counters before
 lowering resolution or changing capture settings.
 
+Advanced Setup separates complete RGB-D packet arrivals from completed decodes.
+Its cumulative received/decoded totals can be differenced over the same time
+window. Both rates count packets, which may contain one or several cameras;
+the per-camera counters count decoded camera updates separately. Arrival time
+is measured when JavaScript receives a complete WebSocket message or HTTPS
+packet, rather than at the network interface.
+
+Codec time measures asynchronous JPEG/depth reconstruction; upload submission
+measures the subsequent WebGL texture submission. The previous Decode timing
+included both stages and is now labeled Decode+upload. These are elapsed times,
+including scheduling delays, not isolated CPU/GPU execution benchmarks. Queue
+depth and wait time show whether decoding is accumulating a backlog. Cached
+render FPS remains separate from both packet rates.
+
 ## Measured boundary, 2026-10-20
 
 The three-D435 lab check used a U300 workstation and the authenticated public
