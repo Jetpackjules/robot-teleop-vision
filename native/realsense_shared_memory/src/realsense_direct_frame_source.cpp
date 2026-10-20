@@ -440,6 +440,7 @@ void RealSenseDirectFrameSource::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_raw_color_image"), &RealSenseDirectFrameSource::get_raw_color_image);
     ClassDB::bind_method(D_METHOD("get_raw_color_size"), &RealSenseDirectFrameSource::get_raw_color_size);
     ClassDB::bind_method(D_METHOD("get_raw_color_intrinsics"), &RealSenseDirectFrameSource::get_raw_color_intrinsics);
+    ClassDB::bind_method(D_METHOD("get_raw_color_projection"), &RealSenseDirectFrameSource::get_raw_color_projection);
     ClassDB::bind_method(D_METHOD("get_depth_to_raw_color_extrinsics"), &RealSenseDirectFrameSource::get_depth_to_raw_color_extrinsics);
     ClassDB::bind_method(D_METHOD("get_status"), &RealSenseDirectFrameSource::get_status);
     ClassDB::bind_method(D_METHOD("get_filter_status"), &RealSenseDirectFrameSource::get_filter_status);
@@ -785,6 +786,7 @@ void RealSenseDirectFrameSource::clear_frame() {
     color_image.unref();
     clear_raw_color();
     raw_color_intrinsics = Vector4();
+    raw_color_projection_linear = false;
     depth_to_raw_color_extrinsics.clear();
     filter_status = "filters=off";
     valid_depth_pixels = 0;
@@ -1368,6 +1370,10 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
                 raw_color_image.unref();
             }
             raw_color_intrinsics = Vector4(raw_rs_intrinsics.fx, raw_rs_intrinsics.fy, raw_rs_intrinsics.ppx, raw_rs_intrinsics.ppy);
+            raw_color_projection_linear = true;
+            for (float coefficient : raw_rs_intrinsics.coeffs) {
+                if (coefficient != 0.0f) raw_color_projection_linear = false;
+            }
             depth_to_raw_color_extrinsics.resize(12);
             for (int element = 0; element < 9; ++element) {
                 depth_to_raw_color_extrinsics.set(element, depth_to_raw_extrinsics.rotation[element]);
@@ -2107,6 +2113,16 @@ Vector2i RealSenseDirectFrameSource::get_raw_color_size() const {
     return raw_color_size;
 }
 Vector4 RealSenseDirectFrameSource::get_raw_color_intrinsics() const { return raw_color_intrinsics; }
+Dictionary RealSenseDirectFrameSource::get_raw_color_projection() const {
+    Dictionary result;
+    const Vector2i size = get_raw_color_size();
+    if (!raw_color_projection_linear || size.x <= 1 || depth_to_raw_color_extrinsics.size() != 12) return result;
+    result["model"] = "pinhole";
+    result["size"] = Array::make(size.x, size.y);
+    result["intrinsics"] = Array::make(raw_color_intrinsics.x, raw_color_intrinsics.y, raw_color_intrinsics.z, raw_color_intrinsics.w);
+    result["extrinsics"] = depth_to_raw_color_extrinsics;
+    return result;
+}
 PackedFloat32Array RealSenseDirectFrameSource::get_depth_to_raw_color_extrinsics() const { return depth_to_raw_color_extrinsics; }
 String RealSenseDirectFrameSource::get_status() const { return status; }
 String RealSenseDirectFrameSource::get_filter_status() const { return filter_status; }

@@ -274,7 +274,7 @@
     }
   </style>
   <script type="module" src="./godot_webcam_tracker_bridge.js?v=20260803_settings_cleanup_v1"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261020_depth_quality"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261020_color_coverage"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -296,6 +296,9 @@
               <option value="blendpcr">BlendPCR</option>
               <option value="rgb_camera">RGB camera</option>
             </select>
+          </label>
+          <label id="rgb-camera-control" hidden>Camera
+            <select id="rgb-camera-select" aria-label="RGB camera source"></select>
           </label>
           <label>Stream
             <select id="stream-preset">
@@ -405,6 +408,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20261020_native_modes"></script>
+  <script type="module" src="./controller_hybrid.js?v=20261020_color_coverage"></script>
 </body>
 </html>

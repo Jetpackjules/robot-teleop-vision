@@ -62,8 +62,7 @@ var _tracking_source: Node
 var _async_capture_inflight := 0
 var _async_readback_available := true
 var _camera_rgb_cache: Dictionary = {}
-var _camera_rgb_stream_frame: Dictionary = {}
-var _camera_rgb_stream_options := {"camera":"", "w":3840, "q":95}
+var _camera_rgb_stream_frames: Dictionary = {}
 var _camera_rgb_frame_counter := 0
 var _cpu_profile: Dictionary = {}
 var _renderers_cache: Array[Node] = []
@@ -278,13 +277,27 @@ func _handle_http_request(client: Dictionary) -> void:
 		_send_http_response(peer,"200 OK","application/json",body)
 		client["headers_sent"] = true
 		client["snapshot_sent"] = true
+	elif path == "/cameras":
+		var cameras: Array[Dictionary] = []
+		for renderer in _find_rgbd_renderers():
+			var serial := str(renderer.call("get_direct_realsense_serial"))
+			var camera_name := str(renderer.get_parent().name) if renderer.get_parent() != null else str(renderer.name)
+			cameras.append({"id":serial,"name":camera_name.replace(serial, "").strip_edges(),"model":_renderer_model(renderer)})
+		_send_http_response(peer,"200 OK","application/json",JSON.stringify({"cameras":cameras}).to_utf8_buffer())
+		client["headers_sent"] = true
+		client["snapshot_sent"] = true
 	elif path.get_slice("?", 0) == "/camera-rgb-stream":
+		var options := {"camera":"", "w":3840, "q":95}
 		for pair in path.get_slice("?", 1).split("&", false):
 			var key := pair.get_slice("=", 0)
 			var value := pair.get_slice("=", 1).uri_decode()
-			if key == "camera": _camera_rgb_stream_options[key] = value
-			if key == "w": _camera_rgb_stream_options[key] = clampi(int(value),160,3840)
-			if key == "q": _camera_rgb_stream_options[key] = clampi(int(value),1,100)
+			if key == "camera": options[key] = value
+			if key == "w": options[key] = clampi(int(value),160,3840)
+			if key == "q": options[key] = clampi(int(value),1,100)
+		if str(options.camera).is_empty():
+			var renderers := _find_rgbd_renderers()
+			if not renderers.is_empty(): options.camera = str(renderers[0].call("get_direct_realsense_serial"))
+		client["camera_rgb_options"] = options
 		peer.put_data(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=%s\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n" % BOUNDARY).to_utf8_buffer())
 		client["headers_sent"] = true
 		client["streaming"] = true
@@ -375,31 +388,40 @@ func _apply_rgbd_query(path: String) -> void:
 				hybrid_jpeg_quality = clampi(int(value), 1, 100)
 
 func _pump_camera_rgb_encoder() -> bool:
+	var requests: Dictionary = {}
+	for client in _clients:
+		if client.get("stream_type", "") == "camera_rgb":
+			var options: Dictionary = client.get("camera_rgb_options", {})
+			if not options.is_empty(): requests[options.camera] = options
+	var updated := false
 	for renderer in _find_rgbd_renderers():
 		var serial := str(renderer.call("get_direct_realsense_serial"))
-		if not str(_camera_rgb_stream_options.camera).is_empty() and serial != _camera_rgb_stream_options.camera:
+		if not requests.has(serial):
 			continue
+		var options: Dictionary = requests[serial]
 		var frame: Dictionary
 		if renderer.has_method("request_camera_rgb_encode"):
-			renderer.call("request_camera_rgb_encode",_camera_rgb_stream_options.w,_camera_rgb_stream_options.q)
+			renderer.call("request_camera_rgb_encode",options.w,options.q)
 			frame = renderer.call("take_camera_rgb_encoded_frame")
 		else:
 			# Older native plugins can still use the persistent transport.
-			var fallback := _get_camera_rgb_frame(serial,_camera_rgb_stream_options.w,_camera_rgb_stream_options.q)
-			if fallback.is_empty(): return false
+			var fallback := _get_camera_rgb_frame(serial,options.w,options.q)
+			if fallback.is_empty(): continue
 			frame={"body":fallback.body,"width":int(fallback.headers["X-Frame-Width"]),
 				"height":int(fallback.headers["X-Frame-Height"]),"sequence":int(fallback.headers["X-Frame-Sequence"]),
 				"capture_unix_ms":float(fallback.headers["X-Capture-Unix-Ms"])}
-		if frame.is_empty(): return false
-		if frame.get("sequence",-1)==_camera_rgb_stream_frame.get("sequence",-2): return false
+		if frame.is_empty(): continue
+		var previous: Dictionary = _camera_rgb_stream_frames.get(serial, {})
+		if frame.get("sequence",-1)==previous.get("sequence",-2): continue
 		frame["headers"] = {"X-Camera-Id":serial,"X-Frame-Width":str(frame.width),
 			"X-Frame-Height":str(frame.height),"X-Frame-Sequence":str(frame.sequence),
 			"X-Capture-Unix-Ms":str(roundi(frame.capture_unix_ms)),
 			"X-Capture-Epoch":"%d:%d" % [OS.get_process_id(),renderer.get_instance_id()]}
-		_camera_rgb_stream_frame = frame
 		_camera_rgb_frame_counter += 1
-		return true
-	return false
+		frame["counter"] = _camera_rgb_frame_counter
+		_camera_rgb_stream_frames[serial] = frame
+		updated = true
+	return updated
 
 func _get_camera_rgb_frame(camera_id: String = "", width_limit: int = 3840, quality: int = 95) -> Dictionary:
 	# Original sensor RGB, independent of depth validity, crop and alignment.
@@ -670,6 +692,7 @@ func _publish_encoded_rgbd_frames(completed: Array[Dictionary]) -> bool:
 			"depth_encoding": str(encoded.get("depth_encoding", "u16_mm_deflate")),
 			"encode_ms": float(encoded.get("encode_ms", 0.0)),
 			"requested_fps": _renderer_hybrid_fps(renderer, _find_rgbd_renderers().size()),
+			"color_projection": renderer.call("get_raw_color_projection") if renderer.has_method("get_raw_color_projection") else {},
 		})
 		payloads.append(color_jpeg)
 		payloads.append(compressed_depth)
@@ -718,6 +741,7 @@ func _capture_rgbd_frame() -> bool:
 			"color_length": color_jpeg.size(),
 			"depth_length": compressed_depth.size(),
 			"depth_encoding": "u16_mm_deflate",
+			"color_projection": renderer.call("get_raw_color_projection") if renderer.has_method("get_raw_color_projection") else {},
 		})
 		payloads.append(color_jpeg)
 		payloads.append(compressed_depth)
@@ -841,7 +865,7 @@ func _transform_array(transform: Transform3D) -> Array[float]:
 	]
 
 func _write_stream_frame_to_clients() -> void:
-	if _last_frame_bytes.is_empty() and _last_raw_frame_bytes.is_empty() and _last_rgbd_frame_bytes.is_empty() and _camera_rgb_stream_frame.is_empty():
+	if _last_frame_bytes.is_empty() and _last_raw_frame_bytes.is_empty() and _last_rgbd_frame_bytes.is_empty() and _camera_rgb_stream_frames.is_empty():
 		return
 	var remove_indices: Array[int] = []
 	var encoded_part_header := (
@@ -891,17 +915,19 @@ func _write_stream_frame_to_clients() -> void:
 		var is_raw := stream_type == "raw"
 		var is_rgbd := stream_type == "rgbd"
 		var is_camera_rgb := stream_type == "camera_rgb"
-		if is_camera_rgb and (int(client.get("last_camera_rgb_frame",-1)) == _camera_rgb_frame_counter or _camera_rgb_stream_frame.is_empty()):
+		var rgb_options: Dictionary = client.get("camera_rgb_options", {})
+		var rgb_frame: Dictionary = _camera_rgb_stream_frames.get(str(rgb_options.get("camera", "")), {})
+		if is_camera_rgb and (int(client.get("last_camera_rgb_frame",-1)) == int(rgb_frame.get("counter",-2)) or rgb_frame.is_empty()):
 			continue
 		if is_rgbd and int(client.get("last_rgbd_frame", -1)) == _rgbd_frame_counter:
 			continue
 		var part_header := rgbd_part_header if is_rgbd else (raw_part_header if is_raw else encoded_part_header)
 		var frame_bytes := _last_rgbd_frame_bytes if is_rgbd else (_last_raw_frame_bytes if is_raw else _last_frame_bytes)
 		if is_camera_rgb:
-			frame_bytes = _camera_rgb_stream_frame.body
+			frame_bytes = rgb_frame.body
 			var text := "--%s\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n" % [BOUNDARY,frame_bytes.size()]
-			for key in _camera_rgb_stream_frame.headers:
-				text += "%s: %s\r\n" % [key,_camera_rgb_stream_frame.headers[key]]
+			for key in rgb_frame.headers:
+				text += "%s: %s\r\n" % [key,rgb_frame.headers[key]]
 			part_header = (text+"\r\n").to_utf8_buffer()
 		if frame_bytes.is_empty():
 			continue
@@ -920,7 +946,7 @@ func _write_stream_frame_to_clients() -> void:
 		if is_rgbd:
 			client["last_rgbd_frame"] = _rgbd_frame_counter
 		if is_camera_rgb:
-			client["last_camera_rgb_frame"] = _camera_rgb_frame_counter
+			client["last_camera_rgb_frame"] = int(rgb_frame.counter)
 		if not _flush_client_output(client):
 			remove_indices.append(i)
 		_clients[i] = client

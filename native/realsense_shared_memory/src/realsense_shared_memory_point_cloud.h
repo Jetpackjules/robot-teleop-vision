@@ -138,6 +138,7 @@ public:
     godot::Ref<godot::Image> get_raw_color_image() const;
     godot::Vector2i get_raw_color_size() const;
     godot::Vector4 get_raw_color_intrinsics() const;
+    godot::Dictionary get_raw_color_projection() const;
     godot::PackedFloat32Array get_depth_to_raw_color_extrinsics() const;
     godot::Dictionary get_depth_u16_frame(int p_max_width = 320) const;
     bool request_rgbd_encode(int p_max_width = 320, int p_jpeg_quality = 78);

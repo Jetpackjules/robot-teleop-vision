@@ -560,6 +560,7 @@ void RealSenseSharedMemoryPointCloud::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_direct_realsense_capture_stage_ms"), &RealSenseSharedMemoryPointCloud::get_direct_realsense_capture_stage_ms);
     ClassDB::bind_method(D_METHOD("get_direct_realsense_sensor_rates"), &RealSenseSharedMemoryPointCloud::get_direct_realsense_sensor_rates);
     ClassDB::bind_method(D_METHOD("get_raw_color_intrinsics"), &RealSenseSharedMemoryPointCloud::get_raw_color_intrinsics);
+    ClassDB::bind_method(D_METHOD("get_raw_color_projection"), &RealSenseSharedMemoryPointCloud::get_raw_color_projection);
     ClassDB::bind_method(D_METHOD("get_depth_to_raw_color_extrinsics"), &RealSenseSharedMemoryPointCloud::get_depth_to_raw_color_extrinsics);
     ClassDB::bind_method(
         D_METHOD("get_depth_u16_frame", "max_width"),
@@ -1644,6 +1645,10 @@ Vector4 RealSenseSharedMemoryPointCloud::get_direct_realsense_sensor_rates() con
 
 Vector4 RealSenseSharedMemoryPointCloud::get_raw_color_intrinsics() const {
     return direct_realsense.is_valid() ? direct_realsense->get_raw_color_intrinsics() : Vector4();
+}
+
+Dictionary RealSenseSharedMemoryPointCloud::get_raw_color_projection() const {
+    return direct_realsense.is_valid() ? direct_realsense->get_raw_color_projection() : Dictionary();
 }
 
 PackedFloat32Array RealSenseSharedMemoryPointCloud::get_depth_to_raw_color_extrinsics() const {

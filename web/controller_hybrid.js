@@ -8,6 +8,12 @@
     const rgbCameraCanvas = document.getElementById("rgb-camera-canvas");
     const displayModeSelect = document.getElementById("display-mode");
     const streamPresetSelect = document.getElementById("stream-preset");
+    const rgbCameraControl = document.getElementById("rgb-camera-control");
+    const rgbCameraSelect = document.getElementById("rgb-camera-select");
+    let selectedRgbCamera = '';
+    let rgbCameraListLoading = false;
+    let rgbCameraListUpdated = 0;
+    let rgbCameraListSignature = '';
     const statusDot = document.getElementById("status-dot");
     const statusTitle = document.getElementById("status-title");
     const statusLines = document.getElementById("status-lines");
@@ -31,6 +37,7 @@
     let peer = null;
     let capturePresetControl = null;
     let viewportGeneration = 0;
+    let retainedNavigation = null;
     let trackingDataChannel = null;
     let viewSettingsDataChannel = null;
     let rgbdDataChannel = null;
@@ -368,6 +375,33 @@
       rgbCameraCanvas.hidden = !showRgb;
       viewportVideo.hidden = true;
       viewportImage.hidden = true;
+      rgbCameraControl.hidden = !showRgb || rgbCameraSelect.options.length < 2;
+      if (showRgb) refreshRgbCameras();
+    }
+
+    async function refreshRgbCameras() {
+      if (rgbCameraListLoading || Date.now() - rgbCameraListUpdated < 5000) return;
+      rgbCameraListLoading = true;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      try {
+        const response = await fetch('/api/v1/cameras', {cache:'no-store',signal:controller.signal});
+        if (!response.ok) return;
+        const { cameras } = await response.json();
+        if (!Array.isArray(cameras)) return;
+        const signature = JSON.stringify(cameras);
+        if (signature !== rgbCameraListSignature) {
+          rgbCameraListSignature = signature;
+          rgbCameraSelect.replaceChildren(...cameras.map(camera => new Option(
+            `${camera.name || camera.model || 'Camera'} · ${camera.id.slice(-4)}`, camera.id)));
+          if (!cameras.some(camera => camera.id === selectedRgbCamera)) selectedRgbCamera = cameras[0]?.id || '';
+          rgbCameraSelect.value = selectedRgbCamera;
+          window.setGodotHybridRgbCamera?.(selectedRgbCamera);
+        }
+        rgbCameraListUpdated = Date.now();
+        rgbCameraControl.hidden = displayModeSelect.value !== 'rgb_camera' || cameras.length < 2;
+      } catch (_) { /* Keep the last usable camera list during reconnection. */ }
+      finally {clearTimeout(timeout);rgbCameraListLoading = false;}
     }
 
     function showHybrid() {
@@ -576,6 +610,8 @@
     }
 
     async function startHybridViewport() {
+      const navigation = window.getGodotHybridNavigationState?.({ includeView: true });
+      if (navigation?.view) retainedNavigation = navigation;
       stopViewport();
       const generation = viewportGeneration;
       activeViewportMode = "hybrid";
@@ -615,6 +651,7 @@
         window.startGodotHybridRenderer({
           canvas: hybridCanvas,
           rgbDisplayCanvas: rgbCameraCanvas,
+          camera: selectedRgbCamera,
           ...hybridPreset,
           dataChannel: forceRelayedRgbd ? null : rgbdDataChannel,
           // Prefer direct unordered WebRTC when peer connectivity is possible.
@@ -632,7 +669,9 @@
         peerPromise,
       ]);
       if (generation !== viewportGeneration) return;
-      if (startupNavigationPending && startupNavigation && window.setGodotHybridNavigationState) {
+      if (retainedNavigation && window.setGodotHybridNavigationState) {
+        window.setGodotHybridNavigationState(retainedNavigation);
+      } else if (startupNavigationPending && startupNavigation && window.setGodotHybridNavigationState) {
         window.setGodotHybridNavigationState(startupNavigation);
         startupNavigationPending = false;
       }
@@ -1053,8 +1092,14 @@
       sendViewSettings();
       displayModeSelect.blur();
     });
+    rgbCameraSelect.addEventListener('change', () => {
+      selectedRgbCamera = rgbCameraSelect.value;
+      window.setGodotHybridRgbCamera?.(selectedRgbCamera);
+      rgbCameraSelect.blur();
+    });
     document.getElementById("restart").addEventListener("click", startController);
     document.getElementById("recenter").addEventListener("click", () => {
+      retainedNavigation = null;
       window.recenterGodotWebcamTracker && window.recenterGodotWebcamTracker();
       window.recenterGodotHybridRenderer && window.recenterGodotHybridRenderer();
     });
@@ -1123,6 +1168,7 @@
     startButton.addEventListener("click", startController);
 
     setInterval(() => {
+      if (displayModeSelect.value === 'rgb_camera') refreshRgbCameras();
       collectStats().catch(() => {});
       updateStatus();
     }, 500);

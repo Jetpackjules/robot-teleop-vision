@@ -14,7 +14,7 @@ class ProbeHandler(BaseHTTPRequestHandler):
             mime = "text/html; charset=utf-8"
         elif path == "/renderer.js":
             content = (ROOT / "web/hybrid_rgbd_renderer.js").read_bytes() + (
-                b"\nexport {state,uploadCamera,VERTEX_SHADER,identityMatrix,perspectiveMatrix,"
+                b"\nexport {state,uploadCamera,VERTEX_SHADER,FRAGMENT_SHADER,identityMatrix,perspectiveMatrix,"
                 b"inverseRigidTransform,multiplyMatrix};"
             )
             mime = "text/javascript"

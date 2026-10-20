@@ -241,3 +241,21 @@ redraw does not establish a 60 FPS camera stream.
 These baseline rates precede the gateway bypass, decoder workers, prefetch,
 native compression and GPU changes above. Merely increasing the requested frame
 rate does not establish sustained 60 FPS end to end.
+
+## RGB coverage and viewer navigation
+
+SDK color aligned to depth has black padding outside the RGB sensor's field of
+view. JPEG does not retain its alpha channel. The native stream now includes
+the undistorted RGB intrinsics and depth-to-RGB extrinsics when available; the
+GPU derives color coverage from this calibration instead of pixel brightness.
+All measured depth remains available. Shared color and BlendPCR exclude absent
+RGB observations, use an agreeing camera's color where available, and retain
+neutral geometry otherwise. Real black pixels inside the RGB field remain
+valid. Providers without supported projection metadata retain their existing
+behavior. The standalone RGB view shows the original sensor image and exposes
+a camera selector only while that view is active and multiple cameras exist.
+
+Capture-profile reconnects retain the picked world pivot, camera frame, viewing
+angles, dolly and head-tracking baseline. Pan moves the pivot with the same
+camera motion as before; a new double-click or middle-click pivot replaces the
+previous pan translation. Zoom distance and height behavior are unchanged.

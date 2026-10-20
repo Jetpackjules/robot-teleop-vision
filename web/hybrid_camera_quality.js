@@ -1,6 +1,7 @@
 // GPU camera buffers and local surface confidence for the browser renderer.
 // Adapted from this project's Godot/RealSense BlendPCR port.
 // SPDX-License-Identifier: EUPL-1.2
+import { COLOR_PROJECTION_SHADER, bindColorProjection } from './hybrid_color_projection.js?v=20261020_color_coverage';
 
 export const FULLSCREEN_VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -55,6 +56,7 @@ uniform ivec2 u_size;
 uniform vec4 u_intrinsics;
 uniform float u_mesh_depth_delta;
 uniform float u_mesh_max_edge;
+${COLOR_PROJECTION_SHADER}
 layout(location=0) out vec4 out_quality;
 layout(location=1) out vec4 out_color;
 uint depth_mm(ivec2 p) {
@@ -93,7 +95,8 @@ bool geometry(uint za,uint zb,uint zc,vec3 pa,vec3 pb,vec3 pc) {
 void main() {
   ivec2 p=ivec2(gl_FragCoord.xy);
   out_quality=vec4(0);
-  out_color=vec4(texelFetch(u_color,p,0).rgb,1.0);
+  out_color=vec4(texelFetch(u_color,p,0).rgb,
+    camera_has_color(point(p,float(depth_mm(p))*0.001))?1.0:0.0);
   if(any(greaterThanEqual(p,u_size-ivec2(1))))return;
   ivec2 b=p+ivec2(1,0),c=p+ivec2(0,1),d=p+ivec2(1,1);
   uint za=depth_mm(p),zb=depth_mm(b),zc=depth_mm(c),zd=depth_mm(d);
@@ -166,7 +169,7 @@ bool rig_masked(vec3 world) {
   }
   return false;
 }
-struct RigHit {vec3 local;vec3 world;vec3 normal;vec3 color;float confidence;float score;};
+struct RigHit {vec3 local;vec3 world;vec3 normal;vec3 color;bool color_valid;float confidence;float score;};
 bool rig_triangle(int camera,uint id,vec3 origin,vec3 ray,out RigHit hit) {
   if(id==0u||rig_data(camera,4).z<0.5)return false;
   int primitive=int(id-1u),width=int(rig_data(camera,4).x)-1;
@@ -193,7 +196,8 @@ bool rig_triangle(int camera,uint id,vec3 origin,vec3 ray,out RigHit hit) {
   hit.local=p3;hit.world=rig_world(camera,p3);hit.normal=normalize(n);
   // Match Godot's nearest RGB texture sampling at the reconstructed UV.
   ivec2 color_pixel=clamp(ivec2(floor((1.0-v-w)*vec2(a)+v*vec2(b)+w*vec2(c)+0.5)),ivec2(0),ivec2(rig_data(camera,4).xy)-1);
-  hit.color=texelFetch(u_rig_color,ivec3(color_pixel,camera),0).rgb;
+  vec4 sample_color=texelFetch(u_rig_color,ivec3(color_pixel,camera),0);
+  hit.color=sample_color.rgb;hit.color_valid=sample_color.a>0.5;
   hit.confidence=second?cache.a:cache.b;
   float range_sq=max(dot(p3,p3),0.0001);
   hit.score=k.x*k.y*1e-6*hit.confidence*abs(dot(hit.normal,p3/sqrt(range_sq)))/range_sq;
@@ -393,6 +397,7 @@ export class GpuCameraRig {
         gl.viewport(0,0,camera.width,camera.height);
         gl.uniform2i(u.u_size,camera.width,camera.height);
         gl.uniform4fv(u.u_intrinsics,camera.intrinsicsArray);
+        bindColorProjection(gl,this.program,camera);
         gl.drawArrays(gl.TRIANGLES,0,3);
         this.uploads[index] = {camera,revision};this.rebuilds++;
       });

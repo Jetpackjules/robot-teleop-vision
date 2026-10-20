@@ -54,5 +54,18 @@ const response=id=>({ok:true,headers:{get:name=>({'Content-Type':'image/jpeg','X
   decodes[3].resolve({width:960,height:540,id:2,close(){closed.push(2);}});await settle();
   assert.equal(painted.at(-1),1,'stopped stream cannot paint a late decode');
   assert.ok(sockets[0].closed,'mode exit closes the persistent stream');
+  const sharedOptions={camera:'1234'};
+  const selected=new context.Viewer(canvas,sharedOptions);selected.start();
+  assert.equal(new URL(sockets.at(-1).url).searchParams.get('camera'),'1234','selected camera is sent to the stream endpoint');
+  sockets.at(-1).onmessage(packet(4,'ownerB'));
+  const obsolete=decodes.at(-1);
+  sharedOptions.camera='5678';selected.setCamera('5678');
+  obsolete.resolve({width:960,height:540,id:4,close(){}});await settle();
+  assert.equal(painted.at(-1),1,'an old camera decode cannot repaint after selecting another camera');
+  assert.equal(new URL(sockets.at(-1).url).searchParams.get('camera'),'5678','camera selection reconnects to the new sensor');
+  const decodeCount=decodes.length;
+  sockets.at(-1).onmessage(packet(5,'ownerB'));await settle();
+  assert.equal(decodes.length,decodeCount,'mismatched camera frames are rejected before decoding');
+  selected.stop();
   console.log('Original RGB viewer: ordering, native size, FPS, cancellation and disposal passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

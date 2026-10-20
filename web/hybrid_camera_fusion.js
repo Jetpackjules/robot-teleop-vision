@@ -1,5 +1,5 @@
-import { RIG_SAMPLING_SHADER } from "./hybrid_camera_quality.js?v=20261020_depth_quality";
-export { GpuCameraRig as MultiCameraFusion } from "./hybrid_camera_quality.js?v=20261020_depth_quality";
+import { RIG_SAMPLING_SHADER } from "./hybrid_camera_quality.js?v=20261020_color_coverage";
+export { GpuCameraRig as MultiCameraFusion } from "./hybrid_camera_quality.js?v=20261020_color_coverage";
 
 // Shared by the live renderer and the camera-free GPU regression test.
 export function cameraIsFresh(camera, now = performance.now()) {
@@ -43,17 +43,18 @@ bool rig_overlap() {
   }
   return false;
 }
-vec3 rig_color(vec3 fallback) {
-  if(u_rig_color_enabled==0)return fallback;
+vec3 rig_color(vec3 fallback,bool source_has_color) {
+  if(u_rig_count<=0||(u_rig_color_enabled==0&&source_has_color))return fallback;
   RigHit own;
   bool has_own=rig_surface(u_rig_index,v_world_position,own);
-  float quality=has_own?own.score:-1.0;
+  float quality=has_own&&own.color_valid?own.score:-1.0;
   int owner=u_rig_index;
   vec3 color=fallback;
   for(int camera=0;camera<u_rig_count;camera++) {
     if(camera==u_rig_index)continue;
     RigHit peer;
     if(!rig_surface(camera,v_world_position,peer))continue;
+    if(!peer.color_valid)continue;
     float error=-peer.local.z+rig_local(camera,v_world_position).z;
     if(abs(error)<=rig_tolerance(-peer.local.z)
       &&(quality<0.0||rig_better(peer.score,camera,quality,owner))) {

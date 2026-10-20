@@ -6,7 +6,7 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../web/hybrid_rgbd_renderer.js'), 'utf8')
   .replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, '');
-const context = vm.createContext({window: {}, performance, FUSION_FRAGMENT_SHADER: ''});
+const context = vm.createContext({window: {}, performance, FUSION_FRAGMENT_SHADER: '', COLOR_PROJECTION_SHADER: ''});
 vm.runInContext(source + '\nwindow.navigationProbe = {state, orbitViewer, attachPointerNavigation, identityMatrix, cameraMarkerGeometry, trimIndependentFrameQueue};', context);
 const {state, orbitViewer, attachPointerNavigation, identityMatrix, cameraMarkerGeometry, trimIndependentFrameQueue} = context.window.navigationProbe;
 Object.assign(state.settings, {orbit_distance: 0.65, focus_vertical_offset: 0.35,
@@ -39,9 +39,23 @@ for (const yaw of [-170, -80, 0, 80, 170]) {
 state.manualOrbitYaw = 0;
 state.manualOrbitPitch = 0;
 const initial = orbitViewer(base, [0, 0, 0]);
+state.baseViewer = {transform:base,fov:55,near:.05,far:100};
+const savedRuntime = vm.runInContext('getGodotHybridNavigationState({includeView:true})', context);
+state.baseViewer = null;state.focusWorld = null;state.focusPicked = false;state.manualPan = [9,9,9];
+context.savedRuntime = savedRuntime;
+vm.runInContext('setGodotHybridNavigationState(savedRuntime)', context);
+check(orbitViewer(state.baseViewer.transform,[0,0,0]).every((v,i)=>Math.abs(v-initial[i])<1e-6),
+  'a stream restart retains the exact world pivot, pan, and camera frame');
 check(Math.abs(initial[13] - (focus[1] + 0.35)) < 1e-6, 'initial camera height is preserved');
 check(Math.abs(initial[14] - (focus[2] + 0.65)) < 1e-6, 'initial camera distance is preserved');
 const listeners = {};
+state.canvas = {getBoundingClientRect:()=>({left:0,top:0,width:200,height:200})};
+state.viewProjection = identityMatrix();
+state.cameras = [{width:2,height:2,metadata:{intrinsics:[1,1,0,0]},depth:new Uint16Array([1000,0,0,0]),modelMatrix:identityMatrix()}];
+check(vm.runInContext('focusGodotHybridRendererAt(100,100)',context), 'a real depth point can be picked');
+check(state.manualPan.every(v=>v===0), 'picking a point clears the previous pan translation');
+check(state.focusWorld.every((v,i)=>Math.abs(v-[0,0,-1][i])<1e-6), 'the picked world point is the actual pivot');
+vm.runInContext('setGodotHybridNavigationState(savedRuntime)',context);
 state.canvas = {addEventListener: (name, listener) => {listeners[name] = listener;},
   setPointerCapture() {}, hasPointerCapture: () => false, clientHeight: 600};
 const focusEvents = [];
@@ -78,6 +92,20 @@ listeners.pointerdown(pointer(150, 120, 1));
 listeners.pointercancel(pointer(150, 120, 1, 'pointercancel'));
 check(focusEvents.length === 2, 'a cancelled middle click does not change the target');
 check(focusNotifications === 2, 'only deliberate target changes notify the controller');
+state.currentViewer = orbitViewer(base,[0,0,0]);
+const oldPan=state.manualPan.slice(),oldFocus=state.focusWorld.slice(),oldPicked=state.focusPicked;
+const v=state.currentViewer,meters=2*.65*Math.tan(state.settings.fov*Math.PI/360)/600;
+const delta=[0,1,2].map(i=>-13*meters*v[i]-7*meters*v[4+i]);
+state.manualPan=oldPan.map((p,i)=>p+delta[i]);
+const legacyPanView=orbitViewer(base,[0,0,0]);
+state.manualPan=oldPan;state.focusWorld=oldFocus;state.focusPicked=oldPicked;
+listeners.pointerdown(pointer(100,100,2));listeners.pointermove(pointer(113,93,2));listeners.pointerup(pointer(113,93,2));
+check(orbitViewer(base,[0,0,0]).every((p,i)=>Math.abs(p-legacyPanView[i])<1e-6),
+  'moving the pivot during pan is visually identical to the previous pan');
+check(state.manualPan.every(p=>p===0)&&state.focusPicked,'pan moves the world pivot without a hidden residual offset');
+vm.runInContext('recenterGodotHybridRenderer()',context);
+check(state.focusWorld.every((p,i)=>Math.abs(p-[0,0,-state.settings.focus_distance][i])<1e-6),
+  'explicit recenter restores the original pivot after panning or picking');
 for (const [width, height, fx, fy] of [[640, 480, 600, 600], [192, 109, 96, 97], [1280, 720, 900, 890], [848, 480, 500, 500]]) {
   const vertices = cameraMarkerGeometry({width, height, metadata: {intrinsics: [fx, fy, (width - 1) / 2, (height - 1) / 2]}});
   check(vertices.length === 84, 'camera marker contains a complete frustum and body');
@@ -128,7 +156,7 @@ check(changedReference[0].sequence === 1,
     defaultDisplayMode:'independent_mesh',displayModeSelect:control('display-mode'),
     streamPresetSelect:control('stream-preset'),localSavedViewSettings:()=>null,
     updateHeadTrackingOptions(){},updateViewLabels(){},showHybrid(){},updateStatus(){},
-    viewportGeneration:0,capturePresetControl:null,remoteUrl:()=> 'wss://example.test/head-tracking',
+    viewportGeneration:0,retainedNavigation:null,selectedRgbCamera:'',capturePresetControl:null,remoteUrl:()=> 'wss://example.test/head-tracking',
     nativeStreamPreset:presets.nativeStreamPreset,
     CapturePresetControl:class {async request(mode){requestedMode=mode;return true;} cancel(){}},
     currentPreset:()=>({label:'Quality'}),startHybridControlPeer:async()=>true,
@@ -156,14 +184,19 @@ check(changedReference[0].sequence === 1,
     }
   }
   // A rapid second selection must win even if the first connection resolves late.
+  let runtimeAvailable=true,restoredRuntime;
+  policy.window.getGodotHybridNavigationState=()=>runtimeAvailable?savedRuntime:null;
+  policy.window.setGodotHybridNavigationState=value=>{restoredRuntime=value;};
   const pending=[];
   policy.capturePresetControl={request:()=>new Promise(resolve=>pending.push(resolve)),cancel(){}};
   const oldStart=vm.runInContext('startHybridViewport()',policy);
+  runtimeAvailable=false;
   const newStart=vm.runInContext('startHybridViewport()',policy);
   const previousOptions=options;
   pending[0](true);await oldStart;
   check(options===previousOptions,'a late capture request cannot launch an obsolete renderer');
   pending[1](true);await newStart;
   check(options!==previousOptions,'latest preset selection launches normally');
+  check(restoredRuntime===savedRuntime,'rapid preset changes restore the complete pre-reconnect camera view');
   console.log(JSON.stringify({navigation_and_queue_checks:checks}));
 })().catch(error=>{console.error(error);process.exitCode=1;});

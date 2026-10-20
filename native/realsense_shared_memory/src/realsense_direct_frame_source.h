@@ -82,6 +82,7 @@ public:
     godot::Ref<godot::Image> get_raw_color_image() const;
     godot::Vector2i get_raw_color_size() const;
     godot::Vector4 get_raw_color_intrinsics() const;
+    godot::Dictionary get_raw_color_projection() const;
     godot::PackedFloat32Array get_depth_to_raw_color_extrinsics() const;
     godot::String get_status() const;
     godot::String get_filter_status() const;
@@ -144,6 +145,7 @@ private:
     int raw_color_pitch = 0;
     void clear_raw_color();
     godot::Vector4 raw_color_intrinsics;
+    bool raw_color_projection_linear = false;
     godot::PackedFloat32Array depth_to_raw_color_extrinsics;
     godot::String status = "RealSense direct capture is closed";
     godot::String filter_status = "filters=off";

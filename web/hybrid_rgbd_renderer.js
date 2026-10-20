@@ -1,8 +1,9 @@
-import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_depth_quality";
+import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_color_coverage";
 
-import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_depth_quality";
-import { CameraRgbViewer } from "./camera_rgb_viewer.js?v=20261020_capture60";
+import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_color_coverage";
+import { CameraRgbViewer } from "./camera_rgb_viewer.js?v=20261020_color_coverage";
 import { NativeRgbdDecoderPool, isIndependentNativeFrame, takeIndependentFrameBatch } from "./rgbd_decode_pool.js?v=20261020_native_pixels";
+import { COLOR_PROJECTION_SHADER, bindColorProjection } from './hybrid_color_projection.js?v=20261020_color_coverage';
 
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},
@@ -192,6 +193,7 @@ out vec3 v_color;
 out vec2 v_source_pixel;
 out float v_valid;
 out vec3 v_world_position;
+out vec3 v_local_position;
 flat out uint v_triangle_id;
 uniform highp sampler2DArray u_rig_quality;
 uniform highp int u_rig_index;
@@ -290,6 +292,7 @@ void main() {
     -z
   );
   vec3 world_position = (u_model * vec4(local_position, 1.0)).xyz;
+  v_local_position = local_position;
   if (u_robot_mask_enabled == 1) {
     for (int index = 0; index < 6; index++) {
       vec3 segment = u_mask_capsule_b[index].xyz - u_mask_capsule_a[index].xyz;
@@ -340,12 +343,15 @@ precision highp int;
 in vec3 v_color;
 in vec2 v_source_pixel;
 in float v_valid;
+in vec3 v_local_position;
 uniform highp int u_render_mode;
+uniform highp int u_quality_enabled;
 uniform sampler2D u_color;
 uniform ivec2 u_size;
 out vec4 out_color;
 
 ${FUSION_FRAGMENT_SHADER}
+${COLOR_PROJECTION_SHADER}
 
 void main() {
   if (v_valid < 0.9999) discard;
@@ -361,7 +367,13 @@ void main() {
   vec3 color = u_render_mode == 1
     ? texelFetch(u_color, clamp(ivec2(floor(v_source_pixel + 0.5)), ivec2(0), u_size - 1), 0).rgb
     : v_color;
-  out_color = vec4(rig_color(color), 1.0);
+  bool has_color;
+  if(u_quality_enabled==1) {
+    vec4 sample_color=texelFetch(u_rig_color,ivec3(clamp(ivec2(floor(v_source_pixel+0.5)),ivec2(0),u_size-1),u_rig_index),0);
+    has_color=sample_color.a>0.5;color=sample_color.rgb;
+  } else has_color=camera_has_color(v_local_position);
+  if(!has_color)color=vec3(0.34);
+  out_color = vec4(rig_color(color,has_color), 1.0);
 }
 `;
 
@@ -2076,6 +2088,18 @@ function verticalLiftForFocus(focus) {
   return robotBase[1] + Number(state.settings.focus_vertical_offset || 0) - focus[1];
 }
 
+function defaultOrbitFocus(base) {
+  const robotBase = robotBasePosition();
+  if (robotBase) return [robotBase[0], robotBase[1] + 0.12, robotBase[2]];
+  const back = [base[8], base[9], base[10]];
+  return add(base.slice(12, 15), scale(back, -state.settings.focus_distance));
+}
+
+function currentOrbitFocus(base) {
+  return add(state.focusPicked && state.focusWorld ? state.focusWorld
+    : robotBasePosition() ? defaultOrbitFocus(base) : state.focusWorld || defaultOrbitFocus(base), state.manualPan);
+}
+
 function orbitViewer(base, headDelta) {
   const settings = state.settings;
   const baseBack = normalize([base[8], base[9], base[10]]);
@@ -2109,12 +2133,7 @@ function orbitViewer(base, headDelta) {
   if (settings.dolly_enabled) distance += (relativeHead[2] * 100) * Number(settings.dolly_gain || 0);
   distance += state.manualDolly;
   distance = clamp(distance, Number(settings.min_distance || 0.2), Number(settings.max_distance || 3));
-  const robotBase = robotBasePosition();
-  const robotFocus = robotBase ? [robotBase[0], robotBase[1] + 0.12, robotBase[2]] : null;
-  const baseFocus = state.focusPicked && state.focusWorld
-    ? state.focusWorld
-    : robotFocus || state.focusWorld || add(base.slice(12, 15), scale(levelBack, -settings.focus_distance));
-  const focus = add(baseFocus, state.manualPan);
+  const focus = currentOrbitFocus(base);
   const virtualHeadOffset = scale(worldUp, verticalLiftForFocus(focus));
   // Rotate the complete camera offset, including its configured height.
   // Adding height after pitching changes the orbit radius as the mouse moves.
@@ -2173,10 +2192,11 @@ function attachPointerNavigation(options = {}) {
           / Math.max(1, canvas.clientHeight);
         const right = normalize([viewer[0], viewer[1], viewer[2]]);
         const up = normalize([viewer[4], viewer[5], viewer[6]]);
-        state.manualPan = add(
-          state.manualPan,
-          add(scale(right, -dx * metersPerPixel), scale(up, dy * metersPerPixel)),
-        );
+        const base = state.baseViewer?.transform || viewer;
+        state.focusWorld = add(currentOrbitFocus(base),
+          add(scale(right, -dx * metersPerPixel), scale(up, dy * metersPerPixel)));
+        state.focusPicked = true;
+        state.manualPan = [0, 0, 0];
       }
     }
     event.preventDefault();
@@ -2350,6 +2370,7 @@ function render() {
     gl.uniformMatrix4fv(state.uniforms.model, false, camera.modelMatrix);
     gl.uniform4fv(state.uniforms.intrinsics, camera.intrinsicsArray);
     gl.uniform2i(state.uniforms.size, camera.width, camera.height);
+    bindColorProjection(gl,state.program,camera);
     const pointSize = pointPixelScale(dimensions.height, fov, camera.intrinsicsArray, Number(state.settings.splat_fill || 1.15));
     if (meshMode && camera.width > 1 && camera.height > 1) {
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
@@ -3107,6 +3128,11 @@ function configureOriginalRgb() {
   }
 }
 
+export function setGodotHybridRgbCamera(id) {
+  if (state.socketOptions) state.socketOptions.camera = id;
+  state.rawRgbViewer?.setCamera(id);
+}
+
 export function recenterGodotHybridRenderer() {
   state.headBaseline = null;
   state.lastHeadActive = false;
@@ -3117,15 +3143,28 @@ export function recenterGodotHybridRenderer() {
   state.manualOrbitPitch = 0;
   state.manualDolly = 0;
   state.manualPan = [0, 0, 0];
+  if (state.baseViewer) state.focusWorld = defaultOrbitFocus(state.baseViewer.transform);
 }
 
-export function getGodotHybridNavigationState() {
-  return {
+export function getGodotHybridNavigationState(options = {}) {
+  const base = state.baseViewer?.transform;
+  // Site defaults retain the existing relative-pan format. A live reconnect
+  // additionally retains the actual world pivot and its camera coordinate frame.
+  const pan = state.focusPicked && state.focusWorld && base
+    ? add(currentOrbitFocus(base), scale(defaultOrbitFocus(base), -1)) : state.manualPan;
+  const navigation = {
     orbit_yaw: Number(state.manualOrbitYaw || 0),
     orbit_pitch: Number(state.manualOrbitPitch || 0),
     dolly: Number(state.manualDolly || 0),
-    pan: state.manualPan.slice(0, 3).map((value) => Number(value || 0)),
+    pan: pan.slice(0, 3).map((value) => Number(value || 0)),
   };
+  if (options.includeView && base) navigation.view = {
+    base: Array.from(base), fov: state.baseViewer.fov, near: state.baseViewer.near, far: state.baseViewer.far,
+    focus: state.focusWorld?.slice() || null, picked: state.focusPicked,
+    pan: state.manualPan.slice(), headBaseline: state.headBaseline && { ...state.headBaseline },
+    lastHeadActive: state.lastHeadActive,
+  };
+  return navigation;
 }
 
 export function setGodotHybridNavigationState(value = {}) {
@@ -3137,6 +3176,19 @@ export function setGodotHybridNavigationState(value = {}) {
   state.manualDolly = finite(value.dolly, 0, -8, 8);
   const pan = Array.isArray(value.pan) ? value.pan : [0, 0, 0];
   state.manualPan = [0, 1, 2].map((index) => finite(pan[index], 0, -20, 20));
+  const view = value.view;
+  const vector = (v, length) => Array.isArray(v) && v.length === length && v.every(Number.isFinite);
+  if (view && vector(view.base, 16)) {
+    state.baseViewer = { transform: new Float32Array(view.base),
+      fov: finite(view.fov, 60, 1, 179), near: finite(view.near, 0.05, 0.001, 1),
+      far: finite(view.far, 100, 2, 1000) };
+    state.focusWorld = vector(view.focus, 3) ? view.focus.slice() : null;
+    state.focusPicked = Boolean(view.picked && state.focusWorld);
+    state.manualPan = vector(view.pan, 3) ? view.pan.slice() : [0, 0, 0];
+    state.headBaseline = view.headBaseline && [view.headBaseline.x, view.headBaseline.y, view.headBaseline.z].every(Number.isFinite)
+      ? { ...view.headBaseline } : null;
+    state.lastHeadActive = Boolean(view.lastHeadActive);
+  }
   return true;
 }
 
@@ -3179,6 +3231,7 @@ export function focusGodotHybridRendererAt(clientX, clientY) {
   // camera rig translates without changing its viewing angle.
   state.focusWorld = bestPoint;
   state.focusPicked = true;
+  state.manualPan = [0, 0, 0];
   state.settings.inspect_enabled = true;
   return true;
 }
@@ -3196,6 +3249,7 @@ export function getGodotHybridRendererStatus() {
 }
 
 window.startGodotHybridRenderer = startGodotHybridRenderer;
+window.setGodotHybridRgbCamera = setGodotHybridRgbCamera;
 window.stopGodotHybridRenderer = stopGodotHybridRenderer;
 window.setGodotHybridViewSettings = setGodotHybridViewSettings;
 window.recenterGodotHybridRenderer = recenterGodotHybridRenderer;

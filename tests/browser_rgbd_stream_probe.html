@@ -1,13 +1,16 @@
 <!doctype html><meta charset="utf-8"><title>Native RGB-D upload check</title><pre id="result">Running GPU pixel checks...</pre><canvas id="canvas" width="8" height="4"></canvas>
 <script type="module">
-import {state,uploadCamera,VERTEX_SHADER,identityMatrix,perspectiveMatrix,inverseRigidTransform,multiplyMatrix} from './renderer.js';
+import {state,uploadCamera,VERTEX_SHADER,FRAGMENT_SHADER,identityMatrix,perspectiveMatrix,inverseRigidTransform,multiplyMatrix} from './renderer.js';
 import {NativeRgbdDecoderPool} from './rgbd_decode_pool.js';
 import {BrowserBlendPCR} from './hybrid_blendpcr.js';
 import {GpuCameraRig,compileGpuProgram,FULLSCREEN_VERTEX_SHADER,RIG_SAMPLING_SHADER} from './hybrid_camera_quality.js';
+import {FUSION_FRAGMENT_SHADER} from './hybrid_camera_fusion.js';
 const passed=[];let benchmarkMs={}; const check=(v,s)=>{if(!v)throw Error(s);passed.push(s)};
 try {
  const gl=document.getElementById('canvas').getContext('webgl2',{alpha:false,antialias:false});
  check(!!gl,'WebGL2 is available');state.gl=gl;
+ const mainProgram=compileGpuProgram(gl,VERTEX_SHADER,FRAGMENT_SHADER);
+ check(!!mainProgram,'Production point and mesh shaders compile and link with calibrated color coverage');gl.deleteProgram(mainProgram);
  const metadata={id:'probe',width:8,height:4,intrinsics:[8,8,4,2],transform:[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]};
  const rgba=new Uint8ClampedArray(8*4*4),rgb=new Uint8Array(8*4*3);
  for(let i=0;i<32;i++){for(let c=0;c<3;c++)rgba[i*4+c]=rgb[i*3+c]=(i*43+c*73)&255;rgba[i*4+3]=255;}
@@ -98,6 +101,56 @@ try {
  }
  check(indexed.gridBuffers.size===1,'Three equal-resolution cameras share one static index buffer');
  indexed.clearTargets();check(indexed.gridBuffers.size===0,'Index buffers are released with targets');
+ // Missing RGB support must never erase valid depth, occlude real color, or
+ // mistake a genuinely black object for an absent RGB observation.
+ {
+  const fixtures=[];
+  for(let i=0;i<2;i++) {
+   const width=16,height=12,depth=new Uint16Array(width*height).fill(1000),color=new Uint8Array(width*height*3);
+   if(i===1)for(let p=0;p<width*height;p++)color[p*3+1]=255;
+   const m={id:'coverage'+i,width,height,intrinsics:[24,24,8,6],transform:Array.from(identityMatrix())};
+   if(i===0)m.color_projection={model:'pinhole',size:[16,12],intrinsics:[48,48,8,6],extrinsics:[1,0,0,0,1,0,0,0,1,0,0,0]};
+   fixtures.push(uploadCamera({metadata:m,width,height,depth,colorPixels:color,modelMatrix:identityMatrix()}));
+  }
+  const vertex=FULLSCREEN_VERTEX_SHADER.replace('void main()', 'uniform vec3 u_probe;out vec3 v_world_position;void main()').replace('vec2 p =','v_world_position=u_probe;vec2 p =');
+  const program=compileGpuProgram(gl,vertex,`#version 300 es
+   precision highp float;precision highp int;
+   ${FUSION_FRAGMENT_SHADER}
+   uniform vec3 u_fallback;out vec4 color;void main(){RigHit hit;
+    bool has_color=rig_surface(u_rig_index,v_world_position,hit)&&hit.color_valid;
+    color=vec4(rig_color(u_fallback,has_color),1);}`);
+  function colorAt(x,fallback=[0,0,0]) {
+   const now=performance.now();for(const c of fixtures)c.lastUpdateMs=now;
+   rig.update(fixtures,inverseRigidTransform,now,settings);
+   gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,1,1);gl.disable(gl.DEPTH_TEST);gl.useProgram(program);rig.bind(program);
+   gl.uniform1i(gl.getUniformLocation(program,'u_rig_index'),0);
+   gl.uniform1i(gl.getUniformLocation(program,'u_rig_color_enabled'),0);
+   gl.uniform1f(gl.getUniformLocation(program,'u_fusion_depth_tolerance'),.035);
+   gl.uniform3fv(gl.getUniformLocation(program,'u_fallback'),fallback);
+   gl.uniform3f(gl.getUniformLocation(program,'u_probe'),x,0,-1);gl.drawArrays(gl.TRIANGLES,0,3);
+   const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return pixel;
+  }
+  check(colorAt(-.2)[1]===255,'Missing aligned RGB recovers color from another camera seeing the same surface');
+  check(colorAt(0).slice(0,3).every(v=>v===0),'Actual black inside the RGB field of view remains black');
+  check(fixtures[0].depth.every(v=>v===1000),'RGB coverage never changes the measured depth grid');
+  fixtures[1].metadata.color_projection=fixtures[0].metadata.color_projection;fixtures[1].uploadRevision++;
+  check(colorAt(-.2,[.34,.34,.34]).slice(0,3).every(v=>Math.abs(v-87)<=1),
+    'Depth-only coverage keeps neutral geometry when all RGB cameras are blind');
+  fixtures[0].metadata.color_projection={...fixtures[0].metadata.color_projection,intrinsics:[24,24,-24,6]};
+  fixtures[1].metadata.color_projection=null;fixtures[0].uploadRevision++;fixtures[1].uploadRevision++;
+  const renderCoverage=()=>{
+   const now=performance.now();for(const c of fixtures)c.lastUpdateMs=now;
+   rig.update(fixtures,inverseRigidTransform,now,settings);
+   const viewer=identityMatrix(),projection=perspectiveMatrix(55,192/144,.01,100);
+   indexed.render(rig,fixtures,{width:192,height:144,dpr:1,now,viewer,inverseViewer:viewer,projection,viewProjection:projection},null,settings);
+   gl.bindFramebuffer(gl.FRAMEBUFFER,null);const pixel=new Uint8Array(4);gl.readPixels(96,72,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return pixel;
+  };
+  check(renderCoverage()[1]===255,'BlendPCR excludes missing color from its weights while retaining its depth');
+  fixtures[1].metadata.color_projection=fixtures[0].metadata.color_projection;fixtures[1].uploadRevision++;
+  check(renderCoverage().slice(0,3).every(v=>Math.abs(v-87)<=1),'BlendPCR preserves depth-only surfaces with neutral shading');
+  gl.deleteProgram(program);
+  for(const c of fixtures){gl.deleteTexture(c.depthTexture);gl.deleteTexture(c.colorTexture);}
+ }
  // Exercise actual multi-view free-space evidence, including smooth ramps
  // that the old neighbor-confidence shortcut exempted from validation.
  rig.clear();state.cameras=[];

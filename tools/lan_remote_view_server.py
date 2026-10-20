@@ -2315,6 +2315,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path == "/camera-rgb":
             self.serve_camera_rgb(parsed.query)
             return
+        if parsed.path == "/api/v1/cameras":
+            self.serve_camera_list()
+            return
         if parsed.path == "/api/v1/robot-module":
             self.serve_json(self.server.robot_manifest)
             return
@@ -2344,6 +2347,26 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             return
         rel = parsed.path.lstrip("/")
         self.serve_file(rel)
+
+    def serve_camera_list(self) -> None:
+        """Expose only the camera identities from the trusted capture process."""
+        connection = http.client.HTTPConnection(self.server.stream_host, self.server.capture_port, timeout=5)
+        try:
+            connection.request("GET", "/cameras")
+            response = connection.getresponse()
+            if response.status != 200:
+                self.send_error(503, "Camera list not ready")
+                return
+            data = json.loads(response.read(65537))
+            cameras = data.get("cameras", [])
+            if not isinstance(cameras, list) or len(cameras) > 64:
+                raise ValueError("Invalid camera list")
+            self.serve_json({"cameras": [{key: str(camera.get(key, ""))[:256]
+                for key in ("id", "name", "model")} for camera in cameras]})
+        except (OSError, ValueError, TypeError, AttributeError):
+            self.send_error(503, "Camera list not ready")
+        finally:
+            connection.close()
 
     def serve_camera_rgb(self, query: str) -> None:
         """Proxy original RGB from the fixed, trusted Godot capture endpoint."""

@@ -65,7 +65,7 @@ def test_desktop_video_is_behind_existing_login_gate():
     assert redirected == [True]
 
 
-@pytest.mark.parametrize("path", ["/camera-rgb?w=3840&q=95", "/camera-rgb-stream?w=3840&q=95"])
+@pytest.mark.parametrize("path", ["/camera-rgb?w=3840&q=95", "/camera-rgb-stream?w=3840&q=95", "/api/v1/cameras"])
 def test_original_camera_rgb_is_behind_existing_login_gate(path):
     handler = bare_handler()
     handler.path = path
@@ -76,6 +76,25 @@ def test_original_camera_rgb_is_behind_existing_login_gate(path):
     handler.redirect_to_login = lambda: redirected.append(True)
     handler.do_GET()
     assert redirected == [True]
+
+
+def test_camera_list_uses_only_trusted_capture_endpoint(monkeypatch):
+    import lan_remote_view_server as remote
+    calls, results = [], []
+    class Connection:
+        def __init__(self, host, port, timeout):
+            assert (host,port,timeout)==('127.0.0.1',8781,5)
+        def request(self, method, path): calls.append((method,path))
+        def getresponse(self):
+            return SimpleNamespace(status=200, read=lambda maximum:json.dumps({'cameras':[
+                {'id':'1234','name':'D435 A','model':'D435','private_field':'discard'}]}).encode())
+        def close(self): pass
+    monkeypatch.setattr(remote.http.client,'HTTPConnection',Connection)
+    handler=bare_handler(server=SimpleNamespace(stream_host='127.0.0.1',capture_port=8781))
+    handler.serve_json=results.append
+    handler.serve_camera_list()
+    assert calls==[('GET','/cameras')]
+    assert results==[{'cameras':[{'id':'1234','name':'D435 A','model':'D435'}]}]
 
 
 def test_original_rgb_proxy_uses_fixed_endpoint_and_bounded_options(monkeypatch):

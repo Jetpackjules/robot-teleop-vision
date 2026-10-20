@@ -2,7 +2,7 @@
 export class CameraRgbViewer {
   constructor(canvas, options = {}) {
     this.canvas = canvas;
-    this.options = options;
+    this.options = { ...options };
     this.running = false;
     this.controllers = new Set();
     this.generation = 0;
@@ -49,10 +49,20 @@ export class CameraRgbViewer {
     this.socket = null;
   }
 
+  setCamera(id) {
+    if (id === (this.options.camera || '')) return;
+    const running = this.running;
+    this.stop();
+    this.options = { ...this.options, camera: id };
+    this.cameraId = '';this.captureEpoch = '';this.lastSequence = -1;
+    this.stats.captureUnixMs = 0;this.stats.connected = false;
+    if (running) this.start();
+  }
+
   connect(generation) {
     if (!this.running || generation !== this.generation || document.hidden) return;
     if (typeof WebSocket === "undefined") { this.poll(generation); this.poll(generation); return; }
-    const query = new URLSearchParams({ w: String(this.options.width || 3840), q: String(this.options.quality || 95) });
+    const query = new URLSearchParams({ w: String(this.options.width || 3840), q: String(this.options.quality || 95), camera: this.options.camera || '' });
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${scheme}://${location.host}/camera-rgb-stream?${query}`);
     this.socket = socket;
@@ -97,6 +107,7 @@ export class CameraRgbViewer {
 
   async displayFrame(blob, metadata, generation) {
     const id = metadata["x-camera-id"] || "camera";
+    if (this.options.camera && id !== this.options.camera) return;
     const sequence = Number(metadata["x-frame-sequence"] ?? -1);
     const capture = Number(metadata["x-capture-unix-ms"] || 0);
     const epoch = metadata["x-capture-epoch"] || "";
@@ -131,7 +142,7 @@ export class CameraRgbViewer {
     this.controllers.add(controller);
     const timeout = setTimeout(() => controller.abort(), 10000);
     try {
-      const query = new URLSearchParams({ w: String(this.options.width || 3840), q: String(this.options.quality || 95) });
+      const query = new URLSearchParams({ w: String(this.options.width || 3840), q: String(this.options.quality || 95), camera: this.options.camera || '' });
       const response = await fetch(`/camera-rgb?${query}`, { cache: "no-store", signal: controller.signal });
       if (!response.ok || !response.headers.get("Content-Type")?.startsWith("image/jpeg")) {
         throw new Error(response.status === 503 ? "Original camera RGB not ready" : `Original RGB HTTP ${response.status}`);

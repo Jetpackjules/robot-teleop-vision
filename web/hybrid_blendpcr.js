@@ -2,7 +2,7 @@
 // Original approach: Andre Muehlenbrock, CGVR, University of Bremen, 2024.
 // Adapted from godot/runtime/point_cloud/blendpcr in this repository.
 // SPDX-License-Identifier: EUPL-1.2
-import { FULLSCREEN_VERTEX_SHADER, RIG_SAMPLING_SHADER, compileGpuProgram, gpuTexture } from "./hybrid_camera_quality.js?v=20261020_depth_quality";
+import { FULLSCREEN_VERTEX_SHADER, RIG_SAMPLING_SHADER, compileGpuProgram, gpuTexture } from "./hybrid_camera_quality.js?v=20261020_color_coverage";
 
 const METADATA_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
@@ -160,12 +160,17 @@ void main() {
   }
   int owner=-1;float quality=-1.0;
   vec3 color=vec3(0),best_color=vec3(0),best_world=vec3(0);
-  float total=0.0;
+  float total=0.0,color_quality=-1.0;
+  int color_owner=-1;
   for(int camera=0;camera<u_rig_count;camera++) {
     if(!valid[camera]||abs(depths[camera]-nearest)>rig_tolerance(nearest))continue;
     RigHit hit=samples[camera];
     if(owner<0||rig_better(hit.score,camera,quality,owner)) {
-      owner=camera;quality=hit.score;best_color=hit.color;best_world=hit.world;
+      owner=camera;quality=hit.score;best_world=hit.world;
+    }
+    if(!hit.color_valid)continue;
+    if(color_owner<0||rig_better(hit.score,camera,color_quality,color_owner)) {
+      color_owner=camera;color_quality=hit.score;best_color=hit.color;
     }
     float weight=texture(u_weights,vec3(uv,float(camera/4)))[camera%4];
     color+=to_linear(hit.color)*weight;
@@ -174,7 +179,7 @@ void main() {
   if(owner<0)discard;
   // Thin surfaces can disappear from the small dominance grid. They still
   // retain their full-resolution coverage and their best local source color.
-  out_color=vec4(total>0.00001?to_srgb(color/total):best_color,1.0);
+  out_color=vec4(total>0.00001?to_srgb(color/total):color_owner>=0?best_color:vec3(0.34),1.0);
   vec4 clip=u_projection*u_view*vec4(best_world,1.0);
   gl_FragDepth=(clip.z/clip.w)*0.5+0.5;
 }`;
