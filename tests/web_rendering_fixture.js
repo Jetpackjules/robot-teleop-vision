@@ -1,5 +1,5 @@
 // Actual production WebGL shaders, checked with synthetic asymmetric scenes.
-import {MultiCameraFusion} from './hybrid_camera_fusion.js?v=20261020_native_quality';
+import {MultiCameraFusion} from './hybrid_camera_fusion.js?v=20261020_capture60';
 
 function setup() {
   const {state,createProgram,findUniforms,identityMatrix}=window.probe;
@@ -78,6 +78,27 @@ export async function runRenderingChecks() {
   check(decoded.depth[12]===1000,'Low latency retains its optional small-hole repair');decoded.bitmap?.close();
   state.socketOptions={exactDepth:true};decoded=await window.probe.decodeCamera(payload);
   check(decoded.depth[12]===0,'Quality remains exact on HTTPS and direct transports without temporal metadata');decoded.bitmap?.close();state.socketOptions=null;
+  const qualityAt=(camera,x,y)=>{
+    const previous=gl.getParameter(gl.FRAMEBUFFER_BINDING),target=gl.createFramebuffer(),value=new Uint8Array(4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,target);
+    gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,state.cameraFusion.quality,0,camera);
+    gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,value);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,previous);gl.deleteFramebuffer(target);return value;
+  };
+  fixture([1000],[64],(x,y,i,w,h,value)=>({...value,z:x<32?1000:1030}));
+  state.cameras[0].intrinsicsArray=new Float32Array([600,600,31.5,31.5]);
+  state.settings.mesh_depth_delta=.05;draw('independent_mesh');
+  check(qualityAt(0,31,31)[0]===0&&qualityAt(0,31,31)[1]===0,'3 cm foreground/background step is never triangulated into a ramp at 1 m');
+  check(qualityAt(0,12,31)[0]===255&&qualityAt(0,12,31)[1]===255,'foreground interior remains full resolution beside a rejected edge');
+  fixture([1000],[64],(x,y,i,w,h,value)=>({...value,z:900+3*x+2*y}));
+  state.cameras[0].intrinsicsArray=new Float32Array([600,600,31.5,31.5]);draw('independent_mesh');
+  check(qualityAt(0,31,31)[0]===255&&qualityAt(0,31,31)[1]===255,'continuous oblique surface survives the range and pixel footprint guard');
+  fixture([1000,1000,1000],[64,64,64],(x,y,i,w,h,value)=>({...value,z:x>=29&&x<=35&&y>=29&&y<=35?0:1000}));
+  draw('blendpcr');
+  check([0,1,2].every(i=>qualityAt(i,31,31).every(v=>v===0)),'all-camera blind spot remains invalid in every geometry cache');
+  expect(Array.from(gl.getParameter(gl.COLOR_CLEAR_VALUE)).slice(0,3).map(v=>Math.round(v*255)),
+    'BlendPCR leaves an all-camera blind spot empty');
+  state.settings.mesh_depth_delta=.035;
   fixture([1000,1000,1000,1000],[64,64,64,64]);
   draw('independent_mesh');expect(palette[3],'independent keeps nearest surface');
   draw('unified_mesh');expect(palette[0],'stable near-equal ownership with four cameras');
@@ -177,12 +198,24 @@ export async function runRenderingChecks() {
   check(state.blendPCR.compositions===compositions+1,'mouse/viewpoint motion invalidates the composite immediately');
   state.baseViewer.transform=window.probe.identityMatrix();
 
+  fixture([1000,1000,1000]);draw('blendpcr');
+  const passes=state.blendPCR.metadataPasses;
+  state.cameras[0].uploadRevision++;draw('blendpcr');
+  const partial=image();
+  check(state.blendPCR.metadataPasses===passes+1,'a partial camera update rasterizes only its own full-resolution layer');
+  state.blendPCR.metadataLayerKeys=[];state.blendPCR.cacheKey='';draw('blendpcr');
+  check(image().every((v,i)=>v===partial[i]),'partial-layer reuse is pixel-identical to rebuilding every camera');
+  const viewPasses=state.blendPCR.metadataPasses;
+  state.baseViewer.transform[12]=.02;draw('blendpcr');
+  check(state.blendPCR.metadataPasses===viewPasses+3,'viewpoint changes invalidate every camera layer');
+  state.baseViewer.transform=window.probe.identityMatrix();
+
   fixture([1000],[[379,233]],(x,y,i,w,h,value)=>({z:980+Math.floor(x/12)+Math.floor(y/11),color:[x%256,y%256,(x+y)%256]}));
   draw('independent_mesh');const largeReference=image();draw('blendpcr');const largeBlend=image();
   check(largeReference.every((v,i)=>Math.abs(v-largeBlend[i])<=3),'primitive IDs remain exact beyond the 16-bit boundary');
 
-  const {RIG_SAMPLING_SHADER,FULLSCREEN_VERTEX_SHADER}=await import('./hybrid_camera_quality.js?v=20261020_native_quality');
-  const qualityProbe=(await import('./hybrid_camera_quality.js?v=20261020_native_quality')).compileGpuProgram(gl,FULLSCREEN_VERTEX_SHADER,
+  const {RIG_SAMPLING_SHADER,FULLSCREEN_VERTEX_SHADER}=await import('./hybrid_camera_quality.js?v=20261020_capture60');
+  const qualityProbe=(await import('./hybrid_camera_quality.js?v=20261020_capture60')).compileGpuProgram(gl,FULLSCREEN_VERTEX_SHADER,
     `#version 300 es\nprecision highp float;precision highp int;${RIG_SAMPLING_SHADER}\nout vec4 color;void main(){color=rig_veto(0,vec3(0,0,-1))?vec4(1,0,0,1):vec4(0,1,0,1);}`);
   function vetoProbe(peerDepth) {
     fixture([1000,peerDepth],[64,128],(x,y,i,w,h,value)=>({z:i===0?1000+(x-32)*10:peerDepth,color:palette[i]}));
@@ -198,7 +231,7 @@ export async function runRenderingChecks() {
   // Read depth through a normal overlay: a plane just behind the measured
   // source must remain hidden; one just in front must cover it.
   fixture([1000]);draw('blendpcr');
-  const {compileGpuProgram}=await import('./hybrid_camera_quality.js?v=20261020_native_quality');
+  const {compileGpuProgram}=await import('./hybrid_camera_quality.js?v=20261020_capture60');
   const overlay=compileGpuProgram(gl,`#version 300 es\nprecision highp float;uniform float z;void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));gl_Position=vec4(p*2.-1.,z,1.);}`,
     '#version 300 es\nprecision highp float;out vec4 color;void main(){color=vec4(0,1,0,1);}');
   const p=window.probe.perspectiveMatrix(55,canvas.width/canvas.height,.01,10);

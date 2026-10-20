@@ -1032,7 +1032,26 @@ bool RealSenseDirectFrameSource::open() {
     clear_frame();
     try {
         reset_post_processing_filters();
-        const StreamSettings settings = resolve_stream_settings();
+        StreamSettings settings = resolve_stream_settings();
+        // Keep the native depth grid and select the largest RGB mode at the
+        // same cadence. D435 supports 960x540 color at 60, versus 848x480 depth.
+        if (stream_profile == "fast60" && color_output_enabled) {
+            rs2::context context;
+            for (const auto &device : context.query_devices()) {
+                if (!device_serial.is_empty() && device_serial != String(device.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER))) continue;
+                for (const auto &sensor : device.query_sensors()) {
+                    for (const auto &profile : sensor.get_stream_profiles()) {
+                        if (profile.stream_type() != RS2_STREAM_COLOR || profile.fps() != 60 || profile.format() != RS2_FORMAT_BGR8) continue;
+                        const auto video = profile.as<rs2::video_stream_profile>();
+                        if (video && video.width() * video.height() > settings.color_width * settings.color_height) {
+                            settings.color_width = video.width();
+                            settings.color_height = video.height();
+                        }
+                    }
+                }
+                break;
+            }
+        }
         rs2::config config;
         if (!device_serial.is_empty()) {
             config.enable_device(std::string(device_serial.utf8().get_data()));

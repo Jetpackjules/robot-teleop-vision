@@ -591,7 +591,7 @@
         ? { width: 384, fps: 60, contextFps: 30, detailFps: 60, quality: 74, splatFill: 1.18, exactDepth: false }
         // This is a ceiling, not an upscale: the source retains its native
         // depth grid. Quality also bypasses lossy temporal depth cleanup.
-        : { width: 3840, fps: 30, contextFps: 30, detailFps: 30, quality: 95, splatFill: 1.32, exactDepth: true };
+        : { width: 3840, fps: 60, contextFps: 60, detailFps: 60, quality: 95, splatFill: 1.32, exactDepth: true };
       const persistentReference = document.getElementById(
         "persistent-temporal-reference-enabled"
       ).checked;
@@ -1008,6 +1008,7 @@
         ...(activeViewportMode === "hybrid" ? [
           `RGB-D age   ${hybrid.captureAgeMs == null || hybrid.captureAgeMs < 0 ? "--" : `${Math.round(hybrid.captureAgeMs)}ms`} | packet ${hybrid.packetAgeMs == null || hybrid.packetAgeMs < 0 ? "--" : `${Math.round(hybrid.packetAgeMs)}ms`} | cameras ${hybrid.cameras || 0}`,
           `Decode ${hybrid.decodeMs ? `${hybrid.decodeMs.toFixed(1)}ms` : "--"} | render ${hybrid.renderFps ? `${Math.round(hybrid.renderFps)} fps` : "--"}`,
+          ...(hybrid.decodeErrors ? [`Decode errors ${hybrid.decodeErrors} | ${hybrid.status}`] : []),
           `Camera FPS  ${Object.entries(hybrid.cameraFps || {}).map(([id, rate]) => `${id.slice(-4)}:${Math.round(rate)}`).join("  ") || "--"}`,
         ] : []),
       ].join("\n");

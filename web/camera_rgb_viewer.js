@@ -13,6 +13,9 @@ export class CameraRgbViewer {
       bitrateKbps: 0, cameras: 1, cameraFps: {}, captureUnixMs: 0,
       transport: "Original RGB over HTTPS", status: "Original RGB connecting", renderWarning: "" };
     this.sample = { time: performance.now(), decoded: 0, bytes: 0 };
+    this.socket = null;
+    this.pending = null;
+    this.decoding = false;
   }
 
   start() {
@@ -20,9 +23,12 @@ export class CameraRgbViewer {
     this.running = true;
     this.canvas.getContext("2d", { alpha: false }).clearRect(0, 0, this.canvas.width, this.canvas.height);
     const generation = ++this.generation;
-    // Two bounded requests cover WAN round trips without queuing old frames.
-    this.poll(generation);
-    this.poll(generation);
+    this.visibilityHandler = () => {
+      this.closeSocket();
+      if (!document.hidden && this.running) this.connect(this.generation);
+    };
+    document.addEventListener("visibilitychange", this.visibilityHandler);
+    this.connect(generation);
   }
 
   stop() {
@@ -30,6 +36,86 @@ export class CameraRgbViewer {
     this.generation += 1;
     for (const controller of this.controllers) controller.abort();
     this.controllers.clear();
+    this.closeSocket();
+    this.pending = null;
+    clearTimeout(this.retryTimer);
+    if (this.visibilityHandler) document.removeEventListener("visibilitychange", this.visibilityHandler);
+  }
+
+  closeSocket() {
+    if (!this.socket) return;
+    this.socket.onmessage = this.socket.onclose = this.socket.onerror = null;
+    this.socket.close();
+    this.socket = null;
+  }
+
+  connect(generation) {
+    if (!this.running || generation !== this.generation || document.hidden) return;
+    if (typeof WebSocket === "undefined") { this.poll(generation); this.poll(generation); return; }
+    const query = new URLSearchParams({ w: String(this.options.width || 3840), q: String(this.options.quality || 95) });
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const socket = new WebSocket(`${scheme}://${location.host}/camera-rgb-stream?${query}`);
+    this.socket = socket;
+    socket.binaryType = "arraybuffer";
+    this.stats.transport = "Original RGB WebSocket";
+    socket.onmessage = event => {
+      if (this.socket !== socket || !this.running || generation !== this.generation || document.hidden) return;
+      if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 5) return;
+      const bytes = new Uint8Array(event.data), length = new DataView(event.data).getUint32(0, true);
+      if (length > 4096 || length + 4 >= bytes.length || bytes.length > 16 * 1024 * 1024 + 4100) return;
+      try {
+        const metadata = JSON.parse(new TextDecoder().decode(bytes.subarray(4, length + 4)));
+        if (this.pending) this.stats.dropped++;
+        this.pending = { blob: new Blob([bytes.subarray(length + 4)], { type: "image/jpeg" }), metadata };
+        this.drain(generation);
+      } catch (_) { this.stats.renderWarning = "Invalid original RGB packet"; }
+    };
+    socket.onerror = () => { this.stats.status = "Original RGB reconnecting"; };
+    socket.onclose = () => {
+      if (this.socket !== socket || !this.running || generation !== this.generation) return;
+      this.socket = null;
+      this.stats.connected = false;
+      this.retryTimer = setTimeout(() => this.connect(generation), 500);
+    };
+  }
+
+  async drain(generation) {
+    if (this.decoding) return;
+    this.decoding = true;
+    try {
+      while (this.pending && this.running && generation === this.generation) {
+        const { blob, metadata } = this.pending;
+        this.pending = null;
+        await this.displayFrame(blob, metadata, generation);
+      }
+    } catch (error) { this.stats.renderWarning = error.message; }
+    finally {
+      this.decoding = false;
+      if (this.pending && this.running) this.drain(this.generation);
+    }
+  }
+
+  async displayFrame(blob, metadata, generation) {
+    const id = metadata["x-camera-id"] || "camera";
+    const sequence = Number(metadata["x-frame-sequence"] ?? -1);
+    const capture = Number(metadata["x-capture-unix-ms"] || 0);
+    const epoch = metadata["x-capture-epoch"] || "";
+    const stale = () => id === this.cameraId && epoch === this.captureEpoch && sequence >= 0 && sequence <= this.lastSequence;
+    if (stale() || (epoch !== this.captureEpoch && capture < this.stats.captureUnixMs)) return;
+    this.stats.received++;
+    this.stats.bytes += blob.size;
+    const bitmap = await createImageBitmap(blob);
+    try {
+      if (!this.running || generation !== this.generation || stale()) return;
+      if (this.canvas.width !== bitmap.width || this.canvas.height !== bitmap.height) {
+        this.canvas.width = bitmap.width; this.canvas.height = bitmap.height;
+      }
+      this.canvas.getContext("2d", { alpha: false }).drawImage(bitmap, 0, 0);
+      this.lastPacketMs = performance.now();
+      this.lastSequence = sequence; this.cameraId = id; this.captureEpoch = epoch;
+      Object.assign(this.stats, { connected: true, status: "Original camera RGB", renderWarning: "",
+        width: bitmap.width, height: bitmap.height, decoded: this.stats.decoded + 1, captureUnixMs: capture });
+    } finally { bitmap.close(); }
   }
 
   async poll(generation) {
@@ -44,7 +130,6 @@ export class CameraRgbViewer {
     const controller = new AbortController();
     this.controllers.add(controller);
     const timeout = setTimeout(() => controller.abort(), 10000);
-    let bitmap = null;
     try {
       const query = new URLSearchParams({ w: String(this.options.width || 3840), q: String(this.options.quality || 95) });
       const response = await fetch(`/camera-rgb?${query}`, { cache: "no-store", signal: controller.signal });
@@ -53,33 +138,15 @@ export class CameraRgbViewer {
       }
       const blob = await response.blob();
       if (!this.running || generation !== this.generation) return;
-      this.stats.received += 1;
-      this.stats.bytes += blob.size;
-      const id = response.headers.get("X-Camera-Id") || "camera";
-      const sequence = Number(response.headers.get("X-Frame-Sequence") ?? -1);
-      if (id === this.cameraId && sequence >= 0 && sequence <= this.lastSequence) return;
-      bitmap = await createImageBitmap(blob);
-      if (!this.running || generation !== this.generation) return;
-      // An earlier response may finish decoding after a newer response.
-      if (id === this.cameraId && sequence >= 0 && sequence <= this.lastSequence) return;
-      if (this.canvas.width !== bitmap.width || this.canvas.height !== bitmap.height) {
-        this.canvas.width = bitmap.width;
-        this.canvas.height = bitmap.height;
-      }
-      this.canvas.getContext("2d", { alpha: false }).drawImage(bitmap, 0, 0);
-      this.lastPacketMs = performance.now();
-      this.lastSequence = sequence;
-      this.cameraId = id;
-      Object.assign(this.stats, { connected: true, status: "Original camera RGB", renderWarning: "",
-        width: bitmap.width, height: bitmap.height, decoded: this.stats.decoded + 1,
-        captureUnixMs: Number(response.headers.get("X-Capture-Unix-Ms") || 0) });
+      const metadata = Object.fromEntries(["X-Camera-Id", "X-Frame-Sequence", "X-Capture-Unix-Ms", "X-Capture-Epoch"]
+        .map(key => [key.toLowerCase(), response.headers.get(key)]));
+      await this.displayFrame(blob, metadata, generation);
     } catch (error) {
       if (!this.running || generation !== this.generation) return;
       this.stats.status = error.name === "AbortError" ? "Original RGB timed out" : error.message;
       this.stats.renderWarning = this.stats.status;
       await new Promise((resolve) => setTimeout(resolve, 500));
     } finally {
-      bitmap?.close();
       clearTimeout(timeout);
       this.controllers.delete(controller);
     }

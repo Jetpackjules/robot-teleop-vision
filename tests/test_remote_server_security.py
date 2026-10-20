@@ -65,9 +65,10 @@ def test_desktop_video_is_behind_existing_login_gate():
     assert redirected == [True]
 
 
-def test_original_camera_rgb_is_behind_existing_login_gate():
+@pytest.mark.parametrize("path", ["/camera-rgb?w=3840&q=95", "/camera-rgb-stream?w=3840&q=95"])
+def test_original_camera_rgb_is_behind_existing_login_gate(path):
     handler = bare_handler()
-    handler.path = "/camera-rgb?w=3840&q=95"
+    handler.path = path
     handler.auth_required = lambda: True
     handler.is_authorized = lambda: False
     handler.serve_camera_rgb = lambda _: pytest.fail("unauthorized camera access")
@@ -92,12 +93,12 @@ def test_original_rgb_proxy_uses_fixed_endpoint_and_bounded_options(monkeypatch)
                     "X-Frame-Height": "720", "X-Camera-Id": "1234"}.get(name, default)
     class Connection:
         def __init__(self, host, port, timeout):
-            assert (host, port, timeout) == ("127.0.0.1", 8780, 5)
+            assert (host, port, timeout) == ("127.0.0.1", 8781, 5)
         def request(self, method, path): requests.append((method, path))
         def getresponse(self): return Response()
         def close(self): pass
     monkeypatch.setattr(remote.http.client, "HTTPConnection", Connection)
-    handler = bare_handler(server=SimpleNamespace(stream_host="127.0.0.1", stream_port=8780,
+    handler = bare_handler(server=SimpleNamespace(stream_host="127.0.0.1", stream_port=8780, capture_port=8781,
         rgbd_http_slots=BoundedSemaphore(1)))
     headers = {}
     errors = []
@@ -116,6 +117,44 @@ def test_original_rgb_proxy_uses_fixed_endpoint_and_bounded_options(monkeypatch)
     handler.serve_camera_rgb("camera=bad%0d%0aHeader")
     assert errors == [400] and len(requests) == 1
     assert handler.server.rgbd_http_slots.acquire(blocking=False)
+
+
+def test_original_rgb_websocket_relays_latest_frame_from_capture_port(monkeypatch):
+    import threading
+    import struct
+    import lan_remote_view_server as remote
+    stopped = threading.Event()
+    urls = []
+    class Reader:
+        def __init__(self, url):
+            urls.append(url)
+            self.first = True
+        def read_part(self):
+            if self.first:
+                self.first = False
+                return {"x-camera-id":"1234", "x-frame-sequence":"17", "x-capture-epoch":"owner"}, b"jpeg-original"
+            stopped.wait(2)
+            raise OSError("closed")
+        def close(self): stopped.set()
+    monkeypatch.setattr(remote,"MultipartRawFrameReader", Reader)
+    handler = bare_handler(server=SimpleNamespace(stream_host="127.0.0.1",capture_port=8781,
+        rgbd_http_slots=threading.BoundedSemaphore(1)))
+    handler.path="/camera-rgb-stream?w=99999&q=101&camera=1234&url=https://untrusted.example"
+    handler.accept_websocket=lambda: True
+    handler.connection=SimpleNamespace(settimeout=lambda _:None)
+    packets=[]
+    def send(payload,opcode):
+        packets.append((payload,opcode))
+        raise BrokenPipeError("viewer closed")
+    handler.send_ws_frame=send
+    handler.handle_camera_rgb_websocket()
+    assert urls==["http://127.0.0.1:8781/camera-rgb-stream?camera=1234&w=3840&q=100"]
+    packet,opcode=packets[0]
+    assert opcode==2
+    length=struct.unpack_from("<I",packet)[0]
+    assert json.loads(packet[4:4+length])["x-capture-epoch"]=="owner"
+    assert packet[4+length:]==b"jpeg-original"
+    assert stopped.is_set() and handler.server.rgbd_http_slots.acquire(blocking=False)
 
 
 def test_camera_locations_setting_is_typed_and_can_be_saved():

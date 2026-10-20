@@ -7,6 +7,8 @@
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/string.hpp>
+#include <cstddef>
+#include <cstdint>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -34,6 +36,8 @@ public:
     godot::Ref<godot::Image> get_depth_image() const;
     godot::Ref<godot::Image> get_color_image() const;
     godot::Dictionary get_frame() const;
+    double get_capture_fps() const;
+    double get_capture_unix_ms() const;
 
 protected:
     static void _bind_methods();
@@ -47,6 +51,8 @@ private:
 #endif
     const uint8_t *view = nullptr;
     size_t view_size = 0;
+    double capture_fps = 0.0;
+    double capture_unix_ms = 0.0;
 
     uint64_t sequence = 0;
     uint64_t frame_id = 0;
@@ -69,4 +75,24 @@ private:
         memcpy(&value, p_data + p_offset, sizeof(T));
         return value;
     }
+};
+
+// One capture owner publishes immutable snapshots for independent preview
+// processes. The fixed-size mapping never shrinks underneath a reader.
+class RealSenseSharedMemoryWriter {
+public:
+    ~RealSenseSharedMemoryWriter();
+    bool open(const godot::String &p_name);
+    void close();
+    bool publish(uint64_t p_frame_id, int p_stride, const godot::Vector4 &p_intrinsics,
+        const godot::Ref<godot::Image> &p_depth, const godot::Ref<godot::Image> &p_color,
+        double p_capture_fps, double p_capture_unix_ms);
+private:
+    static constexpr size_t CAPACITY = 16 * 1024 * 1024;
+    uint8_t *view = nullptr;
+    uint64_t sequence = 0;
+    godot::String name;
+#ifdef _WIN32
+    HANDLE mapping_handle = nullptr;
+#endif
 };

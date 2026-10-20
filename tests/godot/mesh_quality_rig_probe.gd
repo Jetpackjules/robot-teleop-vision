@@ -61,6 +61,43 @@ func moving_capture(world: Node3D,native_shader: Shader) -> void:
     source.queue_free()
     consumer.queue_free()
 
+func edge_guards(world: Node3D,native_shader: Shader) -> void:
+    var source:=Surface.new()
+    source.native_grid=true
+    source.image_size=64
+    source.mesh=grid_mesh(64)
+    source.material_override=ShaderMaterial.new()
+    source.material_override.shader=native_shader
+    world.add_child(source)
+    source.fill(1.0,Color.RED)
+    source.material_override.set_shader_parameter("intrinsics",Vector4(600,600,31.5,31.5))
+    var active: Array[MeshInstance3D]=[source]
+    for shape in ["step","slope","unknown"]:
+        var image:=Image.create(64,64,false,Image.FORMAT_RF)
+        for y in 64:
+            for x in 64:
+                var z:=1.0 if x<32 else 1.03
+                if shape=="slope": z=0.9+0.003*x+0.002*y
+                if shape=="unknown" and x>=29 and x<=35 and y>=29 and y<=35: z=0.0
+                image.set_pixel(x,y,Color(z,0,0,1))
+        (source.material_override.get_shader_parameter("depth_tex") as ImageTexture).update(image)
+        source.frame_sequence+=1
+        for _frame in 4:
+            quality_rig.update(active,true)
+            await process_frame
+            await RenderingServer.frame_post_draw
+        var map: Image=quality_rig.get_cache(source).viewport.get_texture().get_image()
+        var edge:=map.get_pixel(31,31)
+        if shape=="step":
+            check(edge.r<0.5 and edge.g<0.5,"native mesh does not join a 3 cm foreground step to the background")
+            check(map.get_pixel(12,31).r>0.5,"native foreground retains its original interior detail")
+        elif shape=="slope":
+            check(edge.r>0.5 and edge.g>0.5,"native continuous sloped surface survives adaptive edge rejection")
+        else:
+            check(edge.r<0.5 and edge.g<0.5,"native unseen space remains invalid")
+    quality_rig.clear()
+    source.queue_free()
+
 func draw_rig(patch: bool) -> void:
     for frame in 8:
         var limits: Array[Vector2]=[Vector2(0.1,4),Vector2(0.1,4)]
@@ -149,5 +186,6 @@ func run() -> void:
         check(source.layers==1,"leaving cached modes restores layers")
     for source in surfaces: source.hide()
     await moving_capture(world,native_shader)
+    await edge_guards(world,native_shader)
     print("MESH_QUALITY_RIG checks=%d failures=%d"%[checks,failures])
     quit(0 if failures==0 else 1)

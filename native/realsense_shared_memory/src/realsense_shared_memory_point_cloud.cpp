@@ -43,6 +43,13 @@ extern "C" {
 
 using namespace godot;
 
+static bool continuous_depth_triangle(float a, float b, float c, const Vector4 &k, int stride, double relative_limit) {
+    const double z = std::max({double(a),double(b),double(c)});
+    const double footprint = z * stride / std::max(1.0,std::min(double(k.x),double(k.y)));
+    const double limit = std::min(relative_limit*z,std::max(0.004,0.006*z*z+2.0*footprint));
+    return z-std::min({double(a),double(b),double(c)}) <= limit;
+}
+
 #ifndef _WIN32
 struct RgbdJpegError {
 	jpeg_error_mgr base;
@@ -130,6 +137,10 @@ static PackedByteArray encode_resampled_rgb_jpeg_fast(
 			p_source.size() < int64_t(p_source_width) * p_source_height * p_source_channels) {
 		return result;
 	}
+	bool direct_rows = !p_color_match_enabled && p_target_width == p_crop_right-p_crop_left && p_target_height == p_crop_bottom-p_crop_top;
+#ifndef JCS_EXTENSIONS
+	direct_rows = direct_rows && p_source_channels == 3;
+#endif
 
 	jpeg_compress_struct encoder{};
 	RgbdJpegError error{};
@@ -146,12 +157,29 @@ static PackedByteArray encode_resampled_rgb_jpeg_fast(
 	jpeg_mem_dest(&encoder, &output, &output_size);
 	encoder.image_width = p_target_width;
 	encoder.image_height = p_target_height;
-	encoder.input_components = 3;
+	encoder.input_components = direct_rows ? p_source_channels : 3;
 	encoder.in_color_space = JCS_RGB;
+#ifdef JCS_EXTENSIONS
+	if (direct_rows && p_source_channels == 4) encoder.in_color_space = JCS_EXT_RGBA;
+#endif
 	jpeg_set_defaults(&encoder);
 	jpeg_set_quality(&encoder, std::clamp(p_quality, 1, 100), TRUE);
 	encoder.dct_method = JDCT_FASTEST;
 	jpeg_start_compress(&encoder, TRUE);
+	if (direct_rows) {
+		// Full-resolution RGB needs no interpolation, per-channel rounding or
+		// intermediate RGB image. libjpeg-turbo reads RGBA scanlines directly.
+		const uint8_t *pixels=p_source.ptr();
+		while (encoder.next_scanline<encoder.image_height) {
+			JSAMPROW row=const_cast<JSAMPROW>(pixels+((p_crop_top+encoder.next_scanline)*p_source_width+p_crop_left)*p_source_channels);
+			jpeg_write_scanlines(&encoder,&row,1);
+		}
+		jpeg_finish_compress(&encoder);
+		result.resize(int64_t(output_size));
+		std::memcpy(result.ptrw(),output,output_size);
+		jpeg_destroy_compress(&encoder);std::free(output);
+		return result;
+	}
 
 	const int crop_width = p_crop_right - p_crop_left;
 	const int crop_height = p_crop_bottom - p_crop_top;
@@ -366,6 +394,9 @@ static float nearest_valid_depth_in_region(
     if (std::isfinite(nearest)) {
         return nearest;
     }
+	// Native-resolution samples are measurements, including their holes.
+	// Halo repair belongs only to a genuinely downsampled footprint.
+	if (x1-x0==1 && y1-y0==1) return 0.0f;
 
     // A thin feature can fall exactly between two downsample footprints. Look
     // one source pixel beyond the footprint, but accept the halo only when at
@@ -422,6 +453,10 @@ RealSenseSharedMemoryPointCloud::~RealSenseSharedMemoryPointCloud() {
 
 void RealSenseSharedMemoryPointCloud::_bind_methods() {
     ClassDB::bind_method(D_METHOD("set_shared_memory_name", "name"), &RealSenseSharedMemoryPointCloud::set_shared_memory_name);
+    ClassDB::bind_method(D_METHOD("set_capture_only", "enabled"), &RealSenseSharedMemoryPointCloud::set_capture_only);
+    ClassDB::bind_method(D_METHOD("get_capture_only"), &RealSenseSharedMemoryPointCloud::get_capture_only);
+    ClassDB::bind_method(D_METHOD("set_publish_shared_memory_name", "name"), &RealSenseSharedMemoryPointCloud::set_publish_shared_memory_name);
+    ClassDB::bind_method(D_METHOD("get_publish_shared_memory_name"), &RealSenseSharedMemoryPointCloud::get_publish_shared_memory_name);
     ClassDB::bind_method(D_METHOD("get_shared_memory_name"), &RealSenseSharedMemoryPointCloud::get_shared_memory_name);
     ClassDB::bind_method(D_METHOD("set_point_pixel_size", "size"), &RealSenseSharedMemoryPointCloud::set_point_pixel_size);
     ClassDB::bind_method(D_METHOD("get_point_pixel_size"), &RealSenseSharedMemoryPointCloud::get_point_pixel_size);
@@ -509,6 +544,8 @@ void RealSenseSharedMemoryPointCloud::_bind_methods() {
     ClassDB::bind_method(D_METHOD("set_direct_realsense_filter_config", "config"), &RealSenseSharedMemoryPointCloud::set_direct_realsense_filter_config);
     ClassDB::bind_method(D_METHOD("get_direct_realsense_status"), &RealSenseSharedMemoryPointCloud::get_direct_realsense_status);
     ClassDB::bind_method(D_METHOD("get_direct_realsense_capture_fps"), &RealSenseSharedMemoryPointCloud::get_direct_realsense_capture_fps);
+    ClassDB::bind_method(D_METHOD("request_camera_rgb_encode", "max_width", "jpeg_quality"), &RealSenseSharedMemoryPointCloud::request_camera_rgb_encode, DEFVAL(3840), DEFVAL(95));
+    ClassDB::bind_method(D_METHOD("take_camera_rgb_encoded_frame"), &RealSenseSharedMemoryPointCloud::take_camera_rgb_encoded_frame);
     ClassDB::bind_method(D_METHOD("is_connected"), &RealSenseSharedMemoryPointCloud::is_connected);
     ClassDB::bind_method(D_METHOD("get_render_fps"), &RealSenseSharedMemoryPointCloud::get_render_fps);
     ClassDB::bind_method(D_METHOD("get_display_frame_age_ms"), &RealSenseSharedMemoryPointCloud::get_display_frame_age_ms);
@@ -694,6 +731,10 @@ void RealSenseSharedMemoryPointCloud::_process(double p_delta) {
         latest_frame = make_reader_snapshot(reader, depth_image, color_image);
     }
     last_display_frame_seconds = now_seconds();
+    if (!direct_realsense_enabled && reader.is_valid() && reader->get_capture_unix_ms() > 0) {
+        const double unix_ms = std::chrono::duration<double, std::milli>(std::chrono::system_clock::now().time_since_epoch()).count();
+        last_display_frame_seconds -= std::max(0.0, unix_ms - reader->get_capture_unix_ms()) * 0.001;
+    }
 
     int width = latest_frame.width;
     int height = latest_frame.height;
@@ -705,6 +746,23 @@ void RealSenseSharedMemoryPointCloud::_process(double p_delta) {
     current_height = height;
     current_stride = stride;
     current_intrinsics = latest_frame.intrinsics;
+    // SDK sequences restart when a profile/calibration releases the device.
+    // Encoders and preview caches need a monotonic sequence for this node.
+    latest_frame.sequence = (publication_sequence += 2);
+    if (capture_only) {
+        // A headless capture owner has no GPU surfaces. Keep original images
+        // for the encoder and publish exactly the same snapshot to previews.
+        current_frame_sequence = latest_frame.sequence;
+        current_depth_image = depth_image;
+        current_color_image = color_image;
+        if (!publish_shared_memory_name.is_empty()) {
+            if (!snapshot_writer_open) snapshot_writer_open = snapshot_writer.open(publish_shared_memory_name);
+            if (snapshot_writer_open) snapshot_writer.publish(current_frame_sequence, current_stride, current_intrinsics,
+                depth_image, color_image, get_direct_realsense_capture_fps(),
+                std::chrono::duration<double, std::milli>(std::chrono::system_clock::now().time_since_epoch()).count());
+        }
+        return;
+    }
     const bool cpu_built_surface = cpu_project_points || (render_connected_mesh && !gpu_connected_mesh);
     const bool static_gpu_mesh_surface = render_connected_mesh && gpu_connected_mesh && gpu_mesh_static_shader;
     if (!cpu_built_surface && (!gpu_connected_mesh || static_gpu_mesh_surface) && (width != grid_width || height != grid_height || stride != grid_stride || get_mesh().is_null())) {
@@ -813,6 +871,16 @@ void RealSenseSharedMemoryPointCloud::_process(double p_delta) {
         fps_accum = 0.0;
     }
 }
+
+void RealSenseSharedMemoryPointCloud::set_capture_only(bool p_enabled) { capture_only = p_enabled; }
+bool RealSenseSharedMemoryPointCloud::get_capture_only() const { return capture_only; }
+void RealSenseSharedMemoryPointCloud::set_publish_shared_memory_name(const String &p_name) {
+    if (publish_shared_memory_name == p_name) return;
+    snapshot_writer.close();
+    snapshot_writer_open = false;
+    publish_shared_memory_name = p_name;
+}
+String RealSenseSharedMemoryPointCloud::get_publish_shared_memory_name() const { return publish_shared_memory_name; }
 
 void RealSenseSharedMemoryPointCloud::set_shared_memory_name(const String &p_name) {
     if (shared_memory_name == p_name) {
@@ -1522,6 +1590,7 @@ String RealSenseSharedMemoryPointCloud::get_direct_realsense_status() const {
 }
 
 double RealSenseSharedMemoryPointCloud::get_direct_realsense_capture_fps() const {
+    if (!direct_realsense_enabled && reader.is_valid()) return reader->get_capture_fps();
     if (direct_realsense.is_null()) {
         return 0.0;
     }
@@ -1629,6 +1698,50 @@ Dictionary RealSenseSharedMemoryPointCloud::get_depth_u16_frame(int p_max_width)
     );
     result["depth_mm"] = depth_mm;
     result["sequence"] = int64_t(current_frame_sequence);
+    return result;
+}
+
+bool RealSenseSharedMemoryPointCloud::request_camera_rgb_encode(int p_max_width, int p_jpeg_quality) {
+    const Ref<Image> image = get_raw_color_image();
+    if (image.is_null() || image->is_empty()) return false;
+    RgbdEncodeJob job;
+    job.original_rgb = true;
+    job.sequence = current_frame_sequence;
+    job.color_width = image->get_width();
+    job.color_height = image->get_height();
+    job.color_format = image->get_format();
+    job.color_data = image->get_data();
+    job.max_width = std::clamp(p_max_width, 1, 3840);
+    job.jpeg_quality = std::clamp(p_jpeg_quality, 1, 100);
+    job.capture_unix_ms = std::chrono::duration<double, std::milli>(std::chrono::system_clock::now().time_since_epoch()).count()
+        - get_display_frame_age_ms();
+    ensure_rgbd_encoder_worker();
+    {
+        std::lock_guard<std::mutex> lock(rgbd_encoder_mutex);
+        if (job.sequence == camera_rgb_last_submitted_sequence && job.max_width == camera_rgb_last_width &&
+                job.jpeg_quality == camera_rgb_last_quality) return false;
+        camera_rgb_last_submitted_sequence = job.sequence;
+        camera_rgb_last_width = job.max_width;
+        camera_rgb_last_quality = job.jpeg_quality;
+        camera_rgb_pending = std::move(job);
+        camera_rgb_pending_ready = true;
+    }
+    rgbd_encoder_cv.notify_one();
+    return true;
+}
+
+Dictionary RealSenseSharedMemoryPointCloud::take_camera_rgb_encoded_frame() {
+    std::lock_guard<std::mutex> lock(rgbd_encoder_mutex);
+    Dictionary result;
+    if (!camera_rgb_completed_ready) return result;
+    result["body"] = camera_rgb_completed.color_jpeg;
+    result["width"] = camera_rgb_completed.width;
+    result["height"] = camera_rgb_completed.height;
+    result["sequence"] = int64_t(camera_rgb_completed.sequence);
+    result["capture_unix_ms"] = camera_rgb_completed.capture_unix_ms;
+    result["encode_ms"] = camera_rgb_completed.encode_ms;
+    camera_rgb_completed_ready = false;
+    camera_rgb_completed = RgbdEncodeResult();
     return result;
 }
 
@@ -1756,6 +1869,7 @@ void RealSenseSharedMemoryPointCloud::stop_rgbd_encoder_worker() {
         }
         rgbd_encoder_stop = true;
         rgbd_encoder_pending_ready = false;
+        camera_rgb_pending_ready = false;
     }
     rgbd_encoder_cv.notify_all();
     if (rgbd_encoder_worker_a.joinable()) {
@@ -1769,6 +1883,7 @@ void RealSenseSharedMemoryPointCloud::stop_rgbd_encoder_worker() {
     rgbd_encoder_busy = false;
     rgbd_encoder_active_jobs = 0;
     rgbd_encoder_completed_ready = false;
+    camera_rgb_completed_ready = false;
 }
 
 void RealSenseSharedMemoryPointCloud::rgbd_encoder_worker_loop() {
@@ -1777,14 +1892,22 @@ void RealSenseSharedMemoryPointCloud::rgbd_encoder_worker_loop() {
         {
             std::unique_lock<std::mutex> lock(rgbd_encoder_mutex);
             rgbd_encoder_cv.wait(lock, [this]() {
-                return rgbd_encoder_stop || rgbd_encoder_pending_ready;
+                return rgbd_encoder_stop || rgbd_encoder_pending_ready || camera_rgb_pending_ready;
             });
             if (rgbd_encoder_stop) {
                 return;
             }
-            job = std::move(rgbd_encoder_pending);
-            rgbd_encoder_pending = RgbdEncodeJob();
-            rgbd_encoder_pending_ready = false;
+            const bool original = camera_rgb_pending_ready && (rgbd_encoder_prefer_original || !rgbd_encoder_pending_ready);
+            rgbd_encoder_prefer_original = !original;
+            if (original) {
+                job = std::move(camera_rgb_pending);
+                camera_rgb_pending = RgbdEncodeJob();
+                camera_rgb_pending_ready = false;
+            } else {
+                job = std::move(rgbd_encoder_pending);
+                rgbd_encoder_pending = RgbdEncodeJob();
+                rgbd_encoder_pending_ready = false;
+            }
             ++rgbd_encoder_active_jobs;
             rgbd_encoder_busy = true;
         }
@@ -1795,6 +1918,14 @@ void RealSenseSharedMemoryPointCloud::rgbd_encoder_worker_loop() {
             rgbd_encoder_active_jobs = std::max(0, rgbd_encoder_active_jobs - 1);
             rgbd_encoder_busy = rgbd_encoder_active_jobs > 0;
             if (completed.valid) {
+                if (job.original_rgb) {
+                    if (completed.sequence > camera_rgb_last_completed_sequence) {
+                        camera_rgb_last_completed_sequence = completed.sequence;
+                        camera_rgb_completed = std::move(completed);
+                        camera_rgb_completed_ready = true;
+                    }
+                    continue;
+                }
                 // Workers can finish out of order. Never let an older frame
                 // replace a newer completion that is ready for publication.
                 const uint64_t newest_sequence = rgbd_encoder_completed_ready
@@ -1819,6 +1950,29 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
 		const RgbdEncodeJob &p_job) {
 	RgbdEncodeResult result;
 	const auto started = std::chrono::steady_clock::now();
+	if (p_job.original_rgb) {
+		const int width=std::max(1,std::min(p_job.color_width,p_job.max_width));
+		const int height=std::max(1,int(std::lround(double(p_job.color_height)*width/p_job.color_width)));
+#ifndef _WIN32
+		result.color_jpeg=encode_resampled_rgb_jpeg_fast(p_job.color_data,p_job.color_width,p_job.color_height,
+			rgbd_color_channels(p_job.color_format),0,0,p_job.color_width,p_job.color_height,width,height,
+			p_job.jpeg_quality,false,Vector3(1,1,1),Vector3());
+#else
+		Ref<Image> image = Image::create_from_data(p_job.color_width, p_job.color_height, false,
+			p_job.color_format, p_job.color_data);
+		if (image.is_null() || image->is_empty()) return result;
+		if (image->get_width() > p_job.max_width) image->resize(p_job.max_width,
+			std::max(1, int(std::lround(double(image->get_height()) * p_job.max_width / image->get_width()))), Image::INTERPOLATE_LANCZOS);
+		image->convert(Image::FORMAT_RGB8);
+		result.color_jpeg = image->save_jpg_to_buffer(float(p_job.jpeg_quality) / 100.0f);
+#endif
+		result.valid = !result.color_jpeg.is_empty();
+		result.width = width; result.height = height;
+		result.sequence = p_job.sequence;
+		result.capture_unix_ms = p_job.capture_unix_ms;
+		result.encode_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+		return result;
+	}
 	if (p_job.depth_width <= 0 || p_job.depth_height <= 0 ||
 			p_job.depth_data.size() < p_job.depth_width * p_job.depth_height * 4) {
 		return result;
@@ -1841,6 +1995,20 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
 	PackedByteArray depth_mm;
     depth_mm.resize(target_width * target_height * 2);
     uint8_t *destination = depth_mm.ptrw();
+	const bool native_grid=target_width==crop_width && target_height==crop_height;
+	const float *source_depth=reinterpret_cast<const float *>(p_job.depth_data.ptr());
+    if (native_grid) {
+        for (int y=0;y<target_height;++y) {
+            const float *row=source_depth+(crop_top+y)*p_job.depth_width+crop_left;
+            for (int x=0;x<target_width;++x) {
+                const float depth=row[x];
+                const uint16_t mm=std::isfinite(depth) && depth>0.0f && depth<=p_job.max_depth
+                    ? uint16_t(std::min(65535.0,std::round(double(depth)*1000.0))) : 0;
+                const int offset=(y*target_width+x)*2;
+                destination[offset]=uint8_t(mm&255);destination[offset+1]=uint8_t(mm>>8);
+            }
+        }
+    } else {
     for (int y = 0; y < target_height; ++y) {
 		const int source_y0 = std::min(
 			crop_bottom - 1,
@@ -1880,6 +2048,7 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
             destination[destination_offset] = uint8_t(millimeters & 0xff);
             destination[destination_offset + 1] = uint8_t((millimeters >> 8) & 0xff);
         }
+    }
     }
 
 	const int color_left = std::clamp(int(std::floor(crop_left_normalized * p_job.color_width)), 0, p_job.color_width - 1);
@@ -2285,11 +2454,15 @@ bool depth_in_range(float d) {
 }
 
 float depth_delta_limit(float a, float b) {
-    return max_depth_delta * max(max(abs(a), abs(b)), 0.000001);
+    float z = max(max(abs(a), abs(b)), 0.000001);
+    // A relative 5% allowance joins a 3 cm block to its background at 1 m.
+    // Bound it by range-dependent stereo noise and two projected pixels.
+    float footprint = z * grid_stride / max(min(intrinsics.x,intrinsics.y),1.0);
+    return min(max_depth_delta*z,max(0.004,0.006*z*z+2.0*footprint));
 }
 
 float triangle_delta_limit(float da, float db, float dc) {
-    return max_depth_delta * max(max(abs(da), abs(db)), max(abs(dc), 0.000001));
+    return depth_delta_limit(max(abs(da),abs(db)),abs(dc));
 }
 
 bool triangle_depth_ok(float da, float db, float dc) {
@@ -2327,7 +2500,7 @@ float close_neighbor_count(vec2 uv, float d) {
 }
 
 bool corner_supported(vec2 uv, float d) {
-    float guard_delta = max(0.002, max_depth_delta * abs(d) * 0.5);
+    float guard_delta = depth_delta_limit(d,d);
     return close_neighbor_count_delta(uv, d, guard_delta) >= 2.0;
 }
 
@@ -3057,8 +3230,8 @@ int RealSenseSharedMemoryPointCloud::rebuild_cpu_connected_mesh(const Ref<Image>
             const float db = depth_data.decode_float((y * width + x + 1) * 4);
             const float dc = depth_data.decode_float(((y + 1) * width + x) * 4);
             const float dd = depth_data.decode_float(((y + 1) * width + x + 1) * 4);
-            const bool first_depth_ok = Math::abs(double(da - dc)) <= mesh_max_depth_delta && Math::abs(double(dc - db)) <= mesh_max_depth_delta && Math::abs(double(db - da)) <= mesh_max_depth_delta;
-            const bool second_depth_ok = Math::abs(double(db - dc)) <= mesh_max_depth_delta && Math::abs(double(dc - dd)) <= mesh_max_depth_delta && Math::abs(double(dd - db)) <= mesh_max_depth_delta;
+            const bool first_depth_ok = continuous_depth_triangle(da,dc,db,intrinsics,stride,mesh_max_depth_delta);
+            const bool second_depth_ok = continuous_depth_triangle(db,dc,dd,intrinsics,stride,mesh_max_depth_delta);
             if (a >= 0 && b >= 0 && c >= 0 && first_depth_ok && triangle_valid(vertices, a, c, b, max_edge_sq) && triangle_color_valid(colors, a, c, b)) {
                 indices.set(write_index++, a);
                 indices.set(write_index++, c);
@@ -3210,9 +3383,10 @@ vec3 projected(int x, int y, float depth) {
 }
 
 bool depth_delta_ok(float a, float b, float c) {
-    return abs(a - b) <= params.max_depth_delta
-        && abs(b - c) <= params.max_depth_delta
-        && abs(c - a) <= params.max_depth_delta;
+    float z=max(a,max(b,c));
+    float footprint=z*float(params.stride)/max(min(params.fx,params.fy),1.0);
+    float limit=min(params.max_depth_delta*z,max(0.004,0.006*z*z+2.0*footprint));
+    return z-min(a,min(b,c))<=limit;
 }
 
 bool edge_ok(vec3 a, vec3 b, vec3 c) {
@@ -3530,9 +3704,7 @@ int RealSenseSharedMemoryPointCloud::rebuild_gpu_connected_mesh(const Ref<Image>
                 const float dc = depth_data.decode_float(ic * 4);
                 const float dd = depth_data.decode_float(id * 4);
                 const bool first_depth_ok = valid_depth(da) && valid_depth(dc) && valid_depth(db)
-                    && Math::abs(double(da - dc)) <= mesh_max_depth_delta
-                    && Math::abs(double(dc - db)) <= mesh_max_depth_delta
-                    && Math::abs(double(db - da)) <= mesh_max_depth_delta;
+                    && continuous_depth_triangle(da,dc,db,intrinsics,stride,mesh_max_depth_delta);
                 if (first_depth_ok) {
                     const Vector3 pa = projected(x, y, da);
                     const Vector3 pc = projected(x, y + 1, dc);
@@ -3544,9 +3716,7 @@ int RealSenseSharedMemoryPointCloud::rebuild_gpu_connected_mesh(const Ref<Image>
                     }
                 }
                 const bool second_depth_ok = valid_depth(db) && valid_depth(dc) && valid_depth(dd)
-                    && Math::abs(double(db - dc)) <= mesh_max_depth_delta
-                    && Math::abs(double(dc - dd)) <= mesh_max_depth_delta
-                    && Math::abs(double(dd - db)) <= mesh_max_depth_delta;
+                    && continuous_depth_triangle(db,dc,dd,intrinsics,stride,mesh_max_depth_delta);
                 if (second_depth_ok) {
                     const Vector3 pb = projected(x + 1, y, db);
                     const Vector3 pc = projected(x, y + 1, dc);
@@ -3787,8 +3957,8 @@ int RealSenseSharedMemoryPointCloud::append_cpu_grid_surface(
             const float db = depth_data.decode_float((y * width + x + 1) * 4);
             const float dc = depth_data.decode_float(((y + 1) * width + x) * 4);
             const float dd = depth_data.decode_float(((y + 1) * width + x + 1) * 4);
-            const bool first_depth_ok = Math::abs(double(da - dc)) <= mesh_max_depth_delta && Math::abs(double(dc - db)) <= mesh_max_depth_delta && Math::abs(double(db - da)) <= mesh_max_depth_delta;
-            const bool second_depth_ok = Math::abs(double(db - dc)) <= mesh_max_depth_delta && Math::abs(double(dc - dd)) <= mesh_max_depth_delta && Math::abs(double(dd - db)) <= mesh_max_depth_delta;
+            const bool first_depth_ok = continuous_depth_triangle(da,dc,db,intrinsics,stride,mesh_max_depth_delta);
+            const bool second_depth_ok = continuous_depth_triangle(db,dc,dd,intrinsics,stride,mesh_max_depth_delta);
             if (a >= 0 && b >= 0 && c >= 0 && first_depth_ok && triangle_valid(vertices, a, c, b, max_edge_sq) && triangle_color_valid(colors, a, c, b)) {
                 indices.set(write_index++, a);
                 indices.set(write_index++, c);

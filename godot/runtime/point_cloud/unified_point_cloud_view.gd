@@ -868,7 +868,25 @@ var _realsense_scan_helper: Object = null
 var _world_level_path: String = ""
 var _last_world_level_registration_token: float = 0.0
 
+var _capture_control_settings: Dictionary = {}
+var _capture_control_stamp := -1
+var _capture_control_last_check := 0
+var _capture_control_last_write := 0
+var _capture_control_previous: Dictionary = {}
+var _capture_paused := false
+var _capture_view_cpu_ms := 0.0
+
 func _ready() -> void:
+	if _capture_only():
+		if OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX").is_empty() or DisplayServer.get_name() != "headless":
+			push_error("Independent capture requires --headless and a unique ROBOT_TELEOP_CAPTURE_SHM_PREFIX.")
+			get_tree().quit(1)
+			return
+		Engine.max_fps = 120
+		# Capture groups finish before the main-thread configuration/HTTP group.
+		# Each sensor can poll/align concurrently without racing its setters.
+		process_thread_group = Node.PROCESS_THREAD_GROUP_MAIN_THREAD
+		process_thread_group_order = 1
 	add_to_group("unified_point_cloud_view")
 	_point_cloud_stats_path = ProjectSettings.globalize_path("user://point_cloud_stream_stats.json")
 	_alignment_result_path = ProjectSettings.globalize_path("user://oakd_realsense_alignment.json")
@@ -934,6 +952,8 @@ func _exit_tree() -> void:
 	_free_debug_panel()
 
 func _process(_delta: float) -> void:
+	var started := Time.get_ticks_usec()
+	_sync_capture_control()
 	_update_runtime_stream_owner_state()
 	_refresh_realsense_devices(false)
 	_poll_point_cloud_stats()
@@ -946,6 +966,7 @@ func _process(_delta: float) -> void:
 	_update_camera_renderers()
 	_update_realsense_direct_status()
 	_update_debug_panel(false)
+	_capture_view_cpu_ms=(Time.get_ticks_usec()-started)*0.001
 
 func _update_robot_overlay_settings() -> void:
 	if not is_inside_tree():
@@ -1525,6 +1546,8 @@ func _realsense_settings(camera_id: String) -> Dictionary:
 	return realsense_device_registry[serial] as Dictionary
 
 func _realsense_setting(camera_id: String, key: String, fallback):
+	if _capture_only() and _capture_control_settings.has(camera_id):
+		return (_capture_control_settings[camera_id] as Dictionary).get(key,fallback)
 	var node_settings := _realsense_camera_node_settings(camera_id)
 	if node_settings.has(key):
 		return node_settings.get(key, fallback)
@@ -1697,13 +1720,13 @@ func _update_runtime_stream_owner_state() -> void:
 	_write_runtime_stream_owner(false)
 
 func _runtime_stream_owner_blocks_editor() -> bool:
-	if not Engine.is_editor_hint():
+	if not Engine.is_editor_hint() or _shared_capture_preview():
 		return false
 	_update_runtime_stream_owner_cache(false)
 	return _runtime_stream_owner_blocks_editor_cached
 
 func _update_runtime_stream_owner_cache(force: bool) -> void:
-	if not Engine.is_editor_hint():
+	if not Engine.is_editor_hint() or _shared_capture_preview():
 		_runtime_stream_owner_blocks_editor_cached = false
 		return
 	var now_msec := Time.get_ticks_msec()
@@ -1830,9 +1853,13 @@ func _camera_uses_custom_depth_range(camera_id: String) -> bool:
 	return not is_equal_approx(camera_max, max_depth_m)
 
 func _camera_min_depth(camera_id: String) -> float:
+	if _capture_only() and _capture_control_settings.has(camera_id):
+		return float(_capture_control_settings[camera_id].get("_capture_min_depth",min_depth_m))
 	return min_depth_m
 
 func _camera_max_depth(camera_id: String) -> float:
+	if _capture_only() and _capture_control_settings.has(camera_id):
+		return float(_capture_control_settings[camera_id].get("_capture_max_depth",max_depth_m))
 	if _camera_uses_custom_depth_range(camera_id):
 		return maxf(float(_realsense_setting(camera_id, "max_depth_m", max_depth_m)), 0.25)
 	return max_depth_m
@@ -1859,6 +1886,9 @@ func _camera_stats_key(camera_id: String) -> String:
 	return camera_id
 
 func _camera_shm_name(camera_id: String) -> String:
+	var prefix := OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX")
+	if not prefix.is_empty() and _is_realsense_camera(camera_id):
+		return "%s_%s" % [prefix, _realsense_serial(camera_id)]
 	if camera_id.begins_with(CAMERA_REALSENSE_PREFIX):
 		return "realsense_%s_point_cloud_grid" % _realsense_serial(camera_id)
 	if camera_id == CAMERA_REALSENSE:
@@ -1866,6 +1896,64 @@ func _camera_shm_name(camera_id: String) -> String:
 	if camera_id == CAMERA_OAKD:
 		return "oakd_point_cloud_grid"
 	return "%s_point_cloud_grid" % camera_id
+
+func _capture_only() -> bool:
+	return OS.get_environment("ROBOT_TELEOP_CAPTURE_ONLY") == "1"
+
+func _shared_capture_preview() -> bool:
+	return not _capture_only() and not OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX").is_empty()
+
+func _direct_capture_enabled() -> bool:
+	return not _shared_capture_preview() and not _capture_paused
+
+func _capture_lease_process_alive(pid: int) -> bool:
+	if pid<=0: return false
+	# Linux's Godot process check waits for a child; the preview is a sibling.
+	# Its heartbeat is the lease, with /proc providing early exit detection.
+	if OS.get_name()=="Linux": return DirAccess.dir_exists_absolute("/proc/%d"%pid)
+	return OS.is_process_running(pid)
+
+func _sync_capture_control() -> void:
+	if not _capture_only() and not _shared_capture_preview(): return
+	var now := Time.get_ticks_msec()
+	if now-_capture_control_last_check < 100: return
+	_capture_control_last_check=now
+	var prefix := OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX")
+	if not prefix.is_valid_identifier(): return
+	var path := ProjectSettings.globalize_path("user://capture_control_%s.bin" % prefix)
+	if _shared_capture_preview():
+		var cameras: Dictionary={}
+		for id in _realsense_camera_ids():
+			var settings := _realsense_settings(id).duplicate(true)
+			settings.merge(_realsense_camera_node_settings(id),true)
+			settings["_capture_min_depth"]=_camera_min_depth(id)
+			settings["_capture_max_depth"]=_camera_max_depth(id)
+			var renderer := _camera_nodes.get(id) as Node3D
+			if is_instance_valid(renderer): settings["_capture_transform"]=renderer.global_transform
+			cameras[id]=settings
+		var state := {"cameras":cameras,"paused":_realsense_cloud_alignment_running()}
+		if state==_capture_control_previous and (not bool(state.paused) or now-_capture_control_last_write<500): return
+		_capture_control_previous=state.duplicate(true)
+		_capture_control_last_write=now
+		state["pid"]=OS.get_process_id()
+		state["updated"]=Time.get_unix_time_from_system()
+		state["stamp"]=now
+		var file := FileAccess.open(path+".tmp",FileAccess.WRITE)
+		if file==null: return
+		file.store_var(state,false)
+		file.close()
+		DirAccess.rename_absolute(path+".tmp",path)
+	else:
+		if not FileAccess.file_exists(path): return
+		var file := FileAccess.open(path,FileAccess.READ)
+		if file==null or file.get_length()>1048576: return
+		var state = file.get_var(false)
+		if not state is Dictionary or not state.get("cameras") is Dictionary: return
+		var paused := bool(state.get("paused",false)) and Time.get_unix_time_from_system()-float(state.get("updated",0))<3.0 and _capture_lease_process_alive(int(state.get("pid",0)))
+		_capture_paused=paused
+		if int(state.get("stamp",-1))==_capture_control_stamp: return
+		_capture_control_stamp=int(state.get("stamp",-1))
+		_capture_control_settings=state.cameras
 
 func _camera_node_name(camera_id: String) -> String:
 	if camera_id.begins_with(CAMERA_REALSENSE_PREFIX):
@@ -2503,7 +2591,7 @@ func _set_realsense_direct_renderers_enabled(enabled: bool) -> void:
 		if node != null and node.has_method("set_direct_realsense_enabled"):
 			if not enabled:
 				node.set_process(false)
-			node.call("set_direct_realsense_enabled", enabled and _streams_enabled() and _camera_enabled(camera_id))
+			node.call("set_direct_realsense_enabled", _direct_capture_enabled() and enabled and _streams_enabled() and _camera_enabled(camera_id))
 			if enabled:
 				node.set_process(true)
 
@@ -2718,7 +2806,7 @@ func _restart_realsense_direct_renderers() -> void:
 			if node.has_method("restart_direct_realsense"):
 				node.call("restart_direct_realsense")
 			if node.has_method("set_direct_realsense_enabled"):
-				node.call("set_direct_realsense_enabled", _streams_enabled() and _camera_enabled(camera_id))
+				node.call("set_direct_realsense_enabled", _direct_capture_enabled() and _streams_enabled() and _camera_enabled(camera_id))
 	_update_camera_renderers()
 
 func _request_realsense_cloud_alignment(mode: String) -> void:
@@ -2966,6 +3054,8 @@ func _update_camera_renderers() -> void:
 			_ensure_camera_renderer(camera_id)
 		else:
 			_free_camera_renderer(camera_id)
+	if _capture_only():
+		return
 	_update_unified_mesh_fusion()
 	_update_mesh_quality()
 	_update_robot_renderer_masks()
@@ -3247,6 +3337,18 @@ func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) ->
 	node.visible = _streams_enabled() and _camera_enabled(camera_id) and _camera_diagnostic_visible(camera_id)
 	node.transform = _camera_transform(camera_id)
 	node.call("set_shared_memory_name", _camera_shm_name(camera_id))
+	if _capture_only() and node.has_method("set_capture_only"):
+		node.call("set_capture_only", true)
+		node.call("set_publish_shared_memory_name", _camera_shm_name(camera_id))
+		node.process_priority = -10
+		# Keep SDK discovery/open on the main thread, as in normal startup.
+		# Once initialized, independent sensors can poll/align concurrently.
+		var active := str(node.call("get_direct_realsense_status")).begins_with("RealSense direct capture active:")
+		node.process_thread_group = Node.PROCESS_THREAD_GROUP_SUB_THREAD if active else Node.PROCESS_THREAD_GROUP_MAIN_THREAD
+		node.process_thread_group_order = 0
+		node.set_process(not _capture_paused)
+		if _capture_control_settings.has(camera_id) and _capture_control_settings[camera_id].get("_capture_transform") is Transform3D:
+			node.global_transform=_capture_control_settings[camera_id]["_capture_transform"]
 	node.call("set_point_pixel_size", _camera_point_pixel_size(camera_id))
 	node.call("set_min_depth", _camera_min_depth(camera_id))
 	node.call("set_max_depth", _camera_max_depth(camera_id))
@@ -3310,7 +3412,7 @@ func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) ->
 			node.call("set_direct_realsense_crop_rect", crop_rect)
 		if node.has_method("set_direct_realsense_filter_config"):
 			node.call("set_direct_realsense_filter_config", _direct_realsense_filter_config(camera_id))
-		node.call("set_direct_realsense_enabled", _streams_enabled() and _camera_enabled(camera_id) and not _realsense_cloud_alignment_running() and (depth_source in ["sdk_depth", "fast_foundation_native"]))
+		node.call("set_direct_realsense_enabled", _direct_capture_enabled() and _streams_enabled() and _camera_enabled(camera_id) and not _realsense_cloud_alignment_running() and (depth_source in ["sdk_depth", "fast_foundation_native"]))
 		if node.has_method("get_direct_realsense_status"):
 			realsense_status = "%s: %s" % [_camera_label(camera_id), str(node.call("get_direct_realsense_status"))]
 

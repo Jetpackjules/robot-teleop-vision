@@ -2,7 +2,7 @@
 // Original approach: Andre Muehlenbrock, CGVR, University of Bremen, 2024.
 // Adapted from godot/runtime/point_cloud/blendpcr in this repository.
 // SPDX-License-Identifier: EUPL-1.2
-import { FULLSCREEN_VERTEX_SHADER, RIG_SAMPLING_SHADER, compileGpuProgram, gpuTexture } from "./hybrid_camera_quality.js?v=20261020_native_quality";
+import { FULLSCREEN_VERTEX_SHADER, RIG_SAMPLING_SHADER, compileGpuProgram, gpuTexture } from "./hybrid_camera_quality.js?v=20261020_capture60";
 
 const METADATA_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
@@ -166,6 +166,7 @@ export class BrowserBlendPCR {
     this.programs = null;
     this.failedSignature = "";
     this.compositions = 0;
+    this.metadataPasses = 0;
   }
 
   clearTargets() {
@@ -177,6 +178,8 @@ export class BrowserBlendPCR {
     if(this.framebuffer)gl.deleteFramebuffer(this.framebuffer);
     this.depth=this.framebuffer=null;this.signature="";
     this.cacheKey="";
+    this.metadataLayerKeys=[];
+    this.metadataLayerCameras=[];
   }
 
   dispose() {
@@ -286,10 +289,14 @@ export class BrowserBlendPCR {
         gl.uniform1i(u.u_robot_mask_enabled,maskCapsules?1:0);
         if(maskCapsules){gl.uniform4fv(u.u_mask_capsule_a,maskCapsules.starts);gl.uniform4fv(u.u_mask_capsule_b,maskCapsules.ends);}
         gl.viewport(0,0,this.width,this.height);gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);
+        const rasterKey=`${view.viewProjection}:${maskCapsules?.starts}:${maskCapsules?.ends}:${settings.mesh_depth_delta}:${settings.mesh_max_edge}`;
         cameras.forEach((camera,index)=> {
+          const fresh=rig_data_fresh(camera,view.now);
+          const layerKey=`${rasterKey}:${camera.metadata.id}:${camera.uploadRevision??camera.lastUpdateMs}:${camera.width}:${camera.height}:${camera.modelMatrix}:${camera.intrinsicsArray}:${fresh}`;
+          if(this.metadataLayerCameras[index]===camera&&this.metadataLayerKeys[index]===layerKey)return;
           this.attach(this.metadata,index,true);
           gl.clearBufferuiv(gl.COLOR,0,new Uint32Array(4));gl.clearBufferfv(gl.DEPTH,0,new Float32Array([1]));
-          if(rig_data_fresh(camera,view.now)) {
+          if(fresh) {
             gl.uniform1i(u.u_rig_index,index);
             gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,camera.depthTexture);
             gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,camera.colorTexture);
@@ -298,6 +305,9 @@ export class BrowserBlendPCR {
             gl.uniform2i(u.u_size,camera.width,camera.height);
             gl.drawArrays(gl.TRIANGLES,0,(camera.width-1)*(camera.height-1)*6);
           }
+          this.metadataLayerKeys[index]=layerKey;
+          this.metadataLayerCameras[index]=camera;
+          this.metadataPasses++;
         });
         gl.disable(gl.DEPTH_TEST);gl.viewport(0,0,this.smallWidth,this.smallHeight);
         this.attach(this.owner,null);

@@ -1,7 +1,7 @@
-import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_native_quality";
+import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_capture60";
 
-import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_native_quality";
-import { CameraRgbViewer } from "./camera_rgb_viewer.js?v=20261020_native_quality";
+import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_capture60";
+import { CameraRgbViewer } from "./camera_rgb_viewer.js?v=20261020_capture60";
 
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},
@@ -48,6 +48,7 @@ const state = {
   rgbDisplayBaseCanvas: null,
   rgbDisplayCameraId: "",
   rawRgbViewer: null,
+  rgbdPaused: false,
   robotLoadToken: 0,
   dataChannel: null,
   dataChannelHandlers: null,
@@ -251,7 +252,9 @@ void main() {
     vec3 pc = vec3((float(triangle_c.x) - u_intrinsics.z) * zc / u_intrinsics.x, -(float(triangle_c.y) - u_intrinsics.w) * zc / u_intrinsics.y, -zc);
     float maximum_edge_squared = u_mesh_max_edge * u_mesh_max_edge;
     triangle_valid = minimum_depth > uint(0)
-      && float(maximum_depth - minimum_depth) <= u_mesh_depth_delta * float(maximum_depth)
+      && float(maximum_depth - minimum_depth) <= min(u_mesh_depth_delta * float(maximum_depth),
+        max(4.0, 6.0 * pow(float(maximum_depth)*0.001,2.0)
+          + 2.0 * float(maximum_depth) / max(min(u_intrinsics.x,u_intrinsics.y),1.0)))
       && dot(pa - pb, pa - pb) <= maximum_edge_squared
       && dot(pb - pc, pb - pc) <= maximum_edge_squared
       && dot(pc - pa, pc - pa) <= maximum_edge_squared
@@ -1640,7 +1643,6 @@ function uploadCamera(decoded) {
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   updateManualRgbBase(camera);
-  updateRgbDisplay(camera);
   if (camera.bitmap) {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGB, gl.UNSIGNED_BYTE, camera.bitmap);
     camera.bitmap.close();
@@ -1938,6 +1940,7 @@ async function decodeNewestPackets() {
       ? state.stats.decodeMs * 0.8 + decodeElapsed * 0.2
       : decodeElapsed;
   } catch (error) {
+    state.stats.decodeErrors = Number(state.stats.decodeErrors || 0) + 1;
     state.stats.status = `decode error: ${error && error.message ? error.message : error}`;
     if (persistentFrame && state.socket) {
       const options = state.socketOptions || {};
@@ -2320,6 +2323,10 @@ function updateStats() {
 
 function animationLoop(now) {
   if (!state.running) return;
+  if (state.rawRgbViewer && (!state.lastRgbModeCheck || now-state.lastRgbModeCheck>250)) {
+    state.lastRgbModeCheck=now;
+    configureOriginalRgb();
+  }
   if (
     state.dataChannel
     && state.dataChannel.readyState === "open"
@@ -2350,7 +2357,7 @@ function animationLoop(now) {
   }
   // High-refresh displays were rendering hundreds of thousands of points at
   // 120-165 Hz and starving RGB-D decode/upload work on the same main thread.
-  if (!state.lastRenderMs || now - state.lastRenderMs >= 15.5) {
+  if (!state.rgbdPaused && (!state.lastRenderMs || now - state.lastRenderMs >= 15.5)) {
     state.lastRenderMs = now;
     render();
   }
@@ -2375,6 +2382,40 @@ function latestRgbdUrl(options, afterSequence, worker) {
 
 function waitMilliseconds(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function trimIndependentFrameQueue(queue, limit = 4) {
+  // Keep recent captures and their named references. Also retain the newest
+  // keyframe for each camera, since its next delta may not have arrived yet.
+  const keep = new Set();
+  const newest = new Set();
+  const tail = Math.max(0, queue.length - limit);
+  for (let index = queue.length - 1; index >= 0; index--) {
+    if (index >= tail) keep.add(index);
+    for (const camera of queue[index].metadata.cameras || []) {
+      const id = String(camera.id || camera.serial || camera.model || "camera");
+      for (const channel of ["depth", "color"]) {
+        const key = `${id}:${channel}`;
+        if (camera[`${channel}_temporal_keyframe`] === true && !newest.has(key)) {
+          newest.add(key);
+          keep.add(index);
+        }
+        if (index < tail || camera[`${channel}_temporal_keyframe`] !== false) continue;
+        const reference = camera[`${channel}_keyframe_id`];
+        for (let prior = index - 1; prior >= 0; prior--) {
+          const found = (queue[prior].metadata.cameras || []).some(candidate =>
+            String(candidate.id || candidate.serial || candidate.model || "camera") === id
+            && candidate[`${channel}_temporal_keyframe`] === true
+            && candidate[`${channel}_keyframe_id`] === reference);
+          if (found) { keep.add(prior); break; }
+        }
+      }
+    }
+  }
+  const retained = queue.filter((_frame, index) => keep.has(index));
+  const dropped = queue.length - retained.length;
+  queue.splice(0, queue.length, ...retained);
+  return dropped;
 }
 
 function handleRgbdPacket(arrayBuffer, transport) {
@@ -2414,8 +2455,20 @@ function handleRgbdPacket(arrayBuffer, transport) {
     parsed.metadata.temporal_reference_mode !== "persistent_v1"
     && state.pendingFrameQueue.length > 4
   ) {
-    state.pendingFrameQueue.shift();
-    state.stats.dropped += 1;
+    state.stats.dropped += trimIndependentFrameQueue(state.pendingFrameQueue);
+    if (state.pendingFrameQueue.length > 32) {
+      // Bound memory even if an abnormal stream continually changes camera IDs.
+      const options = state.socketOptions || {};
+      state.stats.dropped += state.pendingFrameQueue.length;
+      state.pendingFrameQueue.length = 0;
+      closeRgbdSocket();
+      stopRgbdHttpLatest();
+      state.reconnectTimer = window.setTimeout(() => {
+        state.reconnectTimer = 0;
+        startConfiguredRgbdFallback(options);
+      }, 100);
+      return;
+    }
   }
   decodeNewestPackets();
 }
@@ -2521,7 +2574,7 @@ function rgbdSocketUrl(options) {
 }
 
 function startRgbdWebSocket(options) {
-  if (!state.running || document.hidden) return;
+  if (!state.running || document.hidden || state.rgbdPaused) return;
   stopRgbdHttpLatest();
   closeRgbdSocket();
   const socket = new WebSocket(rgbdSocketUrl(options));
@@ -2561,6 +2614,7 @@ function startRgbdWebSocket(options) {
 }
 
 function startConfiguredRgbdFallback(options) {
+  if (state.rgbdPaused) return;
   if ((options || {}).transport === "websocket") {
     startRgbdWebSocket(options || {});
   } else {
@@ -2679,6 +2733,7 @@ function attachRgbdDataChannel(channel, options) {
   channel.binaryType = "arraybuffer";
   const onOpen = () => {
     if (!state.running || state.dataChannel !== channel) return;
+    if (state.rgbdPaused) { channel.close(); return; }
     if (state.dataChannelFallbackTimer) clearTimeout(state.dataChannelFallbackTimer);
     state.dataChannelFallbackTimer = 0;
     stopRgbdHttpLatest();
@@ -2797,6 +2852,7 @@ export async function startGodotHybridRenderer(options = {}) {
     captureUnixMs: 0,
     captureAgeMs: -1,
     decodeMs: 0,
+    decodeErrors: 0,
     renderFrames: 0,
     renderFps: 0,
     cameraFrames: {},
@@ -2834,6 +2890,7 @@ export async function startGodotHybridRenderer(options = {}) {
 
 export function stopGodotHybridRenderer() {
   state.running = false;
+  state.rgbdPaused = false;
   state.rawRgbViewer?.stop();
   state.rawRgbViewer = null;
   detachPointerNavigation();
@@ -2935,6 +2992,18 @@ export function setGodotHybridViewSettings(settings = {}) {
 
 function configureOriginalRgb() {
   const wanted = state.running && state.settings.display_mode === "rgb_camera" && state.rgbDisplayCanvas;
+  const paused = Boolean(wanted && !state.manualRgbCanvas?.offsetParent);
+  if (paused && !state.rgbdPaused) {
+    // Control stays connected. Camera-only mode does not need a second,
+    // hidden stream of three depth grids and their GPU reconstruction.
+    state.rgbdPaused = true;
+    stopRgbdHttpLatest();
+    closeRgbdSocket();
+    if (state.dataChannel) state.dataChannel.close();
+  } else if (!paused && state.rgbdPaused) {
+    state.rgbdPaused = false;
+    startConfiguredRgbdFallback(state.socketOptions || {});
+  }
   if (wanted && !state.rawRgbViewer) {
     state.rawRgbViewer = new CameraRgbViewer(state.rgbDisplayCanvas, state.socketOptions || {});
     state.rawRgbViewer.start();

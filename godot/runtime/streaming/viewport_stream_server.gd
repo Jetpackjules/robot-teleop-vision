@@ -47,7 +47,7 @@ var _rgbd_frame_counter := 0
 var _rgbd_frame_accum := 0.0
 var _rgbd_encoder_accum: Dictionary = {}
 var _rgbd_last_request_sequence: Dictionary = {}
-var _rgbd_last_request_usec: Dictionary = {}
+var _rgbd_pending_completed: Dictionary = {}
 var _last_frame_msec := 0
 var _last_frame_unix_ms := 0.0
 var _next_capture_due_msec := 0
@@ -62,6 +62,14 @@ var _tracking_source: Node
 var _async_capture_inflight := 0
 var _async_readback_available := true
 var _camera_rgb_cache: Dictionary = {}
+var _camera_rgb_stream_frame: Dictionary = {}
+var _camera_rgb_stream_options := {"camera":"", "w":3840, "q":95}
+var _camera_rgb_frame_counter := 0
+var _cpu_profile: Dictionary = {}
+var _renderers_cache: Array[Node] = []
+var _renderers_cache_frame := -1
+var _renderers_cache_root := 0
+var _model_property_cache: Dictionary = {}
 
 func _runs_in_current_context() -> bool:
 	# Opt in only for a dedicated remote editor session. Normal editors must
@@ -69,6 +77,12 @@ func _runs_in_current_context() -> bool:
 	return not Engine.is_editor_hint() or OS.get_environment("ROBOT_TELEOP_EDITOR_STREAM") == "1"
 
 func _ready() -> void:
+	if OS.get_environment("ROBOT_TELEOP_CAPTURE_ONLY") == "1":
+		# The capture service stays private and does not share the editor's port.
+		bind_host = "127.0.0.1"
+		var capture_port := OS.get_environment("ROBOT_TELEOP_CAPTURE_PORT")
+		port = 8781 if capture_port.is_empty() else clampi(int(capture_port), 1024, 65535)
+		process_priority = 10
 	if not _runs_in_current_context():
 		set_process(false)
 		return
@@ -113,13 +127,20 @@ func _process(delta: float) -> void:
 			return
 		_start_server()
 		return
+	var started := Time.get_ticks_usec()
 	_accept_clients()
 	_poll_clients()
+	_cpu_profile["socket_poll_ms"]=(Time.get_ticks_usec()-started)*0.001
 	if _clients.is_empty():
 		_update_status()
 		return
-	if _has_ready_stream_clients("rgbd"):
+	if _has_stream_clients("rgbd"):
+		started=Time.get_ticks_usec()
 		if _pump_rgbd_encoders(delta):
+			_write_stream_frame_to_clients()
+		_cpu_profile["rgbd_pump_and_send_ms"]=(Time.get_ticks_usec()-started)*0.001
+	if _has_stream_clients("camera_rgb"):
+		if _pump_camera_rgb_encoder():
 			_write_stream_frame_to_clients()
 	_frame_accum += delta
 	var interval := 1.0 / maxf(1.0, target_fps)
@@ -230,8 +251,8 @@ func _handle_http_request(client: Dictionary) -> void:
 		# Do not trigger image encoding, GPU readback, or change capture settings.
 		var cameras: Array[Dictionary] = []
 		for renderer in _find_rgbd_renderers():
-			var depth: Texture2D = renderer.call("get_depth_texture")
-			var color: Texture2D = renderer.call("get_color_texture")
+			var depth: Image = renderer.call("get_depth_image")
+			var color: Image = renderer.call("get_color_image")
 			var raw_color: Image = renderer.call("get_raw_color_image") if renderer.has_method("get_raw_color_image") else null
 			cameras.append({"id":str(renderer.call("get_direct_realsense_serial")),
 				"depth_size":[depth.get_width(),depth.get_height()] if depth != null else [],
@@ -241,10 +262,25 @@ func _handle_http_request(client: Dictionary) -> void:
 				"capture_fps":float(renderer.call("get_direct_realsense_capture_fps")),
 				"render_fps":float(renderer.call("get_render_fps")),
 				"age_ms":float(renderer.call("get_display_frame_age_ms"))})
-		var body := JSON.stringify({"scene_fps":Engine.get_frames_per_second(),"cameras":cameras}).to_utf8_buffer()
+		var root_node := get_node_or_null(rgbd_root_path)
+		var body := JSON.stringify({"scene_fps":Engine.get_frames_per_second(),"cameras":cameras,
+			"stream_cpu":_cpu_profile,"frame_cpu_ms":Performance.get_monitor(Performance.TIME_PROCESS)*1000.0,
+			"view_cpu_ms":root_node.get("_capture_view_cpu_ms") if root_node!=null else 0}).to_utf8_buffer()
 		_send_http_response(peer,"200 OK","application/json",body)
 		client["headers_sent"] = true
 		client["snapshot_sent"] = true
+	elif path.get_slice("?", 0) == "/camera-rgb-stream":
+		for pair in path.get_slice("?", 1).split("&", false):
+			var key := pair.get_slice("=", 0)
+			var value := pair.get_slice("=", 1).uri_decode()
+			if key == "camera": _camera_rgb_stream_options[key] = value
+			if key == "w": _camera_rgb_stream_options[key] = clampi(int(value),160,3840)
+			if key == "q": _camera_rgb_stream_options[key] = clampi(int(value),1,100)
+		peer.put_data(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=%s\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n" % BOUNDARY).to_utf8_buffer())
+		client["headers_sent"] = true
+		client["streaming"] = true
+		client["stream_type"] = "camera_rgb"
+		client["last_camera_rgb_frame"] = -1
 	elif path.get_slice("?", 0) == "/camera-rgb":
 		var options: Dictionary = {}
 		for pair in path.get_slice("?", 1).split("&", false):
@@ -328,6 +364,33 @@ func _apply_rgbd_query(path: String) -> void:
 				hybrid_max_width = clampi(int(value), 160, 3840)
 			"q", "quality", "jpeg_quality":
 				hybrid_jpeg_quality = clampi(int(value), 1, 100)
+
+func _pump_camera_rgb_encoder() -> bool:
+	for renderer in _find_rgbd_renderers():
+		var serial := str(renderer.call("get_direct_realsense_serial"))
+		if not str(_camera_rgb_stream_options.camera).is_empty() and serial != _camera_rgb_stream_options.camera:
+			continue
+		var frame: Dictionary
+		if renderer.has_method("request_camera_rgb_encode"):
+			renderer.call("request_camera_rgb_encode",_camera_rgb_stream_options.w,_camera_rgb_stream_options.q)
+			frame = renderer.call("take_camera_rgb_encoded_frame")
+		else:
+			# Older native plugins can still use the persistent transport.
+			var fallback := _get_camera_rgb_frame(serial,_camera_rgb_stream_options.w,_camera_rgb_stream_options.q)
+			if fallback.is_empty(): return false
+			frame={"body":fallback.body,"width":int(fallback.headers["X-Frame-Width"]),
+				"height":int(fallback.headers["X-Frame-Height"]),"sequence":int(fallback.headers["X-Frame-Sequence"]),
+				"capture_unix_ms":float(fallback.headers["X-Capture-Unix-Ms"])}
+		if frame.is_empty(): return false
+		if frame.get("sequence",-1)==_camera_rgb_stream_frame.get("sequence",-2): return false
+		frame["headers"] = {"X-Camera-Id":serial,"X-Frame-Width":str(frame.width),
+			"X-Frame-Height":str(frame.height),"X-Frame-Sequence":str(frame.sequence),
+			"X-Capture-Unix-Ms":str(roundi(frame.capture_unix_ms)),
+			"X-Capture-Epoch":"%d:%d" % [OS.get_process_id(),renderer.get_instance_id()]}
+		_camera_rgb_stream_frame = frame
+		_camera_rgb_frame_counter += 1
+		return true
+	return false
 
 func _get_camera_rgb_frame(camera_id: String = "", width_limit: int = 3840, quality: int = 95) -> Dictionary:
 	# Original sensor RGB, independent of depth validity, crop and alignment.
@@ -484,6 +547,7 @@ func _refresh_tracking_metadata() -> void:
 	_last_tracking_transport_age_ms = float(metadata.get("transport_age_ms", -1.0))
 
 func _pump_rgbd_encoders(delta: float) -> bool:
+	var started := Time.get_ticks_usec()
 	var renderers := _find_rgbd_renderers()
 	if renderers.is_empty():
 		return false
@@ -497,46 +561,59 @@ func _pump_rgbd_encoders(delta: float) -> bool:
 			return _capture_rgbd_frame()
 
 	var active_ids: Dictionary = {}
+	var publish_interval := 1.0/maxf(1.0,hybrid_target_fps)
+	_rgbd_frame_accum=minf(publish_interval*2.0,_rgbd_frame_accum+delta)
 	for renderer in renderers:
 		var renderer_id := int(renderer.get_instance_id())
 		active_ids[renderer_id] = true
 		var requested_fps := _renderer_hybrid_fps(renderer, renderers.size())
 		var interval := 1.0 / maxf(1.0, requested_fps)
+		# Allow a single jittered acquisition to arrive early. A strict minimum
+		# wall-clock interval discards real 60 Hz frames when SDK delivery jitters.
+		var accumulator := minf(interval*2.0,float(_rgbd_encoder_accum.get(renderer_id,interval))+delta)
 		if renderer.has_method("get_frame_sequence"):
 			# Follow actual RealSense acquisitions rather than a delta
 			# accumulator. A short Godot frame does not cause a duplicate copy,
 			# and a long frame cannot permanently phase-shift future requests.
 			var sequence := int(renderer.call("get_frame_sequence"))
 			var last_sequence := int(_rgbd_last_request_sequence.get(renderer_id, -1))
-			var now_usec := Time.get_ticks_usec()
-			var last_usec := int(_rgbd_last_request_usec.get(renderer_id, 0))
-			var minimum_usec := int(interval * 1000000.0 * 0.9)
-			if sequence != last_sequence and (last_usec <= 0 or now_usec - last_usec >= minimum_usec):
+			if sequence != last_sequence and accumulator>=interval:
 				if bool(renderer.call("request_rgbd_encode", hybrid_max_width, hybrid_jpeg_quality)):
 					_rgbd_last_request_sequence[renderer_id] = sequence
-					_rgbd_last_request_usec[renderer_id] = now_usec
+					accumulator-=interval
 		else:
-			var accumulator := float(_rgbd_encoder_accum.get(renderer_id, interval)) + delta
 			if accumulator >= interval:
-				accumulator = fmod(accumulator, interval)
+				accumulator-=interval
 				renderer.call("request_rgbd_encode", hybrid_max_width, hybrid_jpeg_quality)
-			_rgbd_encoder_accum[renderer_id] = accumulator
+		_rgbd_encoder_accum[renderer_id] = accumulator
 	for renderer_id in _rgbd_encoder_accum.keys():
 		if not active_ids.has(renderer_id):
 			_rgbd_encoder_accum.erase(renderer_id)
 	for renderer_id in _rgbd_last_request_sequence.keys():
 		if not active_ids.has(renderer_id):
 			_rgbd_last_request_sequence.erase(renderer_id)
-			_rgbd_last_request_usec.erase(renderer_id)
+	for renderer_id in _rgbd_pending_completed.keys():
+		if not active_ids.has(renderer_id): _rgbd_pending_completed.erase(renderer_id)
 
 	var completed: Array[Dictionary] = []
+	_cpu_profile["encode_queue_ms"]=(Time.get_ticks_usec()-started)*0.001
+	started=Time.get_ticks_usec()
 	for renderer in renderers:
 		var encoded = renderer.call("take_rgbd_encoded_frame")
 		if encoded is Dictionary and not encoded.is_empty():
-			completed.append({"renderer": renderer, "encoded": encoded})
-	if completed.is_empty():
+			_rgbd_pending_completed[renderer.get_instance_id()]={"renderer":renderer,"encoded":encoded}
+	if _rgbd_pending_completed.is_empty() or _rgbd_frame_accum<publish_interval:
 		return false
-	return _publish_encoded_rgbd_frames(completed)
+	# Coalesce within the output cadence without waiting for another camera.
+	# An extra full-frame wait can halve the rate of asynchronous acquisitions.
+	for entry in _rgbd_pending_completed.values(): completed.append(entry)
+	_rgbd_pending_completed.clear()
+	_rgbd_frame_accum-=publish_interval
+	_cpu_profile["encode_take_ms"]=(Time.get_ticks_usec()-started)*0.001
+	started=Time.get_ticks_usec()
+	var published := _publish_encoded_rgbd_frames(completed)
+	_cpu_profile["packet_pack_ms"]=(Time.get_ticks_usec()-started)*0.001
+	return published
 
 func _renderer_hybrid_fps(renderer: Node, renderer_count: int = -1) -> float:
 	var model := _renderer_model(renderer).to_lower()
@@ -703,8 +780,18 @@ func _find_rgbd_renderers() -> Array[Node]:
 	var root := get_node_or_null(rgbd_root_path)
 	if root == null:
 		return result
+	var frame := Engine.get_process_frames()
+	var root_id := root.get_instance_id()
+	if frame==_renderers_cache_frame and root_id==_renderers_cache_root:
+		var valid := true
+		for node in _renderers_cache:
+			if not is_instance_valid(node): valid=false
+		if valid: return _renderers_cache
 	_collect_rgbd_renderers(root, result)
 	result.sort_custom(func(left: Node, right: Node) -> bool: return _renderer_priority(left) < _renderer_priority(right))
+	_renderers_cache=result
+	_renderers_cache_frame=frame
+	_renderers_cache_root=root_id
 	return result
 
 func _collect_rgbd_renderers(node: Node, result: Array[Node]) -> void:
@@ -716,9 +803,16 @@ func _collect_rgbd_renderers(node: Node, result: Array[Node]) -> void:
 func _renderer_model(renderer: Node) -> String:
 	var parent := renderer.get_parent()
 	if parent != null:
-		for property in parent.get_property_list():
-			if str(property.get("name", "")) == "model":
-				return str(parent.get("model"))
+		var id := parent.get_instance_id()
+		if not _model_property_cache.has(id):
+			if _model_property_cache.size()>128: _model_property_cache.clear()
+			var has_model := false
+			for property in parent.get_property_list():
+				if str(property.get("name", ""))=="model":
+					has_model=true
+					break
+			_model_property_cache[id]=has_model
+		if bool(_model_property_cache[id]): return str(parent.get("model"))
 	return "RealSense"
 
 func _renderer_priority(renderer: Node) -> int:
@@ -738,7 +832,7 @@ func _transform_array(transform: Transform3D) -> Array[float]:
 	]
 
 func _write_stream_frame_to_clients() -> void:
-	if _last_frame_bytes.is_empty() and _last_raw_frame_bytes.is_empty() and _last_rgbd_frame_bytes.is_empty():
+	if _last_frame_bytes.is_empty() and _last_raw_frame_bytes.is_empty() and _last_rgbd_frame_bytes.is_empty() and _camera_rgb_stream_frame.is_empty():
 		return
 	var remove_indices: Array[int] = []
 	var encoded_part_header := (
@@ -787,10 +881,19 @@ func _write_stream_frame_to_clients() -> void:
 		var stream_type := str(client.get("stream_type", ""))
 		var is_raw := stream_type == "raw"
 		var is_rgbd := stream_type == "rgbd"
+		var is_camera_rgb := stream_type == "camera_rgb"
+		if is_camera_rgb and (int(client.get("last_camera_rgb_frame",-1)) == _camera_rgb_frame_counter or _camera_rgb_stream_frame.is_empty()):
+			continue
 		if is_rgbd and int(client.get("last_rgbd_frame", -1)) == _rgbd_frame_counter:
 			continue
 		var part_header := rgbd_part_header if is_rgbd else (raw_part_header if is_raw else encoded_part_header)
 		var frame_bytes := _last_rgbd_frame_bytes if is_rgbd else (_last_raw_frame_bytes if is_raw else _last_frame_bytes)
+		if is_camera_rgb:
+			frame_bytes = _camera_rgb_stream_frame.body
+			var text := "--%s\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n" % [BOUNDARY,frame_bytes.size()]
+			for key in _camera_rgb_stream_frame.headers:
+				text += "%s: %s\r\n" % [key,_camera_rgb_stream_frame.headers[key]]
+			part_header = (text+"\r\n").to_utf8_buffer()
 		if frame_bytes.is_empty():
 			continue
 		if int(client.get("pending_segment", -1)) >= 0:
@@ -807,6 +910,8 @@ func _write_stream_frame_to_clients() -> void:
 		client["pending_started_msec"] = Time.get_ticks_msec()
 		if is_rgbd:
 			client["last_rgbd_frame"] = _rgbd_frame_counter
+		if is_camera_rgb:
+			client["last_camera_rgb_frame"] = _camera_rgb_frame_counter
 		if not _flush_client_output(client):
 			remove_indices.append(i)
 		_clients[i] = client

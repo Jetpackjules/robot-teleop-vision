@@ -12,7 +12,7 @@ extends Node3D
 	set(value):
 		enabled = value
 		_notify_settings_changed()
-## viewer30: 848x480 depth + 1280x720 color at 30 Hz. fast60: 848x480 depth/color at 60 Hz. highres30: 1280x720 depth/color at 30 Hz.
+## viewer30: 848x480 depth + 1280x720 color at 30 Hz. fast60: 848x480 depth + largest supported 60 Hz RGB mode (D435: 960x540). highres30: 1280x720 depth/color at 30 Hz.
 @export_enum("viewer30", "fast60", "highres30") var stream_profile: String = "fast60":
 	set(value):
 		stream_profile = value if value in ["viewer30", "fast60", "highres30"] else "fast60"

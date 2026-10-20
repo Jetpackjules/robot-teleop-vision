@@ -68,7 +68,9 @@ vec3 point(ivec2 p, float z) {
 vec3 support(ivec2 p,uint z,float noise_a,float noise_b) {
   const ivec2 offsets[4]=ivec2[4](ivec2(-1,0),ivec2(1,0),ivec2(0,-1),ivec2(0,1));
   vec3 n=vec3(0);
-  float valid_delta=max(2.0,u_mesh_depth_delta*float(z)*0.5);
+  float range=float(z)*0.001;
+  float footprint=range/max(min(u_intrinsics.x,u_intrinsics.y),1.0);
+  float valid_delta=min(u_mesh_depth_delta*float(z),max(4.0,6.0*range*range+2000.0*footprint));
   for(int i=0;i<4;i++) {
     uint neighbor=depth_mm(p+offsets[i]);
     if(neighbor==0u)continue;
@@ -81,7 +83,10 @@ vec3 support(ivec2 p,uint z,float noise_a,float noise_b) {
 }
 bool geometry(uint za,uint zb,uint zc,vec3 pa,vec3 pb,vec3 pc) {
   uint lo=min(za,min(zb,zc)),hi=max(za,max(zb,zc));
-  if(lo==0u || float(hi-lo)>u_mesh_depth_delta*float(hi))return false;
+  float range=float(hi)*0.001;
+  float footprint=range/max(min(u_intrinsics.x,u_intrinsics.y),1.0);
+  float limit_mm=min(u_mesh_depth_delta*float(hi),max(4.0,6.0*range*range+2000.0*footprint));
+  if(lo==0u || float(hi-lo)>limit_mm)return false;
   float limit=u_mesh_max_edge*u_mesh_max_edge;
   return max(dot(pa-pb,pa-pb),max(dot(pb-pc,pb-pc),dot(pc-pa,pc-pa)))<=limit;
 }

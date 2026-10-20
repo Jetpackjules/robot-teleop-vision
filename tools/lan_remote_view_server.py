@@ -1773,6 +1773,7 @@ class LanRemoteServer(ThreadingHTTPServer):
         robot_module: str = "",
         site_settings_path: Path | None = None,
         godot_desktop_config: DesktopStreamConfig | None = None,
+        capture_port: int | None = None,
     ):
         if godot_desktop_config is not None and not password:
             raise ValueError("Desktop capture requires the existing password gate")
@@ -1782,6 +1783,7 @@ class LanRemoteServer(ThreadingHTTPServer):
         self.udp_port = udp_port
         self.stream_host = stream_host
         self.stream_port = stream_port
+        self.capture_port = capture_port if capture_port is not None else stream_port
         self.password = password
         self.godot_desktop_stream = GodotDesktopStream(godot_desktop_config) if godot_desktop_config else None
         self.robot_module = robot_module or os.environ.get("ROBOT_TELEOP_MODULE", "disabled")
@@ -2361,7 +2363,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 "q": clamp_int(params.get("q", ["95"])[0], 1, 100),
                 "camera": camera,
             }
-            connection = http.client.HTTPConnection(self.server.stream_host, self.server.stream_port, timeout=5)
+            connection = http.client.HTTPConnection(self.server.stream_host, self.server.capture_port, timeout=5)
             connection.request("GET", "/camera-rgb?" + urlencode(options))
             response = connection.getresponse()
             body = response.read(16 * 1024 * 1024 + 1)
@@ -2412,7 +2414,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 self.send_error(409, "RGB-D page superseded by a newer browser")
                 return
             source_url = (
-                f"http://{self.server.stream_host}:{self.server.stream_port}"
+                f"http://{self.server.stream_host}:{self.server.capture_port}"
                 f"/rgbd?w={width}&fps={fps}&context_fps={context_fps}"
                 f"&detail_fps={detail_fps}&q={quality}"
             )
@@ -3110,7 +3112,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         def on_datachannel(channel):
             if channel.label == "rgbd-stream" and source == "rgbd_data":
                 source_url = (
-                    f"http://{self.server.stream_host}:{self.server.stream_port}"
+                    f"http://{self.server.stream_host}:{self.server.capture_port}"
                     f"/rgbd?w={width}&fps={fps}&context_fps={context_fps}"
                     f"&detail_fps={detail_fps}&q={jpeg_quality}"
                 )
@@ -3281,7 +3283,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
 
     def handle_websocket(self):
         path = urlsplit(self.path).path
-        if path not in ("/head-tracking", "/robot-control", "/av1-stream", "/rgbd-stream"):
+        if path not in ("/head-tracking", "/robot-control", "/av1-stream", "/rgbd-stream", "/camera-rgb-stream"):
             self.send_error(404, "Unknown websocket path")
             return
         if path == "/robot-control":
@@ -3292,6 +3294,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             return
         if path == "/rgbd-stream":
             self.handle_rgbd_websocket()
+            return
+        if path == "/camera-rgb-stream":
+            self.handle_camera_rgb_websocket()
             return
         self.handle_head_websocket()
 
@@ -3348,6 +3353,79 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         finally:
             print(f"lan remote head tracker disconnected: {peer}", flush=True)
 
+    def handle_camera_rgb_websocket(self) -> None:
+        """Persistent original RGB, with a single newest-frame slot per viewer."""
+        params = parse_qs(urlsplit(self.path).query)
+        camera = params.get("camera", [""])[0]
+        if len(camera) > 64 or any(c not in "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-" for c in camera):
+            self.send_error(400, "Invalid camera ID")
+            return
+        if not self.server.rgbd_http_slots.acquire(blocking=False):
+            self.send_error(503, "Camera stream capacity reached")
+            return
+        reader = None
+        worker = None
+        stop = threading.Event()
+        condition = threading.Condition()
+        newest = None
+        sequence = 0
+        error = None
+
+        def drain():
+            nonlocal newest, sequence, error
+            try:
+                while not stop.is_set():
+                    headers, jpeg = reader.read_part()
+                    if not jpeg or len(jpeg) > 16 * 1024 * 1024:
+                        raise ValueError("Invalid original RGB frame")
+                    metadata = {key: headers.get(key, "")[:128] for key in
+                        ("x-camera-id", "x-frame-width", "x-frame-height", "x-frame-sequence", "x-capture-unix-ms", "x-capture-epoch")}
+                    encoded = json.dumps(metadata, separators=(",", ":")).encode()
+                    packet = struct.pack("<I", len(encoded)) + encoded + jpeg
+                    with condition:
+                        newest = packet
+                        sequence += 1
+                        condition.notify()
+            except (OSError, ValueError) as exc:
+                error = exc
+            finally:
+                with condition:
+                    condition.notify_all()
+
+        try:
+            if not self.accept_websocket():
+                return
+            options = {"camera": camera, "w": clamp_int(params.get("w", ["3840"])[0], 160, 3840),
+                "q": clamp_int(params.get("q", ["95"])[0], 1, 100)}
+            reader = MultipartRawFrameReader(
+                f"http://{self.server.stream_host}:{self.server.capture_port}/camera-rgb-stream?{urlencode(options)}")
+            self.connection.settimeout(5.0)
+            worker = threading.Thread(target=drain, daemon=True)
+            worker.start()
+            sent = 0
+            while not stop.is_set():
+                with condition:
+                    condition.wait_for(lambda: sequence != sent or error is not None, timeout=2.0)
+                    if error is not None:
+                        break
+                    if sequence == sent:
+                        packet = None
+                    else:
+                        packet, sent = newest, sequence
+                if packet is None:
+                    self.send_ws_frame(b"", 0x9)
+                else:
+                    self.send_ws_frame(packet, 0x2)
+        except (ConnectionError, OSError, ValueError):
+            pass
+        finally:
+            stop.set()
+            if reader is not None:
+                reader.close()
+            if worker is not None:
+                worker.join(timeout=1.0)
+            self.server.rgbd_http_slots.release()
+
     def handle_rgbd_websocket(self) -> None:
         params = parse_qs(urlsplit(self.path).query)
         client_id = params.get("client", [""])[0]
@@ -3382,7 +3460,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             in ("1", "true", "yes", "on")
         )
         source_url = (
-            f"http://{self.server.stream_host}:{self.server.stream_port}"
+            f"http://{self.server.stream_host}:{self.server.capture_port}"
             f"/rgbd?w={width}&fps={fps}&context_fps={context_fps}&detail_fps={detail_fps}&q={quality}"
         )
         reader = None
@@ -3540,22 +3618,26 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                         sent_sequence = newest_sequence
                     else:
                         continue
+                    if persistent_reference:
+                        # The sender now owns this packet. Encode one successor
+                        # while it is in flight; WebSocket ordering preserves the
+                        # reference chain without serializing encode + WAN send.
+                        persistent_packet_pending = False
+                        newest_lock.notify_all()
                 if not packet:
                     continue
                 with self.rgbd_send_lock:
                     if self.rgbd_preempted.is_set():
                         raise ConnectionError("superseded by newer browser")
                     self.send_ws_frame(packet, 0x2)
-                if persistent_reference:
-                    with newest_lock:
-                        persistent_packet_pending = False
-                        newest_lock.notify_all()
         except (ConnectionError, OSError, ValueError) as exc:
             print(f"hybrid RGB-D client ended: {peer} ({exc})", flush=True)
         finally:
             reader_stop.set()
             with newest_raw_lock:
                 newest_raw_lock.notify_all()
+            with newest_lock:
+                newest_lock.notify_all()
             if reader is not None:
                 reader.close()
             if reader_thread is not None:
@@ -4715,6 +4797,7 @@ def main():
     parser.add_argument("--udp-port", type=int, default=4247)
     parser.add_argument("--stream-host", default="127.0.0.1")
     parser.add_argument("--stream-port", type=int, default=8780)
+    parser.add_argument("--capture-port", type=int, help="Optional independent camera capture service; defaults to --stream-port")
     parser.add_argument("--password", default=os.environ.get("GODOT_REMOTE_PASSWORD", ""))
     parser.add_argument("--godot-desktop-display", default="", help="Opt in to GPU video of an explicit private X11 display, e.g. :99")
     parser.add_argument("--godot-desktop-xauthority", default="")
@@ -4789,6 +4872,7 @@ def main():
         robot_view_devices=robot_view_devices,
         robot_module=args.robot_module,
         godot_desktop_config=desktop_config,
+        capture_port=args.capture_port,
     )
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile=cert, keyfile=key)

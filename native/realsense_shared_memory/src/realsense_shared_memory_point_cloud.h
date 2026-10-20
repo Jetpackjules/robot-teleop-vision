@@ -36,6 +36,10 @@ public:
 
     void set_shared_memory_name(const godot::String &p_name);
     godot::String get_shared_memory_name() const;
+    void set_capture_only(bool p_enabled);
+    bool get_capture_only() const;
+    void set_publish_shared_memory_name(const godot::String &p_name);
+    godot::String get_publish_shared_memory_name() const;
     void set_point_pixel_size(double p_size);
     double get_point_pixel_size() const;
     void set_circular_point_splats(bool p_enabled);
@@ -134,6 +138,8 @@ public:
     godot::PackedFloat32Array get_depth_to_raw_color_extrinsics() const;
     godot::Dictionary get_depth_u16_frame(int p_max_width = 320) const;
     bool request_rgbd_encode(int p_max_width = 320, int p_jpeg_quality = 78);
+    bool request_camera_rgb_encode(int p_max_width = 3840, int p_jpeg_quality = 95);
+    godot::Dictionary take_camera_rgb_encoded_frame();
     godot::Dictionary take_rgbd_encoded_frame();
     godot::Dictionary get_rgbd_encoder_status() const;
     int64_t get_frame_sequence() const;
@@ -223,6 +229,11 @@ private:
     int current_height = 0;
     int current_stride = 1;
     uint64_t current_frame_sequence = 0;
+    uint64_t publication_sequence = 0;
+    bool capture_only = false;
+    godot::String publish_shared_memory_name;
+    RealSenseSharedMemoryWriter snapshot_writer;
+    bool snapshot_writer_open = false;
     godot::Vector4 current_intrinsics;
     godot::Ref<godot::Image> current_depth_image;
     godot::Ref<godot::Image> current_color_image;
@@ -288,6 +299,7 @@ private:
     godot::PackedVector4Array robot_mask_capsules;
 
     struct RgbdEncodeJob {
+        bool original_rgb = false;
         uint64_t sequence = 0;
         int depth_width = 0;
         int depth_height = 0;
@@ -335,6 +347,15 @@ private:
     bool rgbd_encoder_completed_ready = false;
     RgbdEncodeJob rgbd_encoder_pending;
     RgbdEncodeResult rgbd_encoder_completed;
+    bool camera_rgb_pending_ready = false;
+    bool camera_rgb_completed_ready = false;
+    bool rgbd_encoder_prefer_original = false;
+    RgbdEncodeJob camera_rgb_pending;
+    RgbdEncodeResult camera_rgb_completed;
+    uint64_t camera_rgb_last_submitted_sequence = 0;
+    uint64_t camera_rgb_last_completed_sequence = 0;
+    int camera_rgb_last_width = 0;
+    int camera_rgb_last_quality = 0;
     uint64_t rgbd_last_submitted_sequence = 0;
     uint64_t rgbd_last_completed_sequence = 0;
     uint64_t rgbd_dropped_pending = 0;

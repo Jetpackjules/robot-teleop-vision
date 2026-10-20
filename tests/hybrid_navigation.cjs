@@ -7,8 +7,8 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../web/hybrid_rgbd_renderer.js'), 'utf8')
   .replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, '');
 const context = vm.createContext({window: {}, performance, FUSION_FRAGMENT_SHADER: ''});
-vm.runInContext(source + '\nwindow.navigationProbe = {state, orbitViewer, attachPointerNavigation, identityMatrix, cameraMarkerGeometry};', context);
-const {state, orbitViewer, attachPointerNavigation, identityMatrix, cameraMarkerGeometry} = context.window.navigationProbe;
+vm.runInContext(source + '\nwindow.navigationProbe = {state, orbitViewer, attachPointerNavigation, identityMatrix, cameraMarkerGeometry, trimIndependentFrameQueue};', context);
+const {state, orbitViewer, attachPointerNavigation, identityMatrix, cameraMarkerGeometry, trimIndependentFrameQueue} = context.window.navigationProbe;
 Object.assign(state.settings, {orbit_distance: 0.65, focus_vertical_offset: 0.35,
   orbit_pitch_offset: 0, dolly_enabled: false});
 state.focusWorld = [0.4, 0.2, -1];
@@ -84,4 +84,22 @@ for (const [width, height, fx, fy] of [[640, 480, 600, 600], [192, 109, 96, 97],
   check(vertices.every(Number.isFinite), 'camera marker handles different camera intrinsics');
   check(vertices[5] < 0, 'camera frustum points along the Godot optical forward axis');
 }
-console.log(JSON.stringify({navigation_checks: checks}));
+const packet = (id, reference, keyframe, sequence) => ({sequence, metadata: {cameras: [{id,
+  depth_temporal_keyframe: keyframe, depth_keyframe_id: reference}]}});
+const queued = [packet('A', 1, true, 1), packet('B', 1, true, 2),
+  ...Array.from({length: 9}, (_, i) => packet('A', 1, false, i + 3))];
+trimIndependentFrameQueue(queued);
+check(queued[0].sequence === 1 && queued[1].sequence === 2,
+  'backpressure retains the depth reference and an idle camera reference');
+check(queued.length === 6 && queued.at(-1).sequence === 11,
+  'backpressure skips stale deltas while retaining the latest acquisition');
+const frequentKeyframes = Array.from({length: 50}, (_, i) => packet('A', i + 1, true, i + 1));
+trimIndependentFrameQueue(frequentKeyframes);
+check(frequentKeyframes.length === 4 && frequentKeyframes[0].sequence === 47,
+  'frequent replacement keyframes cannot build an unbounded decode backlog');
+const changedReference = [packet('A', 1, true, 1), packet('A', 1, false, 2),
+  packet('A', 2, true, 3), packet('A', 2, false, 4), packet('A', 2, false, 5)];
+trimIndependentFrameQueue(changedReference, 4);
+check(changedReference[0].sequence === 1,
+  'a retained delta before a reference change keeps its own older keyframe');
+console.log(JSON.stringify({navigation_and_queue_checks: checks}));
