@@ -79,8 +79,11 @@ lowering resolution or changing capture settings.
 
 Advanced Setup separates complete RGB-D packet arrivals from completed decodes.
 Its cumulative received/decoded totals can be differenced over the same time
-window. Both rates count packets, which may contain one or several cameras;
-the per-camera counters count decoded camera updates separately. Arrival time
+window. Arrival counts packets, which may contain one or several cameras;
+decoded counts batches, which can combine the newest independent capture of
+each camera from several queued packets. Coalesced packets are reported
+separately. Per-camera cumulative counters count actual decoded camera updates
+and should be used for sustained fresh-camera FPS. Arrival time
 is measured when JavaScript receives a complete WebSocket message or HTTPS
 packet, rather than at the network interface.
 
@@ -91,7 +94,69 @@ including scheduling delays, not isolated CPU/GPU execution benchmarks. Queue
 depth and wait time show whether decoding is accumulating a backlog. Cached
 render FPS remains separate from both packet rates.
 
-## Measured boundary, 2026-10-20
+## Streaming optimizations, 2026-10-20
+
+Normal Quality passes the native JPEG and losslessly compressed depth through
+the gateway unchanged. Rebuilding exact temporal depth tiles cost about 69 ms
+per packet in this lab run, with no size saving on noisy live depth. Persistent
+reference compression remains opt-in, and the Low latency codec is unchanged.
+
+Up to three decoder workers run depth inflation and JPEG decoding in parallel.
+Native stateless frames transfer their buffers without cloning them; each
+worker returns exact depth samples and RGBA pixels. A bounded successor batch
+decodes while the current batch uploads. Queue coalescing retains the latest
+capture of every camera, rather than letting an A-only packet erase B/C updates.
+Temporal reference chains remain serial. Restarting cancels pending work and
+releases decoded resources before a different renderer generation can use them.
+
+RGBA8 texture uploads avoid RGB format conversion. GPU capacity checks and
+framebuffer validation run on allocation, while the renderer supplies its
+known framebuffer/VAO/viewport state during normal frames. BlendPCR uses shared
+grid vertices plus a unique provoking vertex for each exact triangle ID.
+Invalid triangles degenerate before rasterization. Fixed rig loop bounds and
+float32 uniform camera data reduce repeated work; rigs exceeding the uniform
+budget retain the texture metadata path. Output sampling and resolution stay
+unchanged. Browser GPU checks compare final pixels, triangle IDs beyond 16 bits,
+and overlay depth occlusion with the original path, including robot masking.
+
+Linux native builds use optional `libdeflate` when `pkg-config` finds it
+(`libdeflate-dev` on Ubuntu); other builds retain zlib. Both produce standard
+zlib streams of the same exact predictor values. Production-encoder tests
+inflate and compare every uint16 sample, including zeros and wraparound.
+The optional compressor was built and exercised on the lab Linux workstation;
+the Windows fallback does not require a new dependency.
+
+The capture-only owner also detects an SDK source that still reports open but
+has stopped producing frames for five seconds. Recovery runs after capture
+workers complete, serializes reopening on the main thread, respects calibration
+pauses, and backs off between attempts.
+
+## Verified after optimization
+
+The same public viewer on the Iris Xe laptop sustained the following fresh
+camera rates, calculated from cumulative frame counters over 65.163 seconds.
+The test used Quality BlendPCR, all three cameras, 848×480 depth/aligned RGB,
+JPEG 95 and exact uint16 depth. The canvas remained 2240×1260 physical pixels
+(1280×720 CSS pixels at Windows display scaling); it was not downscaled.
+
+| Camera suffix | Fresh decoded FPS |
+| --- | ---: |
+| A / 3665 | 32.55 |
+| B / 3681 | 32.58 |
+| C / 5787 | 33.79 |
+
+Public throughput was around 187–197 Mb/s in the boundary snapshots. A separate
+eight-second local capture/encoding check reached 48.1–48.9 FPS per camera with
+median encode times around 10 ms. These stages were measured separately, not
+treated as simultaneous samples of the same frames. Cached render rates and
+packet/batch rates are not used as evidence of fresh camera FPS.
+
+The target of 30 fresh FPS was met in this sustained run; 60 FPS end to end
+was not. Native encoding and browser decode/GPU work still run below the
+camera-only 60 Hz acquisition ceiling on these machines. This result does not
+guarantee the same throughput on other network routes, browser loads or GPUs.
+
+## Baseline before these optimizations, 2026-10-20
 
 The three-D435 lab check used a U300 workstation and the authenticated public
 tunnel. Fresh per-camera rates were measured separately from cached redraws:
@@ -110,6 +175,6 @@ run, not hard bandwidth limits. Persistent exact-depth compression did not
 materially improve the public native-quality result. A 60 Hz cached browser
 redraw does not establish a 60 FPS camera stream.
 
-Further work must reduce encoding and transport cost while retaining depth
-precision; merely increasing the requested frame rate is insufficient. The
-current changes do not claim sustained 60 FPS end to end.
+These baseline rates precede the gateway bypass, decoder workers, prefetch,
+native compression and GPU changes above. Merely increasing the requested frame
+rate does not establish sustained 60 FPS end to end.

@@ -2,7 +2,7 @@
 // Original approach: Andre Muehlenbrock, CGVR, University of Bremen, 2024.
 // Adapted from godot/runtime/point_cloud/blendpcr in this repository.
 // SPDX-License-Identifier: EUPL-1.2
-import { FULLSCREEN_VERTEX_SHADER, RIG_SAMPLING_SHADER, compileGpuProgram, gpuTexture } from "./hybrid_camera_quality.js?v=20261020_capture60";
+import { FULLSCREEN_VERTEX_SHADER, RIG_SAMPLING_SHADER, compileGpuProgram, gpuTexture } from "./hybrid_camera_quality.js?v=20261020_native_asyncgl";
 
 const METADATA_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
@@ -13,6 +13,47 @@ layout(location=0) out highp uint out_primitive;
 void main() {
   if(v_valid<0.9999)discard;
   out_primitive=v_triangle_id;
+}`;
+
+// Keep one unique provoking vertex per triangle for its exact integer ID and
+// validity. The other corners use shared grid vertices. No samples, triangles
+// or output pixels are removed. Masked robot triangles retain the old path.
+const INDEXED_METADATA_VERTEX_SHADER = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp usampler2D;
+uniform usampler2D u_depth;
+uniform highp sampler2DArray u_rig_quality;
+uniform highp int u_rig_index;
+uniform ivec2 u_size;
+uniform vec4 u_intrinsics;
+uniform mat4 u_model;
+uniform mat4 u_view_projection;
+flat out float v_valid;
+flat out uint v_triangle_id;
+void main() {
+  int grid_count=u_size.x*u_size.y;
+  ivec2 pixel;
+  v_valid=1.0;v_triangle_id=0u;
+  if(gl_VertexID<grid_count)pixel=ivec2(gl_VertexID%u_size.x,gl_VertexID/u_size.x);
+  else {
+    int primitive=gl_VertexID-grid_count,cell=primitive/2;
+    ivec2 top_left=ivec2(cell%(u_size.x-1),cell/(u_size.x-1));
+    vec4 quality=texelFetch(u_rig_quality,ivec3(top_left,u_rig_index),0);
+    v_valid=((primitive%2)==0?quality.r:quality.g)>0.5?1.0:0.0;
+    v_triangle_id=uint(primitive+1);
+    // Invalid triangles must be degenerate before rasterization. Moving only
+    // their provoking corner off-screen makes enormous discarded triangles
+    // around depth holes, wasting fill rate despite identical final pixels.
+    pixel=v_valid>0.5?top_left+ivec2(0,1):top_left+ivec2((primitive%2)==0?0:1,0);
+  }
+  uint mm=texelFetch(u_depth,pixel,0).r;
+  if(mm==0u){gl_Position=vec4(2.0,2.0,2.0,1.0);return;}
+  float z=float(mm)*0.001;
+  vec3 local_position=vec3((float(pixel.x)-u_intrinsics.z)*z/u_intrinsics.x,
+    -(float(pixel.y)-u_intrinsics.w)*z/u_intrinsics.y,-z);
+  vec3 world_position=(u_model*vec4(local_position,1.0)).xyz;
+  gl_Position=u_view_projection*vec4(world_position,1.0);
 }`;
 
 const CAMERA_SAMPLES_SHADER = `
@@ -127,7 +168,8 @@ void main() {
       owner=camera;quality=hit.score;best_color=hit.color;best_world=hit.world;
     }
     float weight=texture(u_weights,vec3(uv,float(camera/4)))[camera%4];
-    color+=to_linear(hit.color)*weight;total+=weight;
+    color+=to_linear(hit.color)*weight;
+    total+=weight;
   }
   if(owner<0)discard;
   // Thin surfaces can disappear from the small dominance grid. They still
@@ -159,7 +201,7 @@ function uniforms(gl, program) {
 }
 
 export class BrowserBlendPCR {
-  constructor(gl, vertexSource) {
+  constructor(gl, vertexSource, {indexedMetadata = true, staticCameraLoops = true, uniformCameraData = true} = {}) {
     this.gl = gl;
     this.vertexSource = vertexSource;
     this.signature = "";
@@ -167,6 +209,10 @@ export class BrowserBlendPCR {
     this.failedSignature = "";
     this.compositions = 0;
     this.metadataPasses = 0;
+    this.indexedMetadata = indexedMetadata;
+    this.staticCameraLoops = staticCameraLoops;
+    this.uniformCameraData = uniformCameraData;
+    this.gridBuffers = new Map();
   }
 
   clearTargets() {
@@ -180,6 +226,8 @@ export class BrowserBlendPCR {
     this.cacheKey="";
     this.metadataLayerKeys=[];
     this.metadataLayerCameras=[];
+    for(const entry of this.gridBuffers.values())gl.deleteBuffer(entry.buffer);
+    this.gridBuffers.clear();
   }
 
   dispose() {
@@ -199,6 +247,7 @@ export class BrowserBlendPCR {
       try {
         for(const [name,vertex,fragment] of [
           ["metadata",this.vertexSource,METADATA_FRAGMENT_SHADER],
+          ["metadataIndexed",INDEXED_METADATA_VERTEX_SHADER,METADATA_FRAGMENT_SHADER.replace("in float v_valid;","flat in float v_valid;")],
           ["dominance",FULLSCREEN_VERTEX_SHADER,DOMINANCE_FRAGMENT_SHADER],
           ["horizontal",FULLSCREEN_VERTEX_SHADER,HORIZONTAL_FRAGMENT_SHADER],
           ["vertical",FULLSCREEN_VERTEX_SHADER,VERTICAL_FRAGMENT_SHADER],
@@ -206,7 +255,18 @@ export class BrowserBlendPCR {
           ["present",FULLSCREEN_VERTEX_SHADER,PRESENT_FRAGMENT_SHADER]]) {
           // Specialize only array capacity, never resolution or sampling. Each
           // camera triangle is reconstructed once per output pixel per pass.
-          const source=fragment.replace('#version 300 es',`#version 300 es\n#define RIG_CAMERA_CAPACITY ${count}`);
+          let source=fragment.replace('#version 300 es',`#version 300 es\n#define RIG_CAMERA_CAPACITY ${count}`);
+          // Camera transforms/intrinsics are constant across the frame. Load
+          // their exact float32 values from uniforms instead of issuing many
+          // repeated texture fetches per output pixel. Large rigs retain the
+          // texture path when they exceed the guaranteed uniform budget.
+          if(this.uniformCameraData&&count*8+64<=gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS))
+            source=source.replace('#version 300 es','#version 300 es\n#define RIG_UNIFORM_DATA');
+          // Capacity is the exact current rig size and programs rebuild when
+          // it changes. Constant loop bounds let ANGLE unroll camera/peer
+          // sampling and scalarize the per-camera hit arrays.
+          if(this.staticCameraLoops)source=source.replaceAll('camera<u_rig_count','camera<RIG_CAMERA_CAPACITY')
+            .replaceAll('peer<u_rig_count','peer<RIG_CAMERA_CAPACITY');
           const program=compileGpuProgram(gl,vertex,source);
           this.programs[name]={program,uniforms:uniforms(gl,program)};
         }
@@ -242,6 +302,26 @@ export class BrowserBlendPCR {
     finally {gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.bindRenderbuffer(gl.RENDERBUFFER,null);}
   }
 
+  gridBuffer(width,height) {
+    const key=`${width}:${height}`;
+    if(this.gridBuffers.has(key))return this.gridBuffers.get(key);
+    const gl=this.gl,cells=(width-1)*(height-1),grid=width*height;
+    const indices=new Uint32Array(cells*6);
+    let offset=0;
+    // Small strips keep adjacent rows' shared vertices in the transform
+    // cache. Primitive IDs remain the original row-major IDs.
+    for(let by=0;by<height-1;by+=8)for(let bx=0;bx<width-1;bx+=4)
+    for(let y=by;y<Math.min(by+8,height-1);y++)for(let x=bx;x<Math.min(bx+4,width-1);x++) {
+      const cell=y*(width-1)+x,a=y*width+x,b=a+1,d=a+width+1;
+      indices[offset++]=a;indices[offset++]=b;indices[offset++]=grid+cell*2;
+      indices[offset++]=b;indices[offset++]=d;indices[offset++]=grid+cell*2+1;
+    }
+    const buffer=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,buffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,indices,gl.STATIC_DRAW);
+    if(gl.getError()!==gl.NO_ERROR){gl.deleteBuffer(buffer);throw new Error("BlendPCR grid allocation failed");}
+    const entry={buffer,count:indices.length};this.gridBuffers.set(key,entry);return entry;
+  }
+
   use(name,rig,view) {
     const gl=this.gl,{program,uniforms:u}=this.programs[name];
     gl.useProgram(program);
@@ -272,13 +352,14 @@ export class BrowserBlendPCR {
     const gl=this.gl;
     this.prepare(view.width,view.height,cameras.length);
     this.maskCapsules=maskCapsules;
-    const previousVao=gl.getParameter(gl.VERTEX_ARRAY_BINDING);
+    const previousVao=view.restoreVertexArray===undefined?gl.getParameter(gl.VERTEX_ARRAY_BINDING):view.restoreVertexArray;
     gl.bindVertexArray(this.vao);gl.disable(gl.BLEND);gl.disable(gl.CULL_FACE);gl.depthMask(true);
     try {
       const key=`${rig.version}:${view.viewProjection}:${maskCapsules?.starts}:${maskCapsules?.ends}:${settings.white_background_enabled}`;
       if(this.cacheKey!==key) {
         // One dense native mesh pass per camera; no second color rasterization.
-        const u=this.use("metadata",rig,view);
+        const indexed=this.indexedMetadata&&!maskCapsules;
+        const u=this.use(indexed?"metadataIndexed":"metadata",rig,view);
         for(const [name,unit] of [["u_depth",0],["u_color",1],["u_fusion_depth",2],["u_fusion_color",3],["u_rig_quality",6]])gl.uniform1i(u[name],unit);
         gl.uniform1i(u.u_fusion_enabled,0);gl.uniform1i(u.u_quality_enabled,1);
         gl.activeTexture(gl.TEXTURE6);gl.bindTexture(gl.TEXTURE_2D_ARRAY,rig.quality);
@@ -303,7 +384,11 @@ export class BrowserBlendPCR {
             gl.uniformMatrix4fv(u.u_model,false,camera.modelMatrix);
             gl.uniform4fv(u.u_intrinsics,camera.intrinsicsArray);
             gl.uniform2i(u.u_size,camera.width,camera.height);
-            gl.drawArrays(gl.TRIANGLES,0,(camera.width-1)*(camera.height-1)*6);
+            if(indexed) {
+              const grid=this.gridBuffer(camera.width,camera.height);
+              gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,grid.buffer);
+              gl.drawElements(gl.TRIANGLES,grid.count,gl.UNSIGNED_INT,0);
+            } else gl.drawArrays(gl.TRIANGLES,0,(camera.width-1)*(camera.height-1)*6);
           }
           this.metadataLayerKeys[index]=layerKey;
           this.metadataLayerCameras[index]=camera;

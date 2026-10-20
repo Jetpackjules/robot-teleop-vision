@@ -38,6 +38,9 @@
 extern "C" {
 #include <jpeglib.h>
 #include <zlib.h>
+#ifdef REALSENSE_RGBD_LIBDEFLATE
+#include <libdeflate.h>
+#endif
 }
 #endif
 
@@ -274,6 +277,22 @@ static PackedByteArray deflate_depth_predictive_fast(
 		high_bytes[index] = uint8_t((zigzag >> 8) & 0xff);
 	}
 
+#ifdef REALSENSE_RGBD_LIBDEFLATE
+	// The compressor is private to each persistent depth worker. Reuse its
+	// scratch memory; sharing a compressor between workers is not safe.
+	static thread_local std::unique_ptr<libdeflate_compressor, decltype(&libdeflate_free_compressor)>
+			compressor(libdeflate_alloc_compressor(1), libdeflate_free_compressor);
+	if (compressor) {
+		const size_t bound = libdeflate_zlib_compress_bound(compressor.get(), size_t(predicted.size()));
+		result.resize(int64_t(bound));
+		const size_t size = libdeflate_zlib_compress(compressor.get(), predicted.ptr(),
+				size_t(predicted.size()), result.ptrw(), bound);
+		if (size > 0) {
+			result.resize(int64_t(size));
+			return result;
+		}
+	}
+#endif
 	uLongf output_size = compressBound(uLong(predicted.size()));
 	result.resize(int64_t(output_size));
 	const int status = compress2(

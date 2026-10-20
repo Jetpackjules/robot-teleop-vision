@@ -15,7 +15,7 @@
   <style>
     :root {
       color-scheme: dark;
-      --panel: rgba(14, 16, 18, 0.88);
+      --panel: rgba(14, 16, 18, 0.97);
       --line: rgba(255, 255, 255, 0.14);
       --text: #f5f7fb;
       --muted: #b7c0cb;
@@ -77,7 +77,6 @@
       background: var(--panel);
       border: 1px solid var(--line);
       box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
-      backdrop-filter: blur(12px);
     }
     .status-chip {
       min-width: min(360px, calc(100vw - 32px));
@@ -275,7 +274,7 @@
     }
   </style>
   <script type="module" src="./godot_webcam_tracker_bridge.js?v=20260803_settings_cleanup_v1"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261020_stage_stats"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261020_native_pipeline"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -408,6 +407,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20261020_stage_stats"></script>
+  <script type="module" src="./controller_hybrid.js?v=20261020_native_pipeline"></script>
 </body>
 </html>

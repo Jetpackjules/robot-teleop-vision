@@ -874,6 +874,7 @@ var _capture_control_last_check := 0
 var _capture_control_last_write := 0
 var _capture_control_previous: Dictionary = {}
 var _capture_paused := false
+var _capture_recovery_at: Dictionary = {}
 var _capture_view_cpu_ms := 0.0
 
 func _ready() -> void:
@@ -3333,6 +3334,20 @@ func _find_camera_renderer(camera_id: String) -> MeshInstance3D:
 			return anchored
 	return get_node_or_null(node_name) as MeshInstance3D
 
+func _capture_active_after_recovery(camera_id: String, node: MeshInstance3D, active: bool) -> bool:
+	if not active or _capture_paused or not node.has_method("get_display_frame_age_ms"):
+		return active
+	var now := Time.get_ticks_msec()
+	if float(node.call("get_display_frame_age_ms")) <= 5000.0 or now-int(_capture_recovery_at.get(camera_id,-5000)) < 5000:
+		return active
+	_capture_recovery_at[camera_id]=now
+	# A silent SDK stall can leave is_open() true forever. This runs in the
+	# configuration group after all capture workers complete. Close here and
+	# reopen on the main thread next frame, as during serialized cold startup.
+	node.call("set_direct_realsense_enabled",false)
+	push_warning("Restarting stalled camera capture: %s" % camera_id)
+	return false
+
 func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) -> void:
 	node.visible = _streams_enabled() and _camera_enabled(camera_id) and _camera_diagnostic_visible(camera_id)
 	node.transform = _camera_transform(camera_id)
@@ -3344,6 +3359,7 @@ func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) ->
 		# Keep SDK discovery/open on the main thread, as in normal startup.
 		# Once initialized, independent sensors can poll/align concurrently.
 		var active := str(node.call("get_direct_realsense_status")).begins_with("RealSense direct capture active:")
+		active = _capture_active_after_recovery(camera_id,node,active)
 		node.process_thread_group = Node.PROCESS_THREAD_GROUP_SUB_THREAD if active else Node.PROCESS_THREAD_GROUP_MAIN_THREAD
 		node.process_thread_group_order = 0
 		node.set_process(not _capture_paused)

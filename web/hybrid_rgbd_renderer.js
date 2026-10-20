@@ -1,7 +1,8 @@
-import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_capture60";
+import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_native_pipeline";
 
-import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_capture60";
+import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_native_pipeline";
 import { CameraRgbViewer } from "./camera_rgb_viewer.js?v=20261020_capture60";
+import { NativeRgbdDecoderPool, isIndependentNativeFrame, takeIndependentFrameBatch } from "./rgbd_decode_pool.js?v=20261020_native_pixels";
 
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},
@@ -1549,10 +1550,18 @@ async function decodeColor(bytes, metadata = {}) {
 }
 
 async function decodeCamera(payload) {
-  const [color, rawDepth] = await Promise.all([
-    decodeColor(payload.color, payload.metadata),
-    inflateDepth(payload.depth, payload.metadata),
-  ]);
+  let color, rawDepth;
+  if (state.nativeDecoder && !state.nativeDecoder.disabled
+      && state.socketOptions?.exactDepth === true && isIndependentNativeFrame(payload.metadata)) {
+    const decoded = await state.nativeDecoder.decode(payload);
+    color = {bitmap: decoded.bitmap, pixels: null,rgbaPixels:decoded.rgbaPixels};rawDepth = decoded.depth;
+    for(const key of ["workerMs","dispatchMs"])state.stats[key]=state.stats[key]>0?state.stats[key]*.8+decoded[key]*.2:decoded[key];
+  } else {
+    [color, rawDepth] = await Promise.all([
+      decodeColor(payload.color, payload.metadata),
+      inflateDepth(payload.depth, payload.metadata),
+    ]);
+  }
   const width = Number(payload.metadata.width || 0);
   const height = Number(payload.metadata.height || 0);
   if (width <= 0 || height <= 0 || rawDepth.length < width * height) {
@@ -1568,6 +1577,7 @@ async function decodeCamera(payload) {
     depth,
     bitmap: color.bitmap,
     colorPixels: color.pixels,
+    colorRgbaPixels: color.rgbaPixels,
     colorTileUpdates: color.tileUpdates,
     modelMatrix: new Float32Array(payload.metadata.transform),
   };
@@ -1633,7 +1643,9 @@ function uploadCamera(decoded) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGB8, decoded.width, decoded.height);
+    // Browser bitmaps are RGBA. RGB8 forces an extra format conversion on
+    // ANGLE/D3D before each upload; the unused alpha does not change RGB.
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, decoded.width, decoded.height);
   }
   Object.assign(camera, decoded);
   camera.lastUpdateMs = performance.now();
@@ -1647,8 +1659,10 @@ function uploadCamera(decoded) {
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   updateManualRgbBase(camera);
-  if (camera.bitmap) {
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGB, gl.UNSIGNED_BYTE, camera.bitmap);
+  if (camera.colorRgbaPixels) {
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,camera.width,camera.height,gl.RGBA,gl.UNSIGNED_BYTE,camera.colorRgbaPixels);
+  } else if (camera.bitmap) {
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, camera.bitmap);
     camera.bitmap.close();
   } else if (Array.isArray(camera.colorTileUpdates)) {
     for (const update of camera.colorTileUpdates) {
@@ -1659,9 +1673,9 @@ function uploadCamera(decoded) {
         update.y,
         update.width,
         update.height,
-        gl.RGB,
+        gl.RGBA,
         gl.UNSIGNED_BYTE,
-        update.pixels,
+        rgbToRgba(update.pixels),
       );
     }
   } else if (camera.colorPixels) {
@@ -1672,12 +1686,13 @@ function uploadCamera(decoded) {
       0,
       camera.width,
       camera.height,
-      gl.RGB,
+      gl.RGBA,
       gl.UNSIGNED_BYTE,
-      camera.colorPixels,
+      rgbToRgba(camera.colorPixels),
     );
   }
   delete camera.bitmap;
+  delete camera.colorRgbaPixels;
   delete camera.colorPixels;
   delete camera.colorTileUpdates;
   renderManualCalibrationPreview(camera);
@@ -1710,7 +1725,9 @@ function updateManualRgbBase(camera) {
     base.height = camera.height;
   }
   const context = base.getContext("2d", { alpha: false });
-  if (camera.bitmap) {
+  if (camera.colorRgbaPixels) {
+    context.putImageData(new ImageData(new Uint8ClampedArray(camera.colorRgbaPixels.buffer),camera.width,camera.height),0,0);
+  } else if (camera.bitmap) {
     context.drawImage(camera.bitmap, 0, 0, camera.width, camera.height);
   } else if (Array.isArray(camera.colorTileUpdates)) {
     for (const update of camera.colorTileUpdates) {
@@ -1751,7 +1768,9 @@ function updateRgbDisplay(camera) {
     base.height = camera.height;
   }
   const baseContext = base.getContext("2d", { alpha: false });
-  if (camera.bitmap) {
+  if (camera.colorRgbaPixels) {
+    baseContext.putImageData(new ImageData(new Uint8ClampedArray(camera.colorRgbaPixels.buffer),camera.width,camera.height),0,0);
+  } else if (camera.bitmap) {
     baseContext.drawImage(camera.bitmap, 0, 0, camera.width, camera.height);
   } else if (Array.isArray(camera.colorTileUpdates)) {
     for (const update of camera.colorTileUpdates) {
@@ -1878,20 +1897,45 @@ function renderManualCalibrationPreview(camera) {
   cropContext.drawImage(visible, sourceX, sourceY, Math.min(extent, camera.width), Math.min(extent, camera.height), 0, 0, crop.width, crop.height);
 }
 
+function beginFrameDecode(frame) {
+  const started = performance.now(), generation = state.robotLoadToken;
+  let canceled = false, completed;
+  const release = () => {
+    if (!completed) return;
+    for (const result of completed) if (result.status === "fulfilled") {
+      result.value.bitmap?.close();result.value.bitmap = null;
+    }
+    completed = null;
+  };
+  const promise = Promise.allSettled(frame.payloads.map(decodeCamera)).then(results => {
+    completed = results;
+    if (canceled || !state.running || generation !== state.robotLoadToken) release();
+    return results;
+  });
+  return {frame, started, queueElapsed: Math.max(0,started-(frame.receivedAtMs??started)), promise,
+    cancel() {canceled = true;release();}};
+}
+
 async function decodeNewestPackets() {
   if (state.decoding) return;
   state.decoding = true;
+  const generation = state.robotLoadToken;
   let persistentFrame = false;
   try {
-    if (!state.running || state.pendingFrameQueue.length === 0) return;
-    const frame = state.pendingFrameQueue.shift();
+    if (!state.running || (!state.nextFrameDecode && state.pendingFrameQueue.length === 0)) return;
+    // Decode the newest independent capture for every camera in parallel.
+    // A newer A-only packet must not erase a still-current B/C update.
+    const prepared = state.nextFrameDecode || beginFrameDecode(state.socketOptions?.exactDepth === true
+      ? takeIndependentFrameBatch(state.pendingFrameQueue) : state.pendingFrameQueue.shift());
+    state.nextFrameDecode = null;
+    const frame = prepared.frame;
+    state.stats.coalesced = Number(state.stats.coalesced || 0) + Number(frame.coalescedPackets || 0);
     const payloads = frame.payloads;
     const metadata = frame.metadata;
     persistentFrame = (
       metadata.temporal_reference_mode === "persistent_v1"
     );
-    const decodeStarted = performance.now();
-    const queueElapsed = Math.max(0, decodeStarted - (frame.receivedAtMs ?? decodeStarted));
+    const decodeStarted = prepared.started, queueElapsed = prepared.queueElapsed;
     const robot = metadata.robot;
     if (robot && robot.available !== false && robot.links && typeof robot.links === "object") {
       state.robotTransforms = robot.links;
@@ -1901,13 +1945,29 @@ async function decodeNewestPackets() {
       state.robotTransforms = {};
     }
     state.stats.robotTransforms = Object.keys(state.robotTransforms).length;
-    const decoded = await Promise.all(payloads.map(decodeCamera));
+    const results = await prepared.promise;
+    const decoded = results.filter(result => result.status === "fulfilled").map(result => result.value);
+    const failed = results.find(result => result.status === "rejected");
+    if (failed) {
+      for (const camera of decoded) camera.bitmap?.close();
+      throw failed.reason;
+    }
     const codecElapsed = performance.now() - decodeStarted;
-    if (!state.running) {
+    if (!state.running || generation !== state.robotLoadToken) {
       for (const camera of decoded) {
         if (camera.bitmap) camera.bitmap.close();
       }
       return;
+    }
+    // Keep one independent batch decoding while this batch uploads/renders.
+    // Temporal references remain strictly serial, and memory stays bounded to
+    // the current batch plus one successor (at most one capture per camera).
+    const next = state.pendingFrameQueue[0];
+    if (state.socketOptions?.exactDepth === true && !persistentFrame && next
+        && next.metadata.temporal_reference_mode !== "persistent_v1"
+        && payloads.every(payload => isIndependentNativeFrame(payload.metadata))
+        && next.payloads.every(payload => isIndependentNativeFrame(payload.metadata))) {
+      state.nextFrameDecode = beginFrameDecode(takeIndependentFrameBatch(state.pendingFrameQueue));
     }
     const uploadStarted = performance.now();
     const updatedCameras = decoded.map(uploadCamera);
@@ -1951,6 +2011,7 @@ async function decodeNewestPackets() {
       ? state.stats.decodeMs * 0.8 + decodeElapsed * 0.2
       : decodeElapsed;
   } catch (error) {
+    if (generation !== state.robotLoadToken) return;
     state.stats.decodeErrors = Number(state.stats.decodeErrors || 0) + 1;
     state.stats.status = `decode error: ${error && error.message ? error.message : error}`;
     if (persistentFrame && state.socket) {
@@ -1968,9 +2029,10 @@ async function decodeNewestPackets() {
       }, 100);
     }
   } finally {
+    if (generation !== state.robotLoadToken) return;
     state.decoding = false;
-    if (state.pendingFrameQueue.length > 0 && state.running) {
-      setTimeout(decodeNewestPackets, 0);
+    if ((state.nextFrameDecode || state.pendingFrameQueue.length > 0) && state.running) {
+      queueMicrotask(decodeNewestPackets);
     }
   }
 }
@@ -2218,7 +2280,11 @@ function render() {
   state.stats.renderWarning = "";
   if (state.cameras.length) {
     try {
-      state.cameraFusion.update(state.cameras, inverseRigidTransform, now, state.settings);
+      gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+      gl.bindVertexArray(null);
+      state.cameraFusion.update(state.cameras, inverseRigidTransform, now, state.settings, {
+        framebuffer: null, vertexArray: null, viewport: [0,0,dimensions.width,dimensions.height],
+      });
       cached = true;
     } catch (error) {
       state.stats.renderWarning = `${error.message || error}; using independent rendering`;
@@ -2230,7 +2296,7 @@ function render() {
       state.blendPCR ||= new BrowserBlendPCR(gl, VERTEX_SHADER);
       state.blendPCR.render(state.cameraFusion, state.cameras, {
         ...dimensions, now, viewer: viewerTransform, inverseViewer: inverseRigidTransform(viewerTransform),
-        projection, viewProjection,
+        projection, viewProjection, restoreVertexArray: null,
       }, maskCapsules, state.settings);
       blended = true;
     } catch (error) {
@@ -2847,6 +2913,8 @@ export async function startGodotHybridRenderer(options = {}) {
   gl.uniform1i(state.uniforms.rigColor, 7);
   gl.uniform1f(state.uniforms.maxPointSize, Math.min(32, gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]));
   state.running = true;
+  state.decoding = false;
+  state.nativeDecoder = new NativeRgbdDecoderPool();
   state.robotLoadToken += 1;
   const robotLoadToken = state.robotLoadToken;
   loadRobotMeshes(gl, robotLoadToken).catch((error) => {
@@ -2867,6 +2935,9 @@ export async function startGodotHybridRenderer(options = {}) {
     captureAgeMs: -1,
     decodeMs: 0,
     codecMs: 0,
+    coalesced: 0,
+    workerMs: 0,
+    dispatchMs: 0,
     uploadMs: 0,
     queueMs: 0,
     sourceFps: 0,
@@ -2909,6 +2980,10 @@ export async function startGodotHybridRenderer(options = {}) {
 
 export function stopGodotHybridRenderer() {
   state.running = false;
+  state.nextFrameDecode?.cancel();
+  state.nextFrameDecode = null;
+  state.nativeDecoder?.close();
+  state.nativeDecoder = null;
   state.rgbdPaused = false;
   state.rawRgbViewer?.stop();
   state.rawRgbViewer = null;

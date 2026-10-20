@@ -121,13 +121,23 @@ export const RIG_SAMPLING_SHADER = `
 uniform highp usampler2DArray u_rig_depth;
 uniform highp sampler2DArray u_rig_quality;
 uniform highp sampler2DArray u_rig_color;
+#ifdef RIG_UNIFORM_DATA
+uniform highp vec4 u_rig_uniform_data[RIG_CAMERA_CAPACITY*8];
+#else
 uniform highp sampler2D u_rig_data;
+#endif
 uniform highp int u_rig_count;
 uniform float u_fusion_depth_tolerance;
 uniform highp int u_robot_mask_enabled;
 uniform vec4 u_mask_capsule_a[6];
 uniform vec4 u_mask_capsule_b[6];
-vec4 rig_data(int camera,int column) {return texelFetch(u_rig_data,ivec2(column,camera),0);}
+vec4 rig_data(int camera,int column) {
+#ifdef RIG_UNIFORM_DATA
+  return u_rig_uniform_data[camera*8+column];
+#else
+  return texelFetch(u_rig_data,ivec2(column,camera),0);
+#endif
+}
 vec3 rig_local(int camera,vec3 p) {
   vec4 h=vec4(p,1);
   return vec3(dot(rig_data(camera,0),h),dot(rig_data(camera,1),h),dot(rig_data(camera,2),h));
@@ -238,6 +248,9 @@ export class GpuCameraRig {
     this.bindings = new WeakMap();
     this.failedSignature = "";
     this.version = 0;
+    this.metadataValues = null;
+    this.maxLayers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS);
+    this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
   }
 
   clear() {
@@ -253,6 +266,7 @@ export class GpuCameraRig {
     this.signature = this.metadataSignature = "";
     this.uploads = [];
     this.count = 0;
+    this.metadataValues = null;
     this.failedSignature = "";
   }
 
@@ -262,6 +276,7 @@ export class GpuCameraRig {
     if (!locations) {
       locations = {};
       for (const name of ["depth","data","quality","color","count"]) locations[name] = gl.getUniformLocation(program,`u_rig_${name}`);
+      locations.uniformData=gl.getUniformLocation(program,"u_rig_uniform_data[0]");
       this.bindings.set(program,locations);
     }
     for (const [key, unit, target] of [["depth",4,gl.TEXTURE_2D_ARRAY],["data",5,gl.TEXTURE_2D],
@@ -271,14 +286,15 @@ export class GpuCameraRig {
       gl.uniform1i(locations[key],unit);
     }
     gl.uniform1i(locations.count,this.count);
+    if(locations.uniformData!==null&&this.metadataValues)gl.uniform4fv(locations.uniformData,this.metadataValues);
   }
 
-  update(cameras, inverseTransform, now = performance.now(), settings = {}) {
+  update(cameras, inverseTransform, now = performance.now(), settings = {}, restoreState = null) {
     const gl = this.gl;
     if (!cameras.length) {this.clear();return;}
     const width = Math.max(...cameras.map(c => c.width)), height = Math.max(...cameras.map(c => c.height));
-    if (cameras.length > gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS)
-      || Math.max(width,height,cameras.length) > gl.getParameter(gl.MAX_TEXTURE_SIZE)) {
+    if (cameras.length > this.maxLayers
+      || Math.max(width,height,cameras.length) > this.maxTextureSize) {
       throw new Error("Camera rig exceeds this GPU's texture limits; using independent mesh");
     }
     const signature = JSON.stringify(cameras.map(c => [c.metadata.id,c.width,c.height]));
@@ -296,6 +312,16 @@ export class GpuCameraRig {
         this.uniforms = {};
         for (const name of ["u_depth","u_color","u_size","u_intrinsics","u_mesh_depth_delta","u_mesh_max_edge"])
           this.uniforms[name] = gl.getUniformLocation(this.program,name);
+        // The immutable attachments have identical dimensions at every layer.
+        // Validate once, rather than synchronizing the GPU on every capture.
+        const parent = restoreState ? restoreState.framebuffer : gl.getParameter(gl.FRAMEBUFFER_BINDING);
+        gl.bindFramebuffer(gl.FRAMEBUFFER,this.framebuffer);
+        gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,this.quality,0,0);
+        gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT1,this.color,0,0);
+        gl.drawBuffers([gl.COLOR_ATTACHMENT0,gl.COLOR_ATTACHMENT1]);
+        const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+        gl.bindFramebuffer(gl.FRAMEBUFFER,parent);
+        if (!complete) throw new Error("Camera cache framebuffer unavailable");
         if (gl.getError() !== gl.NO_ERROR) throw new Error("Camera cache allocation failed");
         this.signature = signature;
         this.width = width;this.height = height;
@@ -315,9 +341,11 @@ export class GpuCameraRig {
       if (!previous || previous.camera !== camera || previous.revision !== revision) changed.push({camera,index,revision});
     });
     const key = metadata.toString();
+    this.metadataValues = metadata;
     if (!changed.length && key === this.metadataSignature) return;
-    const oldFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING), oldVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
-    const viewport = gl.getParameter(gl.VIEWPORT);
+    const oldFramebuffer = restoreState ? restoreState.framebuffer : gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    const oldVao = restoreState ? restoreState.vertexArray : gl.getParameter(gl.VERTEX_ARRAY_BINDING);
+    const viewport = restoreState ? restoreState.viewport : gl.getParameter(gl.VIEWPORT);
     const u = this.uniforms;
     try {
       gl.useProgram(this.program);
@@ -337,8 +365,6 @@ export class GpuCameraRig {
         gl.bindFramebuffer(gl.FRAMEBUFFER,this.framebuffer);
         gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,this.quality,0,index);
         gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT1,this.color,0,index);
-        gl.drawBuffers([gl.COLOR_ATTACHMENT0,gl.COLOR_ATTACHMENT1]);
-        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("Camera cache framebuffer unavailable");
         gl.viewport(0,0,camera.width,camera.height);
         gl.uniform2i(u.u_size,camera.width,camera.height);
         gl.uniform4fv(u.u_intrinsics,camera.intrinsicsArray);

@@ -625,6 +625,11 @@
           // HTTPS polling remains available as an explicit diagnostic mode.
           transport: forceHttpsRgbd ? "https" : "websocket",
           persistentReference,
+          // Native Quality depth is already losslessly predicted/compressed.
+          // Rebuilding exact tile deltas in the gateway costs a full decode +
+          // encode per packet without shrinking noisy live depth. Keep that
+          // work opt-in for persistent references, or the latency profile.
+          temporalDepth: persistentReference || !hybridPreset.exactDepth,
           temporalColor: !fullRgbFrames,
           onFocus: () => sendViewSettings({ inspect_enabled: true }),
         }),
@@ -996,7 +1001,12 @@
       const hasStreamMeasurement = activeViewportMode === "hybrid"
         ? hybrid.received > 0 || hybrid.connected === true
         : stats.framesDecoded > 0;
-      const fps = hasStreamMeasurement ? `${Math.round(Math.max(0, stats.fps || 0))} fps` : "-- fps";
+      let fps = hasStreamMeasurement ? `${Math.round(Math.max(0, stats.fps || 0))} fps` : "-- fps";
+      const cameraRates = Object.values(hybrid.cameraFps || {}).map(Number).filter(Number.isFinite);
+      if (activeViewportMode === "hybrid" && hybrid.displaySource !== "original_rgb" && cameraRates.length) {
+        const minimum = Math.round(Math.min(...cameraRates)), maximum = Math.round(Math.max(...cameraRates));
+        fps = `${minimum === maximum ? minimum : `${minimum}-${maximum}`} fps/camera`;
+      }
       const bitrate = hasStreamMeasurement ? `${Math.round(Math.max(0, stats.bitrateKbps || 0))} kbps` : "-- kbps";
       networkStats.textContent = [
         `Resolution  ${size} @ ${fps}`,
@@ -1008,13 +1018,15 @@
         ...(activeViewportMode === "hybrid" ? [
           `RGB-D age   ${hybrid.captureAgeMs == null || hybrid.captureAgeMs < 0 ? "--" : `${Math.round(hybrid.captureAgeMs)}ms`} | packet ${hybrid.packetAgeMs == null || hybrid.packetAgeMs < 0 ? "--" : `${Math.round(hybrid.packetAgeMs)}ms`} | cameras ${hybrid.cameras || 0}`,
           ...(hybrid.displaySource === "original_rgb" ? [] : [
-            `Packets ${Number(hybrid.received || 0)} received / ${Number(hybrid.decoded || 0)} decoded`,
+            `Packets ${Number(hybrid.received || 0)} received | ${Number(hybrid.decoded || 0)} decoded batches | ${Number(hybrid.coalesced || 0)} coalesced`,
             `Arrival ${Number(hybrid.receiveFps || 0).toFixed(1)}/s | decoded ${Number(hybrid.sourceFps || 0).toFixed(1)}/s | queue ${Number(hybrid.queueDepth || 0)}${hybrid.decodeBusy ? " + 1 in progress" : ""}`,
             `Codec ${Number(hybrid.codecMs || 0).toFixed(1)}ms | upload submission ${Number(hybrid.uploadMs || 0).toFixed(1)}ms | queue wait ${Number(hybrid.queueMs || 0).toFixed(1)}ms`,
+            `Worker ${Number(hybrid.workerMs || 0).toFixed(1)}ms | return scheduling ${Number(hybrid.dispatchMs || 0).toFixed(1)}ms`,
           ]),
           `Decode+upload ${hybrid.decodeMs ? `${hybrid.decodeMs.toFixed(1)}ms` : "--"} | render ${hybrid.renderFps ? `${Math.round(hybrid.renderFps)} fps` : "--"}`,
           ...(hybrid.decodeErrors ? [`Decode errors ${hybrid.decodeErrors} | ${hybrid.status}`] : []),
           `Camera FPS  ${Object.entries(hybrid.cameraFps || {}).map(([id, rate]) => `${id.slice(-4)}:${Math.round(rate)}`).join("  ") || "--"}`,
+          `Camera frames ${Object.entries(hybrid.cameraFrames || {}).map(([id, count]) => `${id.slice(-4)}:${count}`).join("  ") || "--"}`,
         ] : []),
       ].join("\n");
       statusLines.textContent = [

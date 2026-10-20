@@ -69,6 +69,18 @@ else:
     # Ubuntu's libjpeg ABI is provided by libjpeg-turbo. Use its SIMD encoder
     # and zlib level-1 directly for the latency-sensitive RGB-D stream.
     env.Append(LIBS=["jpeg", "z"])
+    # Optional SIMD whole-frame zlib encoder. The wire format and all depth
+    # samples remain identical; platforms without it retain the zlib fallback.
+    try:
+        deflate_flags = subprocess.check_output(
+            ["pkg-config", "--cflags", "--libs", "libdeflate"],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        env.MergeFlags(deflate_flags)
+        env.Append(CPPDEFINES=["REALSENSE_RGBD_LIBDEFLATE"])
+        print("RealSense native lossless depth uses libdeflate.")
+    except (OSError, subprocess.CalledProcessError):
+        print("RealSense native lossless depth uses the zlib fallback.")
 
 onnxruntime_include_dir = os.environ.get("ONNXRUNTIME_INCLUDE_DIR", os.path.join("thirdparty", "onnxruntime", "include"))
 onnxruntime_c_api = os.path.join(onnxruntime_include_dir, "onnxruntime", "core", "session", "onnxruntime_c_api.h")

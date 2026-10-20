@@ -1,0 +1,125 @@
+<!doctype html><meta charset="utf-8"><title>Native RGB-D upload check</title><pre id="result">Running GPU pixel checks...</pre><canvas id="canvas" width="8" height="4"></canvas>
+<script type="module">
+import {state,uploadCamera,VERTEX_SHADER,identityMatrix,perspectiveMatrix,inverseRigidTransform,multiplyMatrix} from './renderer.js';
+import {NativeRgbdDecoderPool} from './rgbd_decode_pool.js';
+import {BrowserBlendPCR} from './hybrid_blendpcr.js';
+import {GpuCameraRig,compileGpuProgram,FULLSCREEN_VERTEX_SHADER} from './hybrid_camera_quality.js';
+const passed=[];let benchmarkMs={}; const check=(v,s)=>{if(!v)throw Error(s);passed.push(s)};
+try {
+ const gl=document.getElementById('canvas').getContext('webgl2',{alpha:false,antialias:false});
+ check(!!gl,'WebGL2 is available');state.gl=gl;
+ const metadata={id:'probe',width:8,height:4,intrinsics:[8,8,4,2],transform:[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]};
+ const rgba=new Uint8ClampedArray(8*4*4),rgb=new Uint8Array(8*4*3);
+ for(let i=0;i<32;i++){for(let c=0;c<3;c++)rgba[i*4+c]=rgb[i*3+c]=(i*43+c*73)&255;rgba[i*4+3]=255;}
+ const source=new ImageData(rgba,8,4);
+ const base={metadata,width:8,height:4,modelMatrix:new Float32Array(metadata.transform),depth:new Uint16Array(32).fill(1000)};
+ const camera=uploadCamera({...base,bitmap:await createImageBitmap(source)});state.cameras.push(camera);
+ const fbo=gl.createFramebuffer();
+ function pixels(){gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,camera.colorTexture,0);const out=new Uint8Array(128);gl.readPixels(0,0,8,4,gl.RGBA,gl.UNSIGNED_BYTE,out);check(gl.getError()===gl.NO_ERROR,'Upload has no WebGL errors');return out;}
+ const same=(a,b)=>a.length===b.length&&a.every((v,i)=>v===b[i]);
+ check(same(pixels(),rgba),'RGBA bitmap upload preserves every RGB byte');
+ uploadCamera({...base,bitmap:null,colorPixels:rgb});
+ check(same(pixels(),rgba),'Legacy full RGB upload preserves every RGB byte');
+ const tile=new Uint8Array([12,34,56,78,90,123]);
+ uploadCamera({...base,bitmap:null,colorPixels:null,colorTileUpdates:[{x:2,y:1,width:2,height:1,pixels:tile}]});
+ const expected=new Uint8Array(rgba);for(let i=0;i<2;i++)for(let c=0;c<3;c++)expected[((1*8+2+i)*4)+c]=tile[i*3+c];
+ check(same(pixels(),expected),'Persistent RGB tiles retain unchanged pixels and exact updated colors');
+ const canvas=new OffscreenCanvas(8,4);canvas.getContext('2d').putImageData(source,0,0);
+ const jpeg=await canvas.convertToBlob({type:'image/jpeg',quality:.95});
+ const compressed=await new Response(new Blob([base.depth]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer();
+ const pool=new NativeRgbdDecoderPool({rgbaPixels:false});
+ const decoded=await pool.decode({metadata:{...metadata,depth_encoding:'u16_mm_deflate'},color:new Uint8Array(await jpeg.arrayBuffer()),depth:new Uint8Array(compressed)});
+ check(same(decoded.depth,base.depth),'Real worker round trip retains every native depth sample');
+ const baseline=await createImageBitmap(jpeg);canvas.getContext('2d').drawImage(baseline,0,0);const original=canvas.getContext('2d').getImageData(0,0,8,4).data;
+ canvas.getContext('2d').drawImage(decoded.bitmap,0,0);check(same(canvas.getContext('2d').getImageData(0,0,8,4).data,original),'Worker JPEG decoding is pixel-identical to main-thread decoding');
+ baseline.close();decoded.bitmap.close();pool.close();
+ const pixelPool=new NativeRgbdDecoderPool();
+ const pixelCompressed=await new Response(new Blob([base.depth]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer();
+ const pixelDecoded=await pixelPool.decode({metadata:{...metadata,depth_encoding:'u16_mm_deflate'},color:new Uint8Array(await jpeg.arrayBuffer()),depth:new Uint8Array(pixelCompressed)});
+ check(same(pixelDecoded.rgbaPixels,original),'Worker CPU RGBA bytes match the original JPEG pixels exactly');
+ uploadCamera({...base,bitmap:null,colorRgbaPixels:pixelDecoded.rgbaPixels});
+ check(same(pixels(),original),'Worker RGBA texture upload is pixel-identical to bitmap upload');pixelPool.close();
+ gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.canvas.width=192;gl.canvas.height=144;
+ state.cameras=[];const cameras=[];
+ for(let c=0;c<3;c++) {
+  const width=256,height=192,depth=new Uint16Array(width*height),color=new Uint8Array(width*height*3);
+  for(let y=0;y<height;y++)for(let x=0;x<width;x++) {
+   const i=y*width+x;depth[i]=1000+Math.round(Math.sin(x*.03)*15+y*.02);
+   if(x>90&&x<120&&y>70&&y<120)depth[i]-=30;
+   if((x>145&&x<150&&y>60&&y<115)||(x+y)%103===0)depth[i]=0;
+   color[i*3]=(x+c*71)&255;color[i*3+1]=(y+c*43)&255;color[i*3+2]=(x+y+c*17)&255;
+  }
+  const model=identityMatrix();model[12]=(c-1)*.02;model[14]=c*.005;
+  const m={id:'camera'+c,width,height,intrinsics:[250,250,128,96],transform:Array.from(model)};
+  const camera=uploadCamera({metadata:m,width,height,depth,colorPixels:color,modelMatrix:model});
+  cameras.push(camera);state.cameras.push(camera);
+ }
+ const rig=new GpuCameraRig(gl),settings={mesh_depth_delta:.05,mesh_max_edge:.08,blendpcr_enabled:true};
+ const reference=new BrowserBlendPCR(gl,VERTEX_SHADER,{indexedMetadata:false,staticCameraLoops:false,uniformCameraData:false});
+ const indexed=new BrowserBlendPCR(gl,VERTEX_SHADER);
+ const depthOverlay=compileGpuProgram(gl,FULLSCREEN_VERTEX_SHADER,`#version 300 es
+ precision highp float;out vec4 color;void main(){color=vec4(1,0,1,1);gl_FragDepth=0.97+gl_FragCoord.x/192.0*0.03;}`);
+ const capture=renderer=>{
+  const color=new Uint8Array(192*144*4);gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.readPixels(0,0,192,144,gl.RGBA,gl.UNSIGNED_BYTE,color);
+  const layers=[];gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+  for(let c=0;c<3;c++) {gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,renderer.metadata,0,c);
+   const ids=new Uint32Array(192*144);gl.readPixels(0,0,192,144,gl.RED_INTEGER,gl.UNSIGNED_INT,ids);layers.push(ids);}
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.useProgram(depthOverlay);gl.bindVertexArray(null);
+  gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);gl.viewport(0,0,192,144);gl.drawArrays(gl.TRIANGLES,0,3);
+  const occlusion=new Uint8Array(color.length);gl.readPixels(0,0,192,144,gl.RGBA,gl.UNSIGNED_BYTE,occlusion);
+  return {color,layers,occlusion};
+ };
+ for(let pose=0;pose<5;pose++) {
+  const viewer=identityMatrix();viewer[12]=pose*.025;viewer[13]=pose*.01;viewer[14]=pose*.03;
+  const projection=perspectiveMatrix(55,192/144,.01,100);
+  const view={width:192,height:144,dpr:1,now:performance.now(),viewer,inverseViewer:inverseRigidTransform(viewer),projection,viewProjection:multiplyMatrix(projection,inverseRigidTransform(viewer))};
+  for(const camera of cameras)camera.lastUpdateMs=view.now;
+  const restoreState={framebuffer:null,vertexArray:null,viewport:[0,0,192,144]};
+  if(pose%2) {
+   gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.bindVertexArray(null);gl.viewport(...restoreState.viewport);
+   view.restoreVertexArray=null;
+  }
+  rig.update(cameras,inverseRigidTransform,view.now,settings,pose%2?restoreState:null);
+  if(pose%2)check(gl.getParameter(gl.FRAMEBUFFER_BINDING)===null&&gl.getParameter(gl.VERTEX_ARRAY_BINDING)===null
+   &&same(gl.getParameter(gl.VIEWPORT),restoreState.viewport),'Known drawing state is restored at pose '+pose);
+  let mask=null;
+  if(pose===4) {
+   mask={starts:new Float32Array(24),ends:new Float32Array(24)};
+   for(let i=0;i<6;i++){mask.starts.set([100,100,100,.01],i*4);mask.ends.set([100,100,100,0],i*4);}
+   mask.starts.set([-.1,0,-1,.04],0);mask.ends.set([.1,0,-1,0],0);
+  }
+  reference.render(rig,cameras,view,mask,settings);const expected=capture(reference);
+  check(expected.layers.some(layer=>layer.some(id=>id>65535)),'Fixture renders visible triangles beyond the 16-bit ID boundary at pose '+pose);
+  indexed.render(rig,cameras,view,mask,settings);const actual=capture(indexed);
+  check(same(actual.color,expected.color),'Indexed BlendPCR color is pixel-identical at pose '+pose);
+  check(same(actual.occlusion,expected.occlusion),'Presented depth preserves exact overlay occlusion at pose '+pose);
+  for(let c=0;c<3;c++)check(same(actual.layers[c],expected.layers[c]),'Indexed metadata IDs match exactly at pose '+pose+' camera '+c);
+  check(gl.getError()===gl.NO_ERROR,'Indexed draw has no GPU errors at pose '+pose);
+ }
+ check(indexed.gridBuffers.size===1,'Three equal-resolution cameras share one static index buffer');
+ indexed.clearTargets();check(indexed.gridBuffers.size===0,'Index buffers are released with targets');
+ rig.clear();state.cameras=[];cameras.length=0;gl.canvas.width=2240;gl.canvas.height=1260;
+ for(let c=0;c<3;c++) {
+  const width=848,height=480,depth=new Uint16Array(width*height).fill(1000),color=new Uint8Array(width*height*3).fill(150+c*30);
+  for(let y=50;y<180;y++)for(let x=290;x<320;x++)depth[y*width+x]=0;
+  const model=identityMatrix();model[12]=(c-1)*.02;
+  const m={id:'hd'+c,width,height,intrinsics:[425,425,424,240],transform:Array.from(model)};
+  const camera=uploadCamera({metadata:m,width,height,depth,colorPixels:color,modelMatrix:model});cameras.push(camera);state.cameras.push(camera);
+ }
+ const viewer=identityMatrix(),projection=perspectiveMatrix(55,2240/1260,.01,100);
+ const view={width:2240,height:1260,dpr:1,now:performance.now(),viewer,inverseViewer:viewer,projection,viewProjection:projection};
+ for(const camera of cameras)camera.lastUpdateMs=view.now;rig.update(cameras,inverseRigidTransform,view.now,settings);
+ for(const [name,renderer] of [['original',reference],['indexed',indexed]]) {
+  const times=[];
+  for(let i=0;i<8;i++) {
+   renderer.cacheKey='';renderer.metadataLayerKeys=[];gl.finish();const start=performance.now();
+   renderer.render(rig,cameras,view,null,settings);gl.finish();
+   const pixel=new Uint8Array(4);gl.readPixels(1120,630,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+   if(i>1)times.push(performance.now()-start);
+  }
+  benchmarkMs[name]=times.sort((a,b)=>a-b)[Math.floor(times.length/2)];
+ }
+ reference.dispose();indexed.dispose();rig.clear();
+ document.getElementById('result').textContent=JSON.stringify({passed,benchmarkMs,failures:0},null,2);
+}catch(error){document.getElementById('result').textContent=JSON.stringify({passed,error:String(error),failures:1},null,2);}
+</script>
