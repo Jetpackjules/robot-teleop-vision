@@ -42,8 +42,8 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     assert.equal(await page.locator('#connection-details').getAttribute('open'), null);
     assert.equal(await page.locator('#display-mode').inputValue(), 'rgb_camera');
     assert.equal(await page.locator('#head-tracking-enabled').isChecked(), false);
-    assert.equal(await page.locator('#so101-hold').isVisible(), true, 'actual Hold button remains visible');
-    assert.equal(await page.locator('#robot-quick-controls-root #so101-hold').count(), 1);
+    assert.equal(await page.locator('#so101-hold').isVisible(), false, 'Hold stays off the participant view');
+    assert.equal(await page.locator('#settings-controls #so101-hold').count(), 1);
 
     await page.locator('#trial-action').click();
     assert.equal(await page.locator('[data-recording-task]').evaluate(el => el === document.activeElement), true);
@@ -51,7 +51,7 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     await page.locator('#tab-session').focus();
     await page.keyboard.press('ArrowRight');
     assert.equal(await page.locator('#tab-controls').getAttribute('aria-selected'), 'true');
-    for (const id of ['so101-connect', 'so101-enable', 'so101-keyboard', 'so101-return-rest'])
+    for (const id of ['so101-connect', 'so101-enable', 'so101-hold', 'so101-keyboard', 'so101-return-rest'])
       assert.equal(await page.locator('#' + id).isVisible(), true, id + ' remains available');
     await page.locator('#tab-view').click();
     await page.getByRole('combobox', {name: 'View', exact: true}).selectOption('blendpcr');
@@ -162,7 +162,7 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     await page.keyboard.press('Escape');
     assert.deepEqual(errors, []);
     const result = {synthetic: true, conditions: 3, episodes, hostSaveGate: true, manualNext: true,
-      outcomes: true, cameraArrows: true, tabsAndFocus: true, holdAccessible: true, freeConfiguration: true,
+      outcomes: true, cameraArrows: true, tabsAndFocus: true, holdInSettings: true, freeConfiguration: true,
       actualCadModels: 7, layouts, episodeRoot};
     writeFileSync(resolve(output, 'browser-results.json'), JSON.stringify(result, null, 2));
     console.log(JSON.stringify(result));

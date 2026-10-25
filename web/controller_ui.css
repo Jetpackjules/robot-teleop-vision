@@ -52,8 +52,6 @@ input::placeholder { color: #9ba6b3; }
 .connection-details[open] > summary svg { transform: rotate(180deg); }
 .connection-body { position: absolute; right: 0; top: calc(100% + 8px); width: 360px; max-height: calc(100vh - 100px); overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; font-size: 12px; }
 .status-lines { line-height: 1.65; }
-#robot-quick-controls-root { position: fixed; left: 20px; bottom: 20px; z-index: 50; display: flex; gap: 8px; }
-#robot-quick-controls-root button { width: auto; min-width: 112px; min-height: 42px; }
 #view-navigation { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 3; display: flex; gap: 6px; align-items: center; color: var(--muted); pointer-events: none; white-space: nowrap; }
 #view-navigation > button { width: auto; background: var(--panel); pointer-events: auto; }
 #view-hint { font-size: 12px; padding: 7px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; }
