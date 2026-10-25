@@ -4,6 +4,7 @@ const RENDERERS = new Set(['point_cloud', 'shader_mesh', 'independent_mesh', 'un
 const STORAGE_KEY = 'robotTeleopTrialSession.v1';
 const ACTIVE = new Set(['preparing', 'recording', 'saving']);
 const byId = id => document.getElementById(id);
+const formatTime = seconds => `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
 
 /** A small facilitator layer over the existing view and host-recording controls. */
 export class TrialController {
@@ -16,10 +17,14 @@ export class TrialController {
     this.display = byId('display-mode');
     this.head = byId('head-tracking-enabled');
     this.cameras = byId('rgb-camera-select');
+    this.duration = byId('trial-duration');
     this.panel = byId('advanced-setup');
     this.state = this.restore();
     this.pending = false;
     this.lastElapsed = 0;
+    if (!Number.isSafeInteger(this.state.timeTargetSeconds) || this.state.timeTargetSeconds < 30 || this.state.timeTargetSeconds > 7200)
+      this.state.timeTargetSeconds = 600;
+    this.duration.value = String(this.state.timeTargetSeconds / 60);
     if (!RENDERERS.has(this.state.renderer)) this.state.renderer = this.display.value === 'rgb_camera' ? 'independent_mesh' : this.display.value;
     byId('guided-trials').checked = this.state.guided;
     byId('trial-order').value = this.state.order.join(',');
@@ -47,6 +52,14 @@ export class TrialController {
     byId('trial-order').addEventListener('change', event => {
       this.state.order = event.target.value.split(',');
       this.newSession();
+    });
+    this.duration.addEventListener('change', () => {
+      if (!this.duration.reportValidity()) {
+        this.duration.value = String(this.state.timeTargetSeconds / 60);
+        return;
+      }
+      this.state.timeTargetSeconds = Math.round(this.duration.valueAsNumber * 60);
+      this.persist(); this.render();
     });
     byId('new-trial-session').addEventListener('click', () => this.newSession());
     byId('restore-trial-view').addEventListener('click', () => this.apply());
@@ -155,15 +168,15 @@ export class TrialController {
     const needsView = guided && !this.viewReady();
     const action = byId('trial-action');
     byId('trial-hud').dataset.state = status.state;
-    byId('trial-position').textContent = guided ? `Trial ${this.state.index + 1} of ${this.state.order.length}` : 'Free session';
+    byId('trial-position').textContent = guided ? `${this.state.index + 1}/${this.state.order.length}` : 'Free session';
+    byId('trial-position').setAttribute('aria-label', guided ? `Trial ${this.state.index + 1} of ${this.state.order.length}` : 'Free session');
     byId('trial-condition').textContent = guided ? CONDITIONS[this.condition]
       : this.display.value === 'rgb_camera' ? CONDITIONS.fixed_rgb : this.head.checked ? CONDITIONS.head_3d : CONDITIONS.mouse_3d;
     const task = recorder.task.value.trim() || 'Add a task in Settings';
     byId('trial-task').textContent = task; byId('trial-task').title = task;
     if (active) this.lastElapsed = Number(status.elapsed_seconds) || 0;
     else if (saved) this.lastElapsed = Number(saved.duration_seconds) || this.lastElapsed;
-    const seconds = Math.floor(this.lastElapsed);
-    byId('trial-timer').textContent = `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
+    byId('trial-timer').textContent = formatTime(this.lastElapsed);
     const label = this.pending ? 'Switching…' : status.state === 'preparing' ? 'Preparing' : status.state === 'saving' ? 'Saving…'
       : active ? 'Recording' : done ? 'Complete' : saved ? 'Saved' : status.state === 'error' ? 'Interrupted' : 'Ready';
     byId('trial-recording-state').textContent = label;
@@ -175,8 +188,15 @@ export class TrialController {
         : !needsTask && (!!recorder.offline || !status.supported || !status.ready || !status.controller_active || mismatch || needsTracking || needsView));
     recorder.startButton.disabled ||= this.pending || (guided && (mismatch || needsTracking || needsView || !!saved || done));
     const progress = byId('trial-progress');
-    progress.hidden = !guided; progress.max = 3;
-    progress.value = done ? 3 : Math.max(this.state.completed.length, saved ? this.state.index + 1 : this.state.index);
+    progress.hidden = !guided;
+    progress.max = this.state.timeTargetSeconds;
+    progress.value = Math.min(this.lastElapsed, this.state.timeTargetSeconds);
+    const timeTarget = `Time target ${formatTime(this.state.timeTargetSeconds)}`;
+    progress.title = timeTarget;
+    progress.setAttribute('aria-valuetext', `${formatTime(this.lastElapsed)} elapsed; ${timeTarget.toLowerCase()}`);
+    byId('trial-timer').title = timeTarget;
+    byId('trial-hud').dataset.timeReached = String(this.lastElapsed >= this.state.timeTargetSeconds);
+    const completed = done ? this.state.order.length : Math.max(this.state.completed.length, saved ? this.state.index + 1 : this.state.index);
     const message = recorder.error || this.viewError || (done || saved ? ''
       : status.state === 'saving' ? 'Finishing the recording on the host. Keep this page open.'
       : active ? status.is_owner === false ? 'This recording belongs to another controller page.'
@@ -201,7 +221,8 @@ export class TrialController {
     for (const id of ['guided-trials', 'trial-order', 'new-trial-session', 'restore-trial-view']) byId(id).disabled = locked;
     byId('trial-order').disabled ||= !guided || this.state.index > 0 || !!saved || done;
     byId('restore-trial-view').hidden = !guided || !mismatch;
-    byId('trial-session-status').textContent = `Session ${this.state.id.slice(0, 8)} · ${progress.value} of 3 saved. New session keeps all host recordings.`;
+    byId('trial-session-status').textContent = `Session ${this.state.id.slice(0, 8)} · ${completed} of 3 saved. New session keeps all host recordings.`;
+    this.duration.disabled = locked;
     this.display.disabled = locked; this.head.disabled = locked;
     const rgb = this.display.value === 'rgb_camera';
     byId('camera-navigation').hidden = !rgb;

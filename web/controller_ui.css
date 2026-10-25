@@ -37,6 +37,7 @@ input::placeholder { color: #9ba6b3; }
 .trial-meta { display: flex; gap: 9px; margin-top: 5px; color: var(--trial-muted); font-size: 12px; align-items: center; }
 .meta-divider { color: var(--trial-muted); }
 #trial-position { white-space: nowrap; }
+#trial-hud[data-time-reached="true"] #trial-timer { color: var(--bad); }
 #trial-task { margin: 0; font: 600 16px/1.35 system-ui, sans-serif; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .trial-clock { display: grid; justify-items: center; gap: 0; }
 #trial-timer { color: var(--trial-timer); font-size: 28px; font-weight: 500; line-height: 1.15; font-variant-numeric: tabular-nums; }

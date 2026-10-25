@@ -45,13 +45,16 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     assert.equal(await page.locator('#connection-details').getAttribute('open'), null);
     assert.equal(await page.locator('#display-mode').inputValue(), 'rgb_camera');
     assert.equal(await page.locator('#head-tracking-enabled').isChecked(), false);
+    assert.equal(await page.locator('#trial-progress').getAttribute('max'), '600', 'default time target matches RoboCade');
     assert.equal(await page.locator('#so101-hold').isVisible(), false, 'Hold stays off the participant view');
     assert.equal(await page.locator('#settings-controls #so101-hold').count(), 1);
 
     await page.locator('#trial-action').click();
     assert.equal(await page.locator('[data-recording-task]').evaluate(el => el === document.activeElement), true);
     await page.getByRole('textbox', {name: 'Task instruction', exact: true}).fill('Place the block in the cup');
+    await page.getByRole('spinbutton', {name: 'Time target (minutes)', exact: true}).fill('0.5');
     await page.locator('#tab-session').focus();
+    assert.equal(await page.locator('#trial-progress').getAttribute('max'), '30');
     await page.keyboard.press('ArrowRight');
     assert.equal(await page.locator('#tab-controls').getAttribute('aria-selected'), 'true');
     for (const id of ['so101-connect', 'so101-enable', 'so101-hold', 'so101-keyboard', 'so101-return-rest'])
@@ -76,7 +79,8 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
 
     const episodes = [];
     for (const [index, condition] of ['fixed_rgb', 'mouse_3d', 'head_3d'].entries()) {
-      assert.equal(await page.locator('#trial-position').textContent(), `Trial ${index + 1} of 3`);
+      assert.equal(await page.locator('#trial-position').textContent(), `${index + 1}/3`);
+      assert.equal(await page.locator('#trial-progress').getAttribute('value'), '0', 'each trial resets its own time bar');
       await page.locator('#trial-action').click();
       await page.waitForFunction(() => document.getElementById('episode-recording').dataset.recordingState === 'recording');
       assert.equal(await page.locator('#trial-action').textContent(), 'Finish trial');
@@ -84,9 +88,23 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
       assert.equal(await page.locator('#trial-recording-state').textContent(), 'Recording');
       await page.locator('#trial-outcome').selectOption(index === 1 ? 'failure' : 'success');
       await page.waitForFunction(() => document.getElementById('trial-timer').textContent !== '00:00');
+      assert.ok(Number(await page.locator('#trial-progress').getAttribute('value')) > 0, 'time bar advances during the trial');
+      assert.equal(await page.locator('#trial-duration').isDisabled(), true);
       assert.equal(await page.locator('#display-mode').isDisabled(), true, 'condition cannot change during a trial');
       if (index === 1) {
         await page.waitForFunction(() => window.getGodotHybridRendererStatus?.().robotModelsLoaded === 7);
+        const recordingURL = '**/api/v1/recording?*';
+        await page.route(recordingURL, async route => {
+          const response = await route.fetch();
+          const status = await response.json();
+          await route.fulfill({response, json: {...status, ...(status.state === 'recording' ? {elapsed_seconds: 31} : {})}});
+        });
+        await page.waitForFunction(() => document.getElementById('trial-hud').dataset.timeReached === 'true');
+        assert.equal(await page.locator('#trial-progress').getAttribute('value'), '30', 'bar caps at its target');
+        assert.equal(await page.locator('#trial-timer').textContent(), '00:31', 'elapsed timer keeps counting past the target');
+        assert.equal(await page.locator('#trial-action').textContent(), 'Finish trial', 'time target never stops the recording');
+        assert.equal(await page.locator('#trial-position').textContent(), '2/3', 'time target never advances conditions');
+        await page.unroute(recordingURL);
         await capture(resolve(output, 'trial-laptop.png'));
       }
       if (index === 2) {
@@ -99,10 +117,10 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
       await page.waitForFunction(() => document.getElementById('episode-recording').dataset.recordingState === 'saving');
       assert.equal(await page.locator('#trial-action').isDisabled(), true, 'cannot advance while host saves');
       assert.equal(await page.locator('#trial-message').isVisible(), true, 'host save warning remains visible');
-      assert.equal(await page.locator('#trial-position').textContent(), `Trial ${index + 1} of 3`);
+      assert.equal(await page.locator('#trial-position').textContent(), `${index + 1}/3`);
       await page.waitForFunction(() => ['Next trial', 'End session'].includes(document.getElementById('trial-action').textContent));
       assert.equal(await page.locator('#trial-message').isVisible(), false, 'saved HUD has no redundant explanation');
-      assert.equal(await page.locator('#trial-position').textContent(), `Trial ${index + 1} of 3`, 'saving never auto-advances');
+      assert.equal(await page.locator('#trial-position').textContent(), `${index + 1}/3`, 'saving never auto-advances');
       const status = await page.evaluate(async () => await (await fetch('/api/v1/recording?client=recording-fixture')).json());
       const manifest = JSON.parse(readFileSync(resolve(episodeRoot, status.last_saved.episode, 'episode.json'), 'utf8'));
       assert.equal(manifest.status, 'complete'); assert.equal(manifest.synthetic, true);
@@ -119,7 +137,8 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
       }
     }
     assert.equal(await page.locator('#trial-action').textContent(), 'Complete');
-    assert.equal(await page.locator('#trial-progress').getAttribute('value'), '3');
+    assert.equal(await page.locator('#trial-position').textContent(), '3/3');
+    assert.equal(await page.locator('#trial-progress').getAttribute('max'), '30');
 
     await page.locator('#open-advanced').click();
     await page.locator('#guided-trials').uncheck();
@@ -163,6 +182,7 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     // and then shrinking must move Settings below the HUD too.
     await page.reload({waitUntil: 'domcontentloaded'});
     await page.waitForFunction(() => !document.getElementById('trial-action').disabled);
+    assert.equal(await page.locator('#trial-duration').inputValue(), '0.5', 'time target survives reload');
     await page.locator('#open-advanced').click();
     assert.equal((await page.locator('#advanced-setup').boundingBox()).y, 70);
     await page.setViewportSize({width: 1366, height: 768});
@@ -172,6 +192,7 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     assert.deepEqual(errors, []);
     const result = {synthetic: true, conditions: 3, episodes, hostSaveGate: true, manualNext: true,
       outcomes: true, cameraArrows: true, tabsAndFocus: true, holdInSettings: true, freeConfiguration: true,
+      elapsedTimeProgress: true, timeTargetNoAutoStop: true,
       actualCadModels: 7, layouts, episodeRoot};
     writeFileSync(resolve(output, 'browser-results.json'), JSON.stringify(result, null, 2));
     console.log(JSON.stringify(result));

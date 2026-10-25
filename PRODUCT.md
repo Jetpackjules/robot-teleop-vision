@@ -40,6 +40,7 @@ These mechanisms describe the implementation. Improved task performance, presenc
 - Show one active view at a time, filling the available viewport.
 - Keep the task, condition, trial progress, timer, recording state, and appropriate next action clear.
 - Keep the task first. Omit routine explanatory sentences from the trial HUD; show actionable warnings and errors only when needed. Avoid decorative subheadings and repeated idle-state text.
+- The progress bar shows elapsed time against a configurable visual time target; a compact 1/3 counter identifies the current trial. Time target is in Settings → Session, defaults to RoboCade's 10 minutes, and never stops recording, moves the robot, or advances the condition. The timer keeps counting beyond the target. This display default is not an agreed study protocol.
 - Fixed-camera trials support selecting individual RGB cameras using visible previous/next controls and left/right arrow keys.
 - Mouse 3D trials use the existing 3D scene with head tracking off. Head-tracked trials use that scene with head tracking on and an accessible reset action. Keep the selected 3D renderer consistent between these two conditions.
 - The facilitator chooses the condition order. The implemented default is fixed cameras, mouse 3D, then head tracking; this is configurable rather than a requirement of the study protocol.
