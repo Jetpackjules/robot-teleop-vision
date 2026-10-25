@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-25T18:49:07.331786+00:00",
+  "title": "Design System: Robot Teleop Vision",
+  "extensions": {
+    "colorMeta": {
+      "accent": {
+        "role": "primary",
+        "displayName": "Pale blue focus accent"
+      },
+      "panel": {
+        "role": "neutral",
+        "displayName": "Charcoal panel"
+      }
+    },
+    "typographyMeta": {
+      "timer": {
+        "displayName": "Timer",
+        "purpose": "Tabular elapsed-time figures."
+      }
+    },
+    "shadows": [
+      {
+        "name": "workspace-toolbar",
+        "value": "0 8px 28px #0008",
+        "purpose": "Existing transient workspace-edit toolbar."
+      }
+    ],
+    "motion": [],
+    "breakpoints": [
+      {
+        "name": "short-window-height",
+        "value": "800px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Existing labelled control and its current hover/focus treatment.",
+      "html": "<button class=\"ds-primary\">Start trial</button>",
+      "css": ".ds-primary{min-height:38px;padding:8px 12px;border:1px solid var(--line,#383e46);border-radius:5px;font:500 14px/1.45 system-ui,sans-serif;cursor:pointer;background:#c3ddee;color:#111c25;}.ds-primary:hover{background:#e1eff9;}.ds-primary:focus-visible{outline:2px solid var(--accent,#afd6f2);outline-offset:3px}"
+    },
+    {
+      "name": "Secondary button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Existing labelled control and its current hover/focus treatment.",
+      "html": "<button class=\"ds-secondary\">Reset view</button>",
+      "css": ".ds-secondary{min-height:38px;padding:8px 12px;border:1px solid var(--line,#383e46);border-radius:5px;font:500 14px/1.45 system-ui,sans-serif;cursor:pointer;background:var(--panel,#14171b);color:var(--text,#f0f3f6);}.ds-secondary:hover{background:#333d48;}.ds-secondary:focus-visible{outline:2px solid var(--accent,#afd6f2);outline-offset:3px}"
+    },
+    {
+      "name": "Hold button",
+      "kind": "button",
+      "refersTo": "button-hold",
+      "description": "Existing labelled control and its current hover/focus treatment.",
+      "html": "<button class=\"ds-hold\">Hold Arm</button>",
+      "css": ".ds-hold{min-height:38px;padding:8px 12px;border:1px solid var(--line,#383e46);border-radius:5px;font:500 14px/1.45 system-ui,sans-serif;cursor:pointer;background:#43292c;color:#ffe3e5;}.ds-hold:hover{background:#5b3237;}.ds-hold:focus-visible{outline:2px solid var(--accent,#afd6f2);outline-offset:3px}"
+    },
+    {
+      "name": "Task field",
+      "kind": "input",
+      "description": "Labelled task instruction input.",
+      "html": "<label class=\"ds-field\">Task instruction<input placeholder=\"Place the block in the cup\"></label>",
+      "css": ".ds-field{display:grid;gap:5px;color:var(--muted,#b8c1cc);font:13px/1.45 system-ui,sans-serif}.ds-field input{min-height:40px;padding:9px;border:1px solid var(--line,#383e46);border-radius:6px;background:#111;color:var(--text,#f0f3f6);font:inherit;caret-color:var(--accent,#afd6f2)}.ds-field input::placeholder{color:#9ba6b3}.ds-field input:focus-visible{outline:2px solid var(--accent,#afd6f2);outline-offset:3px}"
+    },
+    {
+      "name": "Settings tabs",
+      "kind": "nav",
+      "description": "Flat tab row with an underlined selected state.",
+      "html": "<div class=\"ds-tabs\"><button aria-selected=\"true\">Session</button><button>Arm</button><button>View</button></div>",
+      "css": ".ds-tabs{display:flex;gap:18px;border-bottom:1px solid var(--line,#383e46)}.ds-tabs button{padding:9px 0 11px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted,#b8c1cc);font:500 13px/1.45 system-ui,sans-serif;cursor:pointer}.ds-tabs [aria-selected=true]{color:var(--text,#f0f3f6);border-bottom-color:var(--accent,#afd6f2)}.ds-tabs button:hover{color:#fff}.ds-tabs button:focus-visible{outline:2px solid var(--accent,#afd6f2);outline-offset:3px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Keep the workspace clear.",
+    "overview": "A factual record of the approved restrained interface, with the robot scene leading and configuration disclosed on demand.",
+    "keyCharacteristics": [
+      "Plain labelled controls",
+      "Flat charcoal surfaces",
+      "Pale blue primary actions"
+    ],
+    "rules": [],
+    "dos": [
+      "Preserve keyboard focus and meaningful state labels."
+    ],
+    "donts": [
+      "Do not add gradients, emoji controls, glow, or arcade styling."
+    ]
+  }
+}
