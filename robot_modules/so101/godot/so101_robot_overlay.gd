@@ -947,6 +947,7 @@ func get_hybrid_render_state() -> Dictionary:
 	return {
 		"available": not link_transforms.is_empty(),
 		"links": link_transforms,
+		"registration": get_registration_status(),
 		"manual_claw_calibration": get_manual_claw_calibration_state(),
 	}
 

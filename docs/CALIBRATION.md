@@ -70,6 +70,60 @@ attempts are recorded in the base-fit JSON. Outward joint and RGB claw stages
 keep that validated reference, including on installations with two D435s.
 This selection does not modify camera-to-camera alignment.
 
+## Optional modeled workspace (browser)
+
+In **Advanced Setup → Modeled workspace**, **Modeled table and floor** replaces
+the scanned background with a lit table and floor. It starts off. A new placement
+starts 2 mm below the base of a registered robot when that status is available;
+otherwise it uses the orbit point. Existing saved placements are preserved.
+**Place Below Arm Base** explicitly uses a valid registered base. For manual
+placement, double-click the real tabletop and use **Place Tabletop at Orbit
+Point** under **Exact placement and lighting**. Set the measured width and depth.
+**Edit Table in 3D** exposes move/rotate/resize handles; use the green Y handle
+to tune tabletop height, then **Done** to keep it or **Cancel** to restore it.
+These edits never change camera or robot calibration. The table is level in
+world Y; tilted tables need a later plane-fitting implementation.
+
+**Scene lighting** shares RoboCade-style dark ambient light, a white main light
+and a blue fill light across the table and the **Solid** robot overlay. **CAD
+shadows** enables a cached 1024-square shadow map with filtered edges; changing
+the light angle moves the main light and its shadows together. Table, floor
+and legs have separate roughness/metalness. Camera RGB retains its measured
+lighting. The calibration overlay keeps its contrast-oriented material.
+
+Live geometry is retained above the tabletop, within its footprint and object
+height. **Tabletop exclusion** defaults to 6 mm: lower it for thin objects or
+raise it just enough to remove surface noise. Existing camera transforms, depth
+samples, robot registration and overlay are preserved. The existing scanned-arm
+mask continues to apply when the registered robot overlay is available. Switching
+off restores the original scene and retains the placement for another comparison.
+
+The browser sends its workspace settings with a per-page client ID. The updated
+gateway filters independent native RGB-D packets for that page before HTTPS,
+WebSocket or direct WebRTC transmission. It intersects the rotated crop box
+with the above-table volume, retaining conservative source tiles and a two-pixel
+boundary halo. Depth stays exact uint16 at native sampling density; cropped
+intrinsics retain world positions. Original RGB is projected separately and
+cropped losslessly to PNG only when that saves bytes; otherwise its full JPEG
+is kept. Empty regions send explicit empty depth updates. Capture, shared
+source packets and other viewers are unchanged. Unsupported packet encodings
+and experimental temporal transport pass through unchanged.
+
+The GPU clips the exact volume. Status separately reports transmitted-byte and
+submitted-geometry percentages when the server acknowledges filtering. These
+are measured ratios, not FPS promises. Switching both crop and modeled workspace
+off restores the original packet, and **Original RGB** bypasses the stream crop.
+Remote rendered-frame views are unaffected. Placement and lighting are remembered
+in the browser and can be saved as installation defaults. Deploy the updated
+gateway and refresh the page to enable stream filtering; cameras need no restart.
+Registered-base anchoring requires the SO-101 render-state registration field
+from the updated Godot module; missing status uses manual/orbit placement.
+
+`tests/workspace_readiness_browser.cjs` exercises synthetic RGB-D, all seven real
+SO-101 GLBs, 16 poses from production forward kinematics, shared lighting,
+shadows and base anchoring without contacting hardware. Synthetic results do
+not establish physical registration or real-camera throughput.
+
 ## Robot calibration (module-owned)
 
 Core exposes generic start, refine, cancel, status, save, restore, and clear hooks. The selected Godot module decides which evidence, movements, kinematics, and transactional gates those hooks use. A robot without automatic calibration can omit them and provide a module-specific manual workflow.
@@ -140,6 +194,11 @@ The SO-101 manual wrist/claw workspace overlays exact projected geometry on alig
 
 Normally keep `[godot] launch_runtime = true`, start `robot-teleop`, and use
 **Calibrate Full Arm** in the operator website. No Godot editor is required.
+The website loads these controls from the host's selected robot module. If the
+section reports **Vision only mode**, check that the running operator server
+selects `so101`; a preview gateway launched with `--robot-module disabled` can
+override an otherwise correct host configuration. Module loading failures show
+their error in the same section.
 Keep the robot and camera fixed after a successful registration, and keep the
 robot's movement area clear during the automatic sweep.
 

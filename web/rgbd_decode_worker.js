@@ -1,4 +1,6 @@
 // Stateless native Quality frames: preserve every depth sample and JPEG pixel.
+import {colorFrameDimensions} from './hybrid_color_projection.js?v=20261021_original_rgb';
+import {workspaceDepthTiles} from './workspace_crop.js?v=20261021_original_rgb';
 export async function decodeIndependentDepth(bytes, metadata) {
   const width = Number(metadata.width), height = Number(metadata.height);
   const count = width * height;
@@ -24,10 +26,12 @@ export async function decodeIndependentDepth(bytes, metadata) {
 let rgbaCanvas, rgbaContext;
 if (typeof self !== "undefined") self.onmessage = async ({data}) => {
   const started=performance.now();
-  const {id, metadata, color, depth, rgbaPixels} = data;
+  const {id, metadata, color, depth, rgbaPixels, workspaceTiles} = data;
+  let colorWidth,colorHeight;
+  try {[colorWidth,colorHeight]=colorFrameDimensions(metadata);}catch(error){self.postMessage({id,error:error.message});return;}
   const [depthResult, colorResult] = await Promise.allSettled([
     decodeIndependentDepth(depth, metadata),
-    createImageBitmap(new Blob([color], {type: "image/jpeg"})),
+    createImageBitmap(new Blob([color], {type: metadata.color_encoding==='png'?'image/png':'image/jpeg'})),
   ]);
   if (depthResult.status === "rejected" || colorResult.status === "rejected") {
     if (colorResult.status === "fulfilled") colorResult.value.close();
@@ -36,23 +40,26 @@ if (typeof self !== "undefined") self.onmessage = async ({data}) => {
     return;
   }
   const bitmap = colorResult.value, values = depthResult.value;
-  if (bitmap.width !== Number(metadata.width) || bitmap.height !== Number(metadata.height)) {
-    bitmap.close();self.postMessage({id, error: "native color dimensions do not match depth"});return;
+  const width=Number(metadata.width),height=Number(metadata.height);
+  if (bitmap.width !== colorWidth || bitmap.height !== colorHeight) {
+    bitmap.close();self.postMessage({id, error: "color dimensions do not match metadata"});return;
   }
   try {
+    const tiles=workspaceTiles?workspaceDepthTiles(values,width,height):null;
+    const transfer=[values.buffer];if(tiles)transfer.push(tiles.buffer);
     if(rgbaPixels && typeof OffscreenCanvas === "function") {
       if(!rgbaCanvas) {
-        rgbaCanvas=new OffscreenCanvas(bitmap.width,bitmap.height);
+        rgbaCanvas=new OffscreenCanvas(colorWidth,colorHeight);
         rgbaContext=rgbaCanvas.getContext("2d",{willReadFrequently:true,alpha:false});
       }
-      if(rgbaCanvas.width!==bitmap.width||rgbaCanvas.height!==bitmap.height) {
-        rgbaCanvas.width=bitmap.width;rgbaCanvas.height=bitmap.height;
+      if(rgbaCanvas.width!==colorWidth||rgbaCanvas.height!==colorHeight) {
+        rgbaCanvas.width=colorWidth;rgbaCanvas.height=colorHeight;
       }
       rgbaContext.drawImage(bitmap,0,0);
-      const pixels=rgbaContext.getImageData(0,0,bitmap.width,bitmap.height).data;
+      const pixels=rgbaContext.getImageData(0,0,colorWidth,colorHeight).data;
       bitmap.close();
-      self.postMessage({id,depth:values.buffer,rgba:pixels.buffer,workerMs:performance.now()-started},[values.buffer,pixels.buffer]);
-    } else self.postMessage({id, depth: values.buffer, bitmap,workerMs:performance.now()-started}, [values.buffer, bitmap]);
+      self.postMessage({id,depth:values.buffer,depthTiles:tiles?.buffer,rgba:pixels.buffer,workerMs:performance.now()-started},[...transfer,pixels.buffer]);
+    } else self.postMessage({id, depth: values.buffer,depthTiles:tiles?.buffer, bitmap,workerMs:performance.now()-started}, [...transfer, bitmap]);
   } catch (error) {
     bitmap.close();self.postMessage({id, error: String(error?.message || error)});
   }

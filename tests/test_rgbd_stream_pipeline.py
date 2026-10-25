@@ -37,6 +37,8 @@ def test_persistent_reference_encoder_overlaps_send_and_keeps_order(monkeypatch)
         claim_rgbd_client=lambda *_:True,release_rgbd_client=lambda *_:None)
     handler.connection=SimpleNamespace(settimeout=lambda _:None,setsockopt=lambda *_:None)
     handler.accept_websocket=lambda:True
+    # This transport stub exercises encoding/sending, not the separately tested socket reader.
+    handler.watch_stream_peer=lambda *_:None
     sent=[]
     def send(packet,opcode):
         assert opcode==2

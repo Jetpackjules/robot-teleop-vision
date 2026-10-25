@@ -75,6 +75,14 @@ class GenericRobotOperator:
             "fault": "robot service unavailable",
         }
 
+    def recording_spec(self) -> dict[str, Any] | None:
+        """Optional module-owned demonstration state/action schema."""
+        return None
+
+    def recording_sample(self, status: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Return fresh measured state and applied action, without commanding hardware."""
+        return None
+
     def hold_message(self) -> dict[str, Any]:
         return self._system_command("hold")
 

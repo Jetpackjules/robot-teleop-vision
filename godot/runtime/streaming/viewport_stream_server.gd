@@ -390,12 +390,24 @@ func _apply_rgbd_query(path: String) -> void:
 			"q", "quality", "jpeg_quality":
 				hybrid_jpeg_quality = clampi(int(value), 1, 100)
 
+static func merge_original_rgb_request(requests: Dictionary, options: Dictionary) -> void:
+	if options.is_empty():
+		return
+	# A host recorder can require native RGB while another viewer asks for a
+	# smaller preview. Serve the strongest request without mutating client data.
+	if requests.has(options.camera):
+		requests[options.camera].w = maxi(int(requests[options.camera].w), int(options.w))
+		requests[options.camera].q = maxi(int(requests[options.camera].q), int(options.q))
+	else:
+		requests[options.camera] = options.duplicate()
+
+
 func _pump_camera_rgb_encoder() -> bool:
 	var requests: Dictionary = {}
 	for client in _clients:
 		if client.get("stream_type", "") == "camera_rgb":
 			var options: Dictionary = client.get("camera_rgb_options", {})
-			if not options.is_empty(): requests[options.camera] = options
+			merge_original_rgb_request(requests, options)
 	var updated := false
 	for renderer in _find_rgbd_renderers():
 		var serial := str(renderer.call("get_direct_realsense_serial"))
@@ -419,8 +431,10 @@ func _pump_camera_rgb_encoder() -> bool:
 				"height":int(fallback.headers["X-Frame-Height"]),"sequence":int(fallback.headers["X-Frame-Sequence"]),
 				"capture_unix_ms":float(fallback.headers["X-Capture-Unix-Ms"])}
 		if frame.is_empty(): continue
+		var source_size := Vector2i(int(frame.width), int(frame.height))
 		if renderer.has_method("get_raw_color_size"):
 			var size: Vector2i = renderer.call("get_raw_color_size")
+			source_size = size
 			var expected_width := mini(size.x, int(options.w))
 			var expected_height := roundi(float(size.y) * expected_width / maxf(1, size.x))
 			if int(frame.width) != expected_width or int(frame.height) != expected_height: continue
@@ -429,6 +443,7 @@ func _pump_camera_rgb_encoder() -> bool:
 		frame["profile"] = profile
 		frame["headers"] = {"X-Camera-Id":serial,"X-Frame-Width":str(frame.width),
 			"X-Frame-Height":str(frame.height),"X-Frame-Sequence":str(frame.sequence),
+			"X-Source-Width":str(source_size.x),"X-Source-Height":str(source_size.y),
 			"X-Capture-Unix-Ms":str(roundi(frame.capture_unix_ms)),
 			"X-Capture-Epoch":"%d:%d" % [OS.get_process_id(),renderer.get_instance_id()]}
 		_camera_rgb_frame_counter += 1
@@ -706,7 +721,10 @@ func _publish_encoded_rgbd_frames(completed: Array[Dictionary]) -> bool:
 			"depth_encoding": str(encoded.get("depth_encoding", "u16_mm_deflate")),
 			"encode_ms": float(encoded.get("encode_ms", 0.0)),
 			"requested_fps": _renderer_hybrid_fps(renderer, _find_rgbd_renderers().size()),
-			"color_projection": renderer.call("get_raw_color_projection") if renderer.has_method("get_raw_color_projection") else {},
+			"color_space": str(encoded.get("color_space", "aligned_depth")),
+			"color_width": int(encoded.get("color_width", width)),
+			"color_height": int(encoded.get("color_height", height)),
+			"color_projection": encoded.get("color_projection", {}) if str(encoded.get("color_space", "aligned_depth")) == "original_rgb" else (renderer.call("get_raw_color_projection") if renderer.has_method("get_raw_color_projection") else {}),
 		})
 		payloads.append(color_jpeg)
 		payloads.append(compressed_depth)

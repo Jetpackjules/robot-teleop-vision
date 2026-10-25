@@ -17,7 +17,7 @@ def run_probe(tmp_path, probe, rendering_method=None):
         pytest.skip("Set ROBOT_TELEOP_TEST_GODOT to run Godot probes")
     shutil.copytree(ROOT / "godot/runtime/point_cloud", tmp_path / "godot/runtime/point_cloud")
     shutil.copy2(ROOT / "tests/godot" / probe, tmp_path / "probe.gd")
-    if probe == "mesh_quality_rig_probe.gd":
+    if probe in ("mesh_quality_rig_probe.gd", "workspace_crop_probe.gd"):
         (tmp_path / "tests/godot").mkdir(parents=True)
         shutil.copy2(ROOT / "tests/godot/blendpcr_probe.gd",tmp_path / "tests/godot/blendpcr_probe.gd")
     (tmp_path / "project.godot").write_text(
@@ -58,6 +58,17 @@ def test_render_mode_migration_and_diagnostic_fallback(tmp_path):
 def test_camera_guides_follow_calibrated_cameras_and_intrinsics(tmp_path):
     output = run_probe(tmp_path, "camera_rig_guides_probe.gd")
     assert "CAMERA_GUIDES" in output
+
+
+def test_workspace_crop_shared_bounds_and_material_adapter(tmp_path):
+    output = run_probe(tmp_path, "workspace_crop_probe.gd")
+    assert "WORKSPACE_CROP" in output
+
+
+@pytest.mark.skipif(os.environ.get("ROBOT_TELEOP_TEST_BLENDPCR_GPU") != "1", reason="Opt in to Godot GPU composition")
+def test_workspace_crop_actual_native_and_blendpcr_rendering(tmp_path):
+    output = run_probe(tmp_path, "workspace_crop_probe.gd", "gl_compatibility")
+    assert "WORKSPACE_CROP_GPU" in output
 
 
 @pytest.mark.skipif(os.environ.get("ROBOT_TELEOP_TEST_BLENDPCR_GPU") != "1", reason="Opt in to the actual Godot editor")

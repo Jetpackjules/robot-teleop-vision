@@ -53,8 +53,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from robot_teleop.modules import public_robot_module
 from robot_teleop.operator import RobotCommandError, load_robot_operator
+from robot_teleop.recording import CaptureRgbSource, HostEpisodeRecorder, RecordingError, camera_id
 from robot_teleop.state import godot_app_userdata_root
 from tools.godot_desktop_stream import DesktopStreamConfig, GodotDesktopStream
+from tools.workspace_stream_crop import STREAM_SETTING_KEYS, WorkspaceStreamCropper
 
 h264.MAX_BITRATE = 24_000_000
 h264.DEFAULT_BITRATE = 4_000_000
@@ -90,6 +92,7 @@ CORE_PERSISTENT_VIEW_SETTINGS = frozenset(
         "max_distance",
         "fov",
         "white_background_enabled",
+        "depth_only_enabled",
         "persistent_temporal_reference_enabled",
         "full_rgb_frame_updates_enabled",
         "workspace_surface_enabled",
@@ -98,6 +101,22 @@ CORE_PERSISTENT_VIEW_SETTINGS = frozenset(
         "workspace_surface_offset",
         "workspace_surface_size",
         "workspace_surface_opacity",
+        "workspace_crop_enabled",
+        "workspace_crop_show_box",
+        "workspace_crop_rotation",
+        "workspace_crop_min",
+        "workspace_crop_max",
+        "modeled_workspace_enabled",
+        "modeled_workspace_center",
+        "modeled_workspace_width",
+        "modeled_workspace_table_height",
+        "modeled_workspace_depth",
+        "modeled_workspace_heading",
+        "modeled_workspace_clearance",
+        "modeled_workspace_height",
+        "modeled_workspace_light_angle",
+        "scene_lighting_enabled",
+        "scene_shadows_enabled",
         "robot_overlay_enabled",
         "robot_overlay_mask_scanned_robot",
         "robot_overlay_style",
@@ -1150,6 +1169,17 @@ class TemporalRgbdDepthEncoder:
             if payload_offset > len(packet):
                 raise ValueError("truncated RGB-D metadata")
             metadata = json.loads(packet[9:payload_offset])
+            # Original RGB has independent intrinsics and resolution. Depth-grid
+            # motion masks do not describe these pixels; keep native packets
+            # intact rather than resampling or recompressing their color.
+            if any(camera.get("color_space") == "original_rgb" for camera in metadata.get("cameras", [])):
+                self.keyframes.clear()
+                self.change_states.clear()
+                self.color_keyframes.clear()
+                self.color_change_states.clear()
+                self.persistent_metadata = None
+                return packet, False
+
             payloads: list[tuple[bytes, bytes]] = []
             priority_keyframe = False
             force_periodic_keyframe = (
@@ -1776,6 +1806,7 @@ class LanRemoteServer(ThreadingHTTPServer):
         site_settings_path: Path | None = None,
         godot_desktop_config: DesktopStreamConfig | None = None,
         capture_port: int | None = None,
+        recording_root: Path | None = None,
     ):
         if godot_desktop_config is not None and not password:
             raise ValueError("Desktop capture requires the existing password gate")
@@ -1795,6 +1826,13 @@ class LanRemoteServer(ThreadingHTTPServer):
             if item
         )
         self.robot_operator = load_robot_operator(self.robot_module, module_paths)
+        self.episode_recorder = HostEpisodeRecorder(
+            recording_root or root.parent / ".teleop" / "recordings", self.robot_operator,
+            lambda: CaptureRgbSource(self.stream_host, self.capture_port, MultipartRawFrameReader,
+                                     self.robot_view_hubs),
+        )
+        self.stream_crop_lock = threading.Lock()
+        self.stream_crop_clients: dict[str, tuple[dict, WorkspaceStreamCropper]] = {}
         self.robot_manifest = public_robot_module(self.robot_module, module_paths)
         self.site_settings_path = site_settings_path or (
             godot_app_userdata_root()
@@ -1929,6 +1967,17 @@ class LanRemoteServer(ThreadingHTTPServer):
         self.async_loop.run_forever()
 
     def forward_tracking(self, payload: bytes) -> None:
+        if b'"view_settings"' in payload:
+            packet = json.loads(payload)
+            client = packet.get("rgbd_client_id", "")
+            if packet.get("type") == "view_settings" and client:
+                with self.stream_crop_lock:
+                    previous = self.stream_crop_clients.get(client)
+                    prior, cropper = previous if previous is not None else ({}, WorkspaceStreamCropper())
+                    settings = {**prior, **{k: v for k, v in packet.items() if k in STREAM_SETTING_KEYS}}
+                    self.stream_crop_clients[client] = (settings, cropper)
+                    while len(self.stream_crop_clients) > 32:
+                        self.stream_crop_clients.pop(next(iter(self.stream_crop_clients)))
         self.udp.sendto(payload, (self.udp_host, self.udp_port))
         self.packet_count += 1
         now = time.monotonic()
@@ -1937,6 +1986,11 @@ class LanRemoteServer(ThreadingHTTPServer):
             self.last_report_count = self.packet_count
             self.last_report_sec = now
             print(f"lan remote tracking wss->udp {hz}/s total={self.packet_count}", flush=True)
+
+    def crop_rgbd_packet(self, packet: bytes, client_id: str) -> bytes:
+        with self.stream_crop_lock:
+            state = self.stream_crop_clients.get(client_id)
+        return state[1].crop(packet, state[0]) if state else packet
 
     def forward_robot(self, message: dict) -> None:
         if self.robot_operator.is_motion(message):
@@ -2084,6 +2138,9 @@ class LanRemoteServer(ThreadingHTTPServer):
             ):
                 return False
             if self.browser_client_id != client_id:
+                recorder = getattr(self, "episode_recorder", None)
+                if recorder is not None and recorder.owner and recorder.owner != client_id:
+                    recorder.interrupt("A different controller page took ownership.")
                 owner_changed = True
                 if self.browser_client_id:
                     self._remember_superseded_browser_client(self.browser_client_id)
@@ -2181,6 +2238,7 @@ class LanRemoteServer(ThreadingHTTPServer):
             with self.robot_status_lock:
                 self.robot_status = status
                 self.robot_status_received_at = time.monotonic()
+            self.episode_recorder.observe_robot(status)
 
     def _listen_for_robot_calibration_status(self) -> None:
         while self.robot_calibration_running:
@@ -2223,6 +2281,7 @@ class LanRemoteServer(ThreadingHTTPServer):
             return False
 
     def server_close(self):
+        self.episode_recorder.close()
         self.robot_status_running = False
         self.robot_calibration_running = False
         for hub in self.robot_view_hubs.values():
@@ -2325,6 +2384,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/v1/site-settings":
             self.serve_json(self.server.load_site_settings())
+            return
+        if parsed.path == "/api/v1/recording":
+            self.serve_recording_status(parsed.query)
             return
         if parsed.path.startswith("/robot-view/"):
             self.stream_robot_view(parsed.path.removeprefix("/robot-view/"), parsed.query)
@@ -2464,6 +2526,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     self.send_header("X-RGBD-Source-Error", quote(error[:160], safe=""))
                 self.end_headers()
                 return
+            packet = crop_rgbd_for_client(self.server, packet, client_id)
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(len(packet)))
@@ -2538,7 +2601,54 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/v1/site-settings":
             self.handle_site_settings_save()
             return
+        if parsed.path == "/api/v1/recording":
+            self.handle_recording_command()
+            return
         self.send_error(404, "Not found")
+
+    def serve_recording_status(self, query: str) -> None:
+        client = parse_qs(query).get("client", [""])[0]
+        status = self.server.episode_recorder.status(client)
+        status["controller_active"] = self.server.browser_client_id == client and bool(client)
+        self.serve_json(status)
+
+    def handle_recording_command(self) -> None:
+        # JSON plus an exact same-origin check protects this disk-writing API.
+        origin = urlsplit(self.headers.get("Origin", ""))
+        host = self.headers.get("Host", "").lower()
+        if origin.scheme not in ("http", "https") or origin.netloc.lower() != host:
+            self.send_error(403, "Recording requires a same-origin controller page")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4096:
+                raise RecordingError("Recording request is empty or too large.")
+            if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
+                raise RecordingError("Recording requests must use application/json.")
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(data, dict) or set(data)-{"command", "client", "task", "cameras", "fps", "outcome"}:
+                raise RecordingError("Invalid recording request fields.")
+            client = camera_id(data.get("client"))
+            recorder = self.server.episode_recorder
+            command = data.get("command")
+            if command == "start":
+                with self.server.browser_client_lock:
+                    if self.server.browser_client_id != client:
+                        raise RecordingError("Reconnect this controller before starting an episode.")
+                    result = recorder.start(client, data.get("task"), data.get("cameras"), data.get("fps", 15))
+            elif command in ("stop", "discard"):
+                result = recorder.stop(client, discard=command == "discard", outcome=data.get("outcome", "unrated"))
+            else:
+                raise RecordingError("Unknown recording command.")
+            result["controller_active"] = self.server.browser_client_id == client
+            self.serve_json(result)
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self.send_response(409)
+            body = json.dumps({"error": str(exc)[:240]}).encode()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
     def handle_site_settings_save(self) -> None:
         try:
@@ -3075,6 +3185,10 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         jpeg_quality = clamp_int(str(payload.get("quality", 35)), 1, 100)
         bitrate_kbps = clamp_int(str(payload.get("bitrateKbps", 2500)), 250, 24000)
         source = str(payload.get("source", "raw")).strip().lower()
+        client_id = str(payload.get("client", ""))
+        if len(client_id) > 64 or any(not (c.isascii() and (c.isalnum() or c in "-_")) for c in client_id):
+            self.send_error(400, "Invalid RGB-D page ID")
+            return
         context_fps = clamp_int(str(payload.get("contextFps", fps)), 1, 60)
         detail_fps = clamp_int(str(payload.get("detailFps", fps)), 1, 60)
         future = asyncio.run_coroutine_threadsafe(
@@ -3087,6 +3201,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 jpeg_quality,
                 bitrate_kbps,
                 source,
+                client_id,
             ),
             self.server.async_loop,
         )
@@ -3112,6 +3227,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         jpeg_quality: int,
         bitrate_kbps: int,
         source: str,
+        client_id: str = "",
     ) -> RTCSessionDescription:
         config = RTCConfiguration(iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])])
         pc = RTCPeerConnection(configuration=config)
@@ -3160,7 +3276,8 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                         return
                     started = True
                     task = asyncio.create_task(
-                        publish_latest_rgbd_datachannel(channel, pc, source_url)
+                        publish_latest_rgbd_datachannel(channel, pc, source_url,
+                            lambda packet: crop_rgbd_for_client(self.server, packet, client_id))
                     )
                     rgbd_tasks.add(task)
                     task.add_done_callback(rgbd_tasks.discard)
@@ -3622,6 +3739,8 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     if not packet:
                         continue
                     is_keyframe = False
+                    if temporal_encoder is None:
+                        packet = crop_rgbd_for_client(self.server, packet, client_id)
                     if temporal_encoder is not None:
                         packet, is_keyframe = temporal_encoder.encode(packet)
                     with newest_lock:
@@ -4023,6 +4142,13 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             "workspace_surface_offset": (-1.0, 1.0),
             "workspace_surface_size": (0.2, 10.0),
             "workspace_surface_opacity": (0.01, 0.8),
+            "modeled_workspace_width": (0.1, 4.0),
+            "modeled_workspace_table_height": (0.1, 4.0),
+            "modeled_workspace_depth": (0.1, 4.0),
+            "modeled_workspace_heading": (-180.0, 180.0),
+            "modeled_workspace_clearance": (0.0, 0.03),
+            "modeled_workspace_height": (0.05, 3.0),
+            "modeled_workspace_light_angle": (-180.0, 180.0),
         }
         for key, value in self.server.robot_operator.numeric_view_settings().items():
             bounds.setdefault(key, value)
@@ -4041,11 +4167,18 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             "robot_overlay_mask_scanned_robot",
             "recenter",
             "white_background_enabled",
+            "depth_only_enabled",
             "head_tracking_enabled",
             "persistent_temporal_reference_enabled",
             "full_rgb_frame_updates_enabled",
             "workspace_surface_enabled",
             "workspace_boundary_enabled",
+            "workspace_crop_enabled",
+            "workspace_crop_show_box",
+            "modeled_workspace_enabled",
+            "scene_lighting_enabled",
+            "scene_shadows_enabled",
+            "workspace_stream_crop_enabled",
             "camera_locations_enabled",
         }
         boolean_settings.update(self.server.robot_operator.boolean_view_settings())
@@ -4054,6 +4187,32 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 if not isinstance(data[key], bool):
                     raise ValueError(f"{key} must be boolean")
                 packet[key] = data[key]
+        if "rgbd_client_id" in data:
+            client = data["rgbd_client_id"]
+            if not isinstance(client, str) or not 1 <= len(client) <= 64 or any(
+                not (c.isascii() and (c.isalnum() or c in "-_")) for c in client
+            ):
+                raise ValueError("invalid RGB-D page ID")
+            packet["rgbd_client_id"] = client
+        for key in ("workspace_crop_min", "workspace_crop_max", "modeled_workspace_center"):
+            if key not in data:
+                continue
+            value = data[key]
+            if (not isinstance(value, list) or len(value) != 3 or any(
+                isinstance(v, bool) or not isinstance(v, (int, float))
+                or not np.isfinite(v) or abs(v) > 20 for v in value
+            )):
+                raise ValueError(f"{key} must contain three finite coordinates between -20 and 20")
+            packet[key] = [float(v) for v in value]
+        if "workspace_crop_rotation" in data:
+            value = data["workspace_crop_rotation"]
+            if not isinstance(value,list) or len(value)!=3 or any(isinstance(v,bool) or not isinstance(v,(int,float)) or not np.isfinite(v) or abs(v)>360 for v in value):
+                raise ValueError("workspace_crop_rotation must contain three finite angles between -360 and 360")
+            packet["workspace_crop_rotation"] = [float(v) for v in value]
+        if "workspace_crop_min" in packet and "workspace_crop_max" in packet and any(
+            lo >= hi for lo, hi in zip(packet["workspace_crop_min"], packet["workspace_crop_max"])
+        ):
+            raise ValueError("workspace crop minimum must be below maximum on every axis")
         if "robot_overlay_style" in data:
             style = data["robot_overlay_style"]
             if not isinstance(style, str) or style not in ("alignment", "solid"):
@@ -4675,7 +4834,12 @@ class MultipartRawFrameReader:
             return headers, data
 
 
-async def publish_latest_rgbd_datachannel(channel, pc: RTCPeerConnection, source_url: str) -> None:
+def crop_rgbd_for_client(server, packet: bytes, client_id: str) -> bytes:
+    crop = getattr(server, "crop_rgbd_packet", None)
+    return crop(packet, client_id) if crop is not None else packet
+
+
+async def publish_latest_rgbd_datachannel(channel, pc: RTCPeerConnection, source_url: str, packet_filter=None) -> None:
     """Send only the newest local RGB-D packet over a partial-reliability channel."""
 
     loop = asyncio.get_running_loop()
@@ -4745,6 +4909,8 @@ async def publish_latest_rgbd_datachannel(channel, pc: RTCPeerConnection, source
                 dropped_frames += 1
                 continue
             try:
+                if packet_filter is not None:
+                    packet = await loop.run_in_executor(None, packet_filter, packet)
                 channel.send(packet)
                 sent_frames += 1
             except (ConnectionError, InvalidStateError, OSError, ValueError):

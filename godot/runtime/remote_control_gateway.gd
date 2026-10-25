@@ -50,6 +50,8 @@ func _process(_delta: float) -> void:
 
 
 func _apply_view_settings(payload: Dictionary) -> void:
+	if payload.has("workspace_crop_rotation") or payload.has("workspace_crop_enabled") or payload.has("workspace_crop_min") or payload.has("workspace_crop_max") or payload.has("workspace_crop_show_box"):
+		get_tree().call_group("unified_point_cloud_view", "apply_remote_workspace_crop", payload)
 	if payload.has("stream_preset"):
 		get_tree().call_group("unified_point_cloud_view", "apply_remote_stream_preset", str(payload.stream_preset))
 	if payload.has("white_background_enabled"):

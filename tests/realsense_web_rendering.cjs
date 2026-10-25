@@ -11,8 +11,10 @@ const server=createTestServer();
   try {
     const page=await browser.newPage({viewport:{width:1200,height:900},deviceScaleFactor:1});
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
-    await page.goto(`http://127.0.0.1:${server.address().port}/?autorun=1`);
-    await page.waitForFunction(()=>window.testResult||window.testError,null,{timeout:60000});
+    await page.addInitScript(()=>{window.addEventListener('error',e=>window.testError=e.message);window.addEventListener('unhandledrejection',e=>window.testError=String(e.reason));});
+    await page.goto(`http://127.0.0.1:${server.address().port}/?autorun=1`,{waitUntil:'commit'});
+    try{await page.waitForFunction(()=>window.testResult||window.testError,null,{timeout:300000});}
+    catch(error){throw new Error(error.message+'; '+JSON.stringify(await page.evaluate(()=>({progress:window.testProgress,error:window.testError})))+'; '+errors.join('; '));}
     const result=await page.evaluate(()=>({result:window.testResult,error:window.testError}));
     assert.ok(!result.error,result.error);assert.deepEqual(errors,[]);
     const output=resolve(__dirname,'../.teleop/multicamera-web-tests');mkdirSync(output,{recursive:true});

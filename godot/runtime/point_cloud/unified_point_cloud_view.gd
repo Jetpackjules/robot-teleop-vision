@@ -318,6 +318,31 @@ const DORMANT_OAKD_PROPERTIES := [
 		edge_feather_min_alpha = value
 		_update_camera_renderers()
 
+## Crops rendered geometry in world coordinates. Native camera data remains complete.
+@export_group("Workspace Crop")
+@export var workspace_crop_enabled: bool = false:
+	set(value):
+		workspace_crop_enabled = value
+		_update_camera_renderers()
+@export var workspace_crop_min: Vector3 = Vector3(-0.6, -0.45, -0.6):
+	set(value):
+		workspace_crop_min = value
+		_update_camera_renderers()
+@export var workspace_crop_max: Vector3 = Vector3(0.6, 0.45, 0.6):
+	set(value):
+		workspace_crop_max = value
+		_update_camera_renderers()
+@export var workspace_crop_rotation: Vector3 = Vector3.ZERO:
+	set(value):
+		workspace_crop_rotation = value
+		_update_camera_renderers()
+@export var workspace_crop_show_box: bool = false:
+	set(value):
+		workspace_crop_show_box = value
+		_update_camera_renderers()
+var _workspace_crop_guide: MeshInstance3D
+var _workspace_crop_guide_key: Array = []
+
 @export_group("RealSense Camera")
 ## Auto-detects RealSense devices by serial and creates one renderer per discovered camera. Settings are stored per serial in Realsense Device Registry.
 @export var realsense_auto_discover: bool = true:
@@ -3085,6 +3110,7 @@ func _update_camera_renderers() -> void:
 	_update_unified_mesh_fusion()
 	_update_mesh_quality()
 	_update_robot_renderer_masks()
+	_update_workspace_crop()
 	_update_blendpcr_rendering()
 	_update_camera_guides()
 
@@ -3105,6 +3131,60 @@ func get_camera_stream_info() -> Array[Dictionary]:
 			"capture_fps": float(source.call("get_direct_realsense_capture_fps")),
 			"render_fps": float(source.call("get_render_fps"))})
 	return info
+
+func apply_remote_workspace_crop(payload: Dictionary) -> void:
+	var lo: Variant = payload.get("workspace_crop_min", [workspace_crop_min.x, workspace_crop_min.y, workspace_crop_min.z])
+	var hi: Variant = payload.get("workspace_crop_max", [workspace_crop_max.x, workspace_crop_max.y, workspace_crop_max.z])
+	if not lo is Array or not hi is Array or lo.size() != 3 or hi.size() != 3:
+		return
+	for axis in range(3):
+		if not (lo[axis] is float or lo[axis] is int) or not (hi[axis] is float or hi[axis] is int):
+			return
+		if not is_finite(float(lo[axis])) or not is_finite(float(hi[axis])) or absf(float(lo[axis])) > 20.0 or absf(float(hi[axis])) > 20.0 or float(lo[axis]) >= float(hi[axis]):
+			return
+	var rotation: Variant = payload.get("workspace_crop_rotation", [workspace_crop_rotation.x, workspace_crop_rotation.y, workspace_crop_rotation.z])
+	if not rotation is Array or rotation.size() != 3:
+		return
+	for value in rotation:
+		if not (value is float or value is int) or not is_finite(float(value)) or absf(float(value)) > 360.0:
+			return
+	workspace_crop_rotation = Vector3(float(rotation[0]), float(rotation[1]), float(rotation[2]))
+	workspace_crop_min = Vector3(float(lo[0]), float(lo[1]), float(lo[2]))
+	workspace_crop_max = Vector3(float(hi[0]), float(hi[1]), float(hi[2]))
+	workspace_crop_enabled = bool(payload.get("workspace_crop_enabled", workspace_crop_enabled))
+	workspace_crop_show_box = bool(payload.get("workspace_crop_show_box", workspace_crop_show_box))
+	_update_workspace_crop()
+
+func _update_workspace_crop() -> void:
+	var crop := preload("res://godot/runtime/point_cloud/workspace_crop.gd")
+	var enabled := workspace_crop_enabled and workspace_crop_min.x < workspace_crop_max.x and workspace_crop_min.y < workspace_crop_max.y and workspace_crop_min.z < workspace_crop_max.z
+	# Keep seam context for BlendPCR; its final composite clips to exact bounds.
+	var margin := Vector3.ONE * 0.05 if render_mode == "blendpcr" else Vector3.ZERO
+	for renderer_variant in _camera_nodes.values():
+		var renderer := renderer_variant as MeshInstance3D
+		if not is_instance_valid(renderer):
+			continue
+		var material := renderer.get_active_material(0) as ShaderMaterial if renderer.mesh != null else renderer.material_override as ShaderMaterial
+		crop.apply_to_material(material, enabled, workspace_crop_min - margin, workspace_crop_max + margin, workspace_crop_rotation)
+	var show := enabled and workspace_crop_show_box
+	if not show:
+		if is_instance_valid(_workspace_crop_guide): _workspace_crop_guide.visible = false
+		return
+	if not is_instance_valid(_workspace_crop_guide):
+		_workspace_crop_guide = MeshInstance3D.new()
+		_workspace_crop_guide.name = "WorkspaceCropBox"
+		add_child(_workspace_crop_guide)
+		_workspace_crop_guide.top_level = true
+		_workspace_crop_guide.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.albedo_color = Color(0.22, 0.84, 1.0)
+		_workspace_crop_guide.material_override = material
+	_workspace_crop_guide.visible = true
+	var key := [workspace_crop_min, workspace_crop_max, workspace_crop_rotation]
+	if _workspace_crop_guide_key != key:
+		_workspace_crop_guide.mesh = crop.box_mesh(workspace_crop_min, workspace_crop_max, workspace_crop_rotation)
+		_workspace_crop_guide_key = key
 
 func _update_camera_guides() -> void:
 	if not is_inside_tree():
@@ -3244,6 +3324,7 @@ func _update_blendpcr_rendering() -> void:
 	var viewer := _blendpcr_viewer()
 	var scale := [0.75, 1.0, 0.5][clampi(blendpcr_quality, 0, 2)] as float
 	_blendpcr.update_surfaces(surfaces, viewer, scale, blendpcr_surface_tolerance_m, blendpcr_seam_radius,_mesh_quality_rig)
+	_blendpcr.set_workspace_crop(workspace_crop_enabled, workspace_crop_min, workspace_crop_max, workspace_crop_rotation)
 	_set_mesh_fusion_status(_blendpcr.status)
 
 func _set_mesh_fusion_status(message: String) -> void:

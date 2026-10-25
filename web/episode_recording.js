@@ -1,0 +1,93 @@
+// The browser controls capture; RGB/state/action files are written on the host.
+export class EpisodeRecordingControl {
+  constructor(root, {client, fetch: request = (...args) => fetch(...args), interval = 1000} = {}) {
+    this.root = root;
+    this.client = client;
+    this.request = request;
+    this.interval = interval;
+    this.busy = false;
+    this.status = null;
+    this.message = root.querySelector('[data-recording-status]');
+    this.task = root.querySelector('[data-recording-task]');
+    this.outcome = root.querySelector('[data-recording-outcome]');
+    this.startButton = root.querySelector('[data-recording-start]');
+    this.stopButton = root.querySelector('[data-recording-stop]');
+    this.discardButton = root.querySelector('[data-recording-discard]');
+    this.startButton.addEventListener('click', () => this.command('start'));
+    this.stopButton.addEventListener('click', () => this.command('stop'));
+    this.discardButton.addEventListener('click', () => this.command('discard'));
+    this.task.addEventListener('input', () => this.render());
+    this.poll();
+  }
+
+  async poll() {
+    if (this.closed) return;
+    try {
+      const response = await this.request('/api/v1/recording?'+new URLSearchParams({client: this.client}), {cache: 'no-store'});
+      if (!response.ok) throw new Error('Host recording is unavailable. Update the gateway and reconnect.');
+      this.status = await response.json();
+      this.root.hidden = this.status.supported === false;
+      this.error = '';
+    } catch (error) {
+      this.error = error.message;
+    }
+    this.render();
+    if (!this.closed) this.timer = setTimeout(() => this.poll(), this.interval);
+  }
+
+  async command(command) {
+    if (this.busy) return;
+    if (command === 'start' && !this.task.reportValidity()) return;
+    this.busy = true;
+    this.error = '';
+    this.render();
+    try {
+      const payload = {command, client: this.client};
+      if (command === 'start') payload.task = this.task.value.trim();
+      else payload.outcome = this.outcome.value;
+      const response = await this.request('/api/v1/recording', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'The host could not change recording state.');
+      this.status = result;
+      if (command === 'start') this.outcome.value = 'unrated';
+    } catch (error) {
+      this.error = error.message;
+    } finally {
+      this.busy = false;
+      this.render();
+    }
+  }
+
+  render() {
+    const status = this.status;
+    const active = ['preparing', 'recording', 'saving'].includes(status?.state);
+    const finishing = status?.state === 'saving';
+    const owner = status?.is_owner !== false;
+    this.startButton.disabled = this.busy || active || !status?.ready || !status?.controller_active || !this.task.value.trim();
+    this.stopButton.disabled = this.busy || !active || finishing || !owner;
+    this.discardButton.disabled = this.stopButton.disabled;
+    this.task.disabled = active || this.busy;
+    this.outcome.disabled = !active || finishing || this.busy || !owner;
+    this.startButton.textContent = status?.state === 'preparing' ? 'Preparing…' : 'Start recording';
+    this.stopButton.textContent = finishing ? 'Saving…' : 'Stop and save';
+    this.root.dataset.recordingState = status?.state || 'unavailable';
+    let message = this.error || status?.message || 'Checking host recording…';
+    if (!this.error && status?.state === 'recording')
+      message = `Recording on host · ${status.frames} frames · ${status.elapsed_seconds.toFixed(1)} s`;
+    else if (!this.error && status && !active && !status.ready && status.state !== 'error')
+      message = 'Waiting for measured feedback and applied targets. Recording does not enable or move the arm.';
+    if (!this.error && status?.last_saved && !active) {
+      const saved = status.last_saved;
+      message += ` ${saved.frames} frames · ${saved.status} · ${saved.outcome}. Host folder: ${saved.host_folder}`;
+    }
+    if (active && !owner) message = 'Another controller page owns this recording.';
+    this.message.textContent = message;
+    this.message.setAttribute('role', this.error || status?.state === 'error' ? 'alert' : 'status');
+  }
+
+  close() {
+    this.closed = true;
+    clearTimeout(this.timer);
+  }
+}

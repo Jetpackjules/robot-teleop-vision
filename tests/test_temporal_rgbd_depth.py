@@ -753,3 +753,17 @@ def test_exact_depth_preserves_every_sample_and_full_color(persistent, predictiv
         start = 9 + struct.unpack_from("<I", packet, 5)[0]
         assert packet[start:start + camera["color_length"]] == b"\xff\xd8test-jpeg\xff\xd9"
         reference = current
+
+
+def test_original_rgb_stays_independent_of_depth_temporal_masks():
+    packet = make_packet(np.full((8, 8), 1000, dtype=np.uint16))
+    size = struct.unpack_from("<I", packet, 5)[0]
+    metadata = json.loads(packet[9:9 + size])
+    metadata["cameras"][0].update(color_space="original_rgb", color_width=1920, color_height=1080)
+    encoded = json.dumps(metadata).encode()
+    original = b"RGBD1" + struct.pack("<I", len(encoded)) + encoded + packet[9 + size:]
+    encoder = TemporalRgbdDepthEncoder(temporal_color=True, persistent_reference=True, exact_depth=True)
+    actual, priority = encoder.encode(original)
+    assert actual == original
+    assert priority is False
+    assert encoder.persistent_metadata is None

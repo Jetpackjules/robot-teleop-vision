@@ -176,6 +176,10 @@
     }
     .calibration-progress progress { width: 100%; height: 12px; accent-color: var(--accent); }
     .section-title { margin: 3px 0 0; color: var(--text); font-size: 13px; }
+    .episode-recording { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
+    .episode-recording input[type="text"] { width: 100%; box-sizing: border-box; min-height: 40px; padding: 9px; border: 1px solid var(--line); border-radius: 6px; background: #111; color: var(--text); font: inherit; }
+    .episode-recording [data-recording-status] { margin: 0; overflow-wrap: anywhere; line-height: 1.5; }
+    .episode-recording[data-recording-state="recording"] [data-recording-status] { color: var(--accent); }
     .helper-text { margin: -2px 0 2px; color: var(--muted); font-size: 12px; }
     .navigation-guide {
       padding: 9px 10px;
@@ -244,6 +248,11 @@
     details.advanced-disclosure > summary { padding: 9px 10px; color: var(--text); font-size: 13px; }
     .disclosure-body { display: grid; gap: 9px; padding: 0 10px 10px; }
     #site-settings-status { min-height: 18px; color: var(--muted); font-size: 12px; }
+    .crop-bounds { display: grid; grid-template-columns: 30px minmax(0, 1fr) minmax(0, 1fr); gap: 8px; align-items: center; }
+    .crop-bounds input { width: 100%; min-width: 0; padding: 7px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 5px; }
+    .crop-bounds label { display: contents; }
+    #workspace-crop-status { min-height: 1.4em; }
+    #modeled-workspace-options input[type="number"] { width: 100%; min-width: 0; padding: 7px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 5px; }
     #start-overlay {
       position: fixed;
       inset: 0;
@@ -272,9 +281,32 @@
       .advanced-body { grid-template-columns: 1fr; }
       .advanced-section.wide { grid-column: auto; }
     }
+    #workspace-editor {position:fixed;inset:0;pointer-events:none;z-index:45;}
+    #workspace-editor[hidden] {display:none;}
+    #workspace-editor > svg {position:absolute;overflow:visible;pointer-events:none;touch-action:none;}
+    .workspace-edit-wire {fill:none;stroke:#d5eafa;stroke-width:1.5;opacity:.9;pointer-events:none;}
+    .workspace-edit-wire text {font:600 13px system-ui;stroke:none;}
+    .workspace-handle {pointer-events:all;cursor:grab;touch-action:none;outline:none;}
+    .workspace-stroke-hit {pointer-events:stroke;}
+    .workspace-handle:focus-visible > :last-child {stroke:white;stroke-width:4;}
+    .workspace-handle:hover > :last-child {stroke:#fff;stroke-width:3;}
+    .workspace-handle.is-dragging {cursor:grabbing;}
+    .workspace-ring {pointer-events:none;}
+    .workspace-edit-toolbar {position:absolute;left:50%;bottom:22px;transform:translateX(-50%);width:min(650px,calc(100% - 28px));box-sizing:border-box;background:#171d22;border:1px solid #53606b;border-radius:12px;padding:12px 14px;pointer-events:auto;display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;box-shadow:0 8px 28px #0008;}
+    .workspace-edit-toolbar strong {font-size:15px;}
+    .workspace-edit-modes,.workspace-edit-actions {display:flex;gap:4px;}
+    .workspace-edit-actions {margin-left:auto;}
+    .workspace-edit-toolbar button {width:auto;margin:0;padding:8px 10px;min-height:38px;flex-shrink:0;font-size:13px;}
+    .workspace-edit-toolbar [aria-pressed=true] {background:#304e65;border-color:#a4d5fa;}
+    .workspace-edit-toolbar kbd {font:11px system-ui;color:#c9d3dd;margin-left:4px;}
+    #workspace-edit-help {margin:0;width:100%;font-size:13px;color:#c9d3dd;line-height:1.4;}
+    #workspace-edit-readout {font-size:12px;color:#bac8d4;font-variant-numeric:tabular-nums;}
+    .workspace-handle:focus-visible {outline:2px solid #d5eafa;outline-offset:3px;}
+    .crop-rotation {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}
+    @media(max-width:620px){.workspace-edit-toolbar{bottom:12px;gap:8px;} .workspace-edit-toolbar strong{width:100%;} .workspace-edit-toolbar kbd{display:none;} .workspace-edit-toolbar button{min-height:44px;} }
   </style>
   <script type="module" src="./godot_webcam_tracker_bridge.js?v=20260803_settings_cleanup_v1"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261020_color_recovery"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261021_original_rgb"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -311,6 +343,26 @@
             <button id="restart" type="button">Reconnect Video</button>
           </div>
           <div id="robot-settings-root"></div>
+          <section id="episode-recording" class="episode-recording" aria-labelledby="recording-title">
+            <h3 id="recording-title" class="section-title">Demonstration recording</h3>
+            <label>Task instruction
+              <input data-recording-task type="text" required maxlength="500" placeholder="Place the block in the cup" autocomplete="off">
+            </label>
+            <p class="helper-text">Records original RGB from all active capture cameras and any open wrist view, plus measured joints and applied actions, on the robot host.</p>
+            <button data-recording-start class="primary" type="button" disabled>Start recording</button>
+            <label>Episode outcome
+              <select data-recording-outcome disabled>
+                <option value="unrated">Not rated</option>
+                <option value="success">Success</option>
+                <option value="failure">Failure</option>
+              </select>
+            </label>
+            <div class="button-row">
+              <button data-recording-stop type="button" disabled>Stop and save</button>
+              <button data-recording-discard type="button" disabled>Discard</button>
+            </div>
+            <p data-recording-status class="helper-text" role="status" aria-live="polite">Checking host recording…</p>
+          </section>
           <button id="open-advanced" type="button">Advanced Setup</button>
         </div>
       </details>
@@ -332,6 +384,8 @@
         <section class="advanced-section">
           <h3>Camera and streaming</h3>
           <label class="toggle-row"><span>White background</span><input id="white-background-enabled" type="checkbox"></label>
+          <label class="toggle-row"><span>Depth only (gray)</span><input id="depth-only-enabled" type="checkbox" aria-describedby="depth-only-help" aria-keyshortcuts="Backspace"></label>
+          <p id="depth-only-help" class="helper-text">Show 3D surfaces without camera color. Press Backspace to toggle.</p>
           <label class="toggle-row"><span>Show camera locations</span><input id="camera-locations-enabled" type="checkbox"></label>
           <p class="helper-text">Camera bodies, labels, and viewing directions. Zoom out to see the full rig.</p>
           <p class="helper-text">Quality uses maximum supported depth and RGB resolution at 30 Hz; Low latency does the same at 60 Hz. Switching briefly restarts the shared cameras for all viewers. Capture targets may exceed delivered FPS.</p>
@@ -352,6 +406,59 @@
           <label>View height <span id="head-height-value" class="value-label">0.35 m</span><input id="head-height" type="range" min="0" max="1" step="0.01" value="0.35"></label>
           <label>View elevation <span id="orbit-elevation-value" class="value-label">0 deg</span><input id="orbit-elevation" type="range" min="-60" max="60" step="1" value="0"></label>
           <label>Field of view <span id="inspect-fov-value" class="value-label">55 deg</span><input id="inspect-fov" type="range" min="30" max="100" step="1" value="55"></label>
+        </section>
+
+        <section class="advanced-section">
+          <h3>Workspace crop</h3>
+          <label class="toggle-row"><span>Crop to workspace</span><input id="workspace-crop-enabled" type="checkbox" aria-describedby="workspace-crop-help"></label>
+          <p id="workspace-crop-help" class="helper-text">Drag the box to keep full detail inside it. The server sends the retained region when supported; status shows whether it is active. Original RGB view stays complete.</p>
+          <div id="workspace-crop-options" class="conditional-controls" hidden>
+            <label class="toggle-row"><span>Show crop box</span><input id="workspace-crop-show-box" type="checkbox"></label>
+            <button id="workspace-crop-edit" class="primary" type="button">Edit Box in 3D</button>
+            <button id="workspace-crop-center" type="button">Center Box on Orbit Point</button>
+            <p class="helper-text">Drag handles in the scene to move, resize each side, and rotate. Double-click a point before centering the box there.</p>
+            <details class="advanced-disclosure"><summary>Exact bounds</summary><div class="disclosure-body">
+            <label>Rotation X / Y / Z (degrees)<span class="crop-rotation"><input id="workspace-crop-rotation-x" aria-label="Crop rotation X" type="number" min="-360" max="360" step="1" value="0"><input id="workspace-crop-rotation-y" aria-label="Crop rotation Y" type="number" min="-360" max="360" step="1" value="0"><input id="workspace-crop-rotation-z" aria-label="Crop rotation Z" type="number" min="-360" max="360" step="1" value="0"></span></label>
+            <div class="crop-bounds" role="group" aria-label="Crop bounds in metres">
+              <span></span><span>Minimum (m)</span><span>Maximum (m)</span>
+              <label><span>X</span><input id="workspace-crop-min-x" type="number" min="-20" max="20" step="0.01" value="-0.6" aria-label="Minimum X in metres"><input id="workspace-crop-max-x" type="number" min="-20" max="20" step="0.01" value="0.6" aria-label="Maximum X in metres"></label>
+              <label><span>Y</span><input id="workspace-crop-min-y" type="number" min="-20" max="20" step="0.01" value="-0.45" aria-label="Minimum Y in metres"><input id="workspace-crop-max-y" type="number" min="-20" max="20" step="0.01" value="0.45" aria-label="Maximum Y in metres"></label>
+              <label><span>Z</span><input id="workspace-crop-min-z" type="number" min="-20" max="20" step="0.01" value="-0.6" aria-label="Minimum Z in metres"><input id="workspace-crop-max-z" type="number" min="-20" max="20" step="0.01" value="0.6" aria-label="Maximum Z in metres"></label>
+            </div>
+            </div></details>
+          </div>
+          <p id="workspace-crop-status" class="helper-text" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="advanced-section">
+          <h3>Modeled workspace</h3>
+          <label class="toggle-row"><span>Modeled table and floor</span><input id="modeled-workspace-enabled" type="checkbox" aria-describedby="modeled-workspace-help"></label>
+          <p id="modeled-workspace-help" class="helper-text">Show live objects above an artificial table. Switch off to restore the full scene. Applies to browser 3D views.</p>
+          <div id="modeled-workspace-options" class="conditional-controls" hidden>
+            <button id="modeled-workspace-edit" class="primary" type="button">Edit Table in 3D</button>
+            <button id="modeled-workspace-align" type="button">Place Below Arm Base</button>
+            <p class="helper-text">Starts below the calibrated arm base when available. Use the green Y handle to tune the height, then Done to keep it or Cancel to restore it. Camera and arm calibration stay unchanged.</p>
+            <details class="advanced-disclosure"><summary>Exact placement and lighting</summary><div class="disclosure-body">
+            <button id="modeled-workspace-orbit" type="button">Place Tabletop at Orbit Point</button>
+            <label class="toggle-row"><span>Scene lighting</span><input id="scene-lighting-enabled" type="checkbox" checked></label>
+            <label class="toggle-row"><span>CAD shadows</span><input id="scene-shadows-enabled" type="checkbox" checked></label>
+            <p class="helper-text">Shared lights for the table and Solid robot overlay. Camera colors keep their original lighting.</p>
+            <label>Table height (m)<input id="modeled-workspace-table-height" type="number" min="0.1" max="4" step="0.01" value="0.72"></label>
+            <label>Table width (m)<input id="modeled-workspace-width" type="number" min="0.1" max="4" step="0.01" value="1.2"></label>
+            <label>Table depth (m)<input id="modeled-workspace-depth" type="number" min="0.1" max="4" step="0.01" value="0.8"></label>
+            <label>Tabletop exclusion (mm)<input id="modeled-workspace-clearance" type="number" min="0" max="30" step="1" value="6"></label>
+            <p class="helper-text">A smaller exclusion preserves thin objects. Increase it only enough to hide tabletop noise.</p>
+
+                <label>Center X (m)<input id="modeled-workspace-x" type="number" min="-20" max="20" step="0.001" value="0"></label>
+                <label>Tabletop Y (m)<input id="modeled-workspace-y" type="number" min="-20" max="20" step="0.001" value="0"></label>
+                <label>Center Z (m)<input id="modeled-workspace-z" type="number" min="-20" max="20" step="0.001" value="0"></label>
+                <label>Table heading (degrees)<input id="modeled-workspace-heading" type="number" min="-180" max="180" step="1" value="0"></label>
+                <label>Object region height (m)<input id="modeled-workspace-height" type="number" min="0.05" max="3" step="0.05" value="0.8"></label>
+                <label>Light angle (degrees)<input id="modeled-workspace-light-angle" type="range" min="-180" max="180" step="1" value="35"></label>
+              </div>
+            </details>
+          </div>
+          <p id="modeled-workspace-status" class="helper-text" role="status" aria-live="polite"></p>
         </section>
 
         <section class="advanced-section">
@@ -414,6 +521,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20261020_color_recovery"></script>
+  <script type="module" src="./controller_hybrid.js?v=20261025_host_recording"></script>
 </body>
 </html>

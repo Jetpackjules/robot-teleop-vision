@@ -1,7 +1,14 @@
     import { robotModuleReady } from "./robot_module_host.js";
+    import { EpisodeRecordingControl } from './episode_recording.js?v=20261025_host_recording';
     import { CapturePresetControl, nativeStreamPreset } from "./capture_presets.js?v=20261020_native_modes";
+    import { workspaceCropBounds } from './workspace_crop.js?v=20261021_original_rgb';
+    import { MODELED_WORKSPACE_DEFAULTS, modeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
 
     const robotModule = await robotModuleReady;
+    const recordingRoot = document.getElementById('episode-recording');
+    const episodeRecording = recordingRoot ? new EpisodeRecordingControl(recordingRoot,
+      {client: window.robotTeleopPageId}) : null;
+    window.addEventListener('pagehide', () => episodeRecording?.close());
     const viewportVideo = document.getElementById("viewport-video");
     const viewportImage = document.getElementById("viewport-image");
     const hybridCanvas = document.getElementById("hybrid-canvas");
@@ -32,7 +39,114 @@
       "workspace-surface-opacity",
     ];
     // v13 adds GPU mesh views while preserving older saved camera views.
-    const viewSettingsVersion = 14;
+    const viewSettingsVersion = 16;
+    let workspaceCropConfigured = false;
+    let lastValidCrop = {workspace_crop_min: [-0.6, -0.45, -0.6], workspace_crop_max: [0.6, 0.45, 0.6]};
+    const modeledFields = ['width','depth','table-height','heading','clearance','height','light-angle','x','y','z'];
+    let lastValidModeled = {...MODELED_WORKSPACE_DEFAULTS};
+    let modeledWorkspaceConfigured = false;
+
+    function modeledViewSettings() {
+      const value = name => document.getElementById(`modeled-workspace-${name}`).valueAsNumber;
+      return {modeled_workspace_enabled: document.getElementById('modeled-workspace-enabled').checked,
+        modeled_workspace_center: ['x','y','z'].map(value),modeled_workspace_width:value('width'),
+        modeled_workspace_depth:value('depth'),modeled_workspace_table_height:value('table-height'),modeled_workspace_heading:value('heading'),
+        modeled_workspace_clearance:value('clearance')*.001,modeled_workspace_height:value('height'),
+        modeled_workspace_light_angle:value('light-angle'),
+        scene_lighting_enabled:document.getElementById('scene-lighting-enabled').checked,
+        scene_shadows_enabled:document.getElementById('scene-shadows-enabled').checked};
+    }
+
+    function restoreModeledSettings(saved = {}) {
+      const candidate = {...MODELED_WORKSPACE_DEFAULTS,...saved};
+      const valid = modeledWorkspace({...candidate,modeled_workspace_enabled:true});
+      const settings = valid ? candidate : {...MODELED_WORKSPACE_DEFAULTS};
+      document.getElementById('modeled-workspace-enabled').checked = valid && saved.modeled_workspace_enabled === true;
+      document.getElementById('scene-lighting-enabled').checked=settings.scene_lighting_enabled!==false;
+      document.getElementById('scene-shadows-enabled').checked=settings.scene_shadows_enabled!==false;
+      for (const name of modeledFields) {
+        const value = ['x','y','z'].includes(name) ? settings.modeled_workspace_center[['x','y','z'].indexOf(name)]
+          : settings[`modeled_workspace_${name.replaceAll('-','_')}`] * (name === 'clearance' ? 1000 : 1);
+        document.getElementById(`modeled-workspace-${name}`).value = String(value);
+      }
+      modeledWorkspaceConfigured = Array.isArray(saved.modeled_workspace_center);
+      lastValidModeled = modeledViewSettings();
+      updateModeledControls();
+    }
+
+    function updateModeledControls() {
+      const settings = modeledViewSettings(),valid = modeledWorkspace({...settings,modeled_workspace_enabled:true});
+      document.getElementById('modeled-workspace-options').hidden = !settings.modeled_workspace_enabled;
+      for (const name of modeledFields) {
+        const input = document.getElementById(`modeled-workspace-${name}`),n=input.valueAsNumber;
+        input.setCustomValidity(Number.isFinite(n) && n >= Number(input.min) && n <= Number(input.max)
+          ? '' : 'Enter a value within the displayed range.');
+      }
+      document.getElementById('modeled-workspace-status').textContent = !settings.modeled_workspace_enabled ? ''
+        : valid ? 'Artificial table and floor; live objects retain native detail. Server cropping is requested for this view.'
+          : 'Enter valid dimensions; the last valid placement stays active.';
+      return Boolean(valid);
+    }
+
+    function alignModeledTable(source='auto') {
+      const placement = window.alignGodotModeledWorkspace?.({source});
+      if (!placement) {
+        document.getElementById('modeled-workspace-status').textContent = source==='robot'
+          ? 'A calibrated arm base is not available. Use Edit Table in 3D or place the table at the orbit point.'
+          : 'Open a connected 3D view, then double-click the real tabletop.';
+        return false;
+      }
+      restoreModeledSettings({...modeledViewSettings(),...placement});
+      modeledWorkspaceConfigured = true;
+      return true;
+    }
+
+    function cropViewSettings() {
+      const values = bound => ['x', 'y', 'z'].map(axis =>
+        document.getElementById(`workspace-crop-${bound}-${axis}`).valueAsNumber);
+      return {workspace_crop_enabled: document.getElementById('workspace-crop-enabled').checked,
+        workspace_crop_show_box: document.getElementById('workspace-crop-show-box').checked,
+        workspace_crop_min: values('min'), workspace_crop_max: values('max'),
+        workspace_crop_rotation:['x','y','z'].map(axis=>document.getElementById(`workspace-crop-rotation-${axis}`).valueAsNumber)};
+    }
+
+    function restoreCropSettings(saved = {}) {
+      const valid = workspaceCropBounds({...saved, workspace_crop_enabled: true});
+      if (valid) for (const bound of ['min', 'max']) ['x', 'y', 'z'].forEach((axis, i) => {
+        document.getElementById(`workspace-crop-${bound}-${axis}`).value = String(saved[`workspace_crop_${bound}`][i]);
+      });
+      if(valid) ['x','y','z'].forEach((axis,i)=>document.getElementById(`workspace-crop-rotation-${axis}`).value=String((saved.workspace_crop_rotation||[0,0,0])[i]));
+      workspaceCropConfigured = Boolean(valid);
+      document.getElementById('workspace-crop-enabled').checked = Boolean(valid && saved.workspace_crop_enabled);
+      document.getElementById('workspace-crop-show-box').checked = saved.workspace_crop_show_box === true;
+      updateCropControls();
+    }
+
+    function updateCropControls() {
+      const settings = cropViewSettings(), enabled = settings.workspace_crop_enabled;
+      document.getElementById('workspace-crop-options').hidden = !enabled;
+      const valid = workspaceCropBounds({...settings, workspace_crop_enabled: true});
+      for (const bound of ['min', 'max']) ['x', 'y', 'z'].forEach((axis, i) => {
+        const control = document.getElementById(`workspace-crop-${bound}-${axis}`);
+        const lo = settings.workspace_crop_min[i], hi = settings.workspace_crop_max[i];
+        control.setCustomValidity(Number.isFinite(lo) && Number.isFinite(hi) && lo < hi
+          && Math.abs(lo) <= 20 && Math.abs(hi) <= 20 ? '' : 'Enter a minimum below the maximum, between -20 and 20 metres.');
+      });
+      document.getElementById('workspace-crop-status').textContent = enabled
+        ? valid ? 'Native detail retained inside the box. Save site defaults to reuse it in other browsers.'
+          : 'Enter valid bounds; the last valid crop stays active.' : '';
+      return !enabled || Boolean(valid);
+    }
+
+    function centerCropOnOrbit() {
+      const bounds = window.centerGodotHybridWorkspaceCrop?.();
+      if (!bounds) {
+        document.getElementById('workspace-crop-status').textContent = 'Open a connected 3D view to center the box.';
+        return false;
+      }
+      restoreCropSettings({...cropViewSettings(), ...bounds});
+      return true;
+    }
 
     let peer = null;
     let capturePresetControl = null;
@@ -81,10 +195,19 @@
     transportLink.textContent = quickTunnel ? "Reload Point Cloud" : (hybridMode ? "Frame Stream Fallback" : "Hybrid RGB-D View");
 
     function viewSettingsPayload(extra = {}) {
+      const crop = cropViewSettings();
+      if (workspaceCropBounds({...crop, workspace_crop_enabled: true})) {
+        lastValidCrop = {workspace_crop_min: crop.workspace_crop_min, workspace_crop_max: crop.workspace_crop_max,workspace_crop_rotation:crop.workspace_crop_rotation};
+      } else Object.assign(crop, lastValidCrop);
+      const modeled = modeledViewSettings();
+      if (modeledWorkspace({...modeled,modeled_workspace_enabled:true})) lastValidModeled = modeled;
+      else Object.assign(modeled,lastValidModeled,{modeled_workspace_enabled:modeled.modeled_workspace_enabled});
       const span = Number(document.getElementById("orbit-span").value);
       const response = Number(document.getElementById("orbit-response").value);
       const orbitDistance = Number(document.getElementById("orbit-distance").value);
       const payload = {
+        rgbd_client_id:window.robotTeleopPageId,
+        workspace_stream_crop_enabled:true,
         // Mouse navigation and click-to-focus are always available. Head
         // tracking layers onto this orbit rather than selecting another mode.
         inspect_enabled: true,
@@ -102,6 +225,7 @@
         max_distance: 3.0,
         fov: Number(document.getElementById("inspect-fov").value),
         white_background_enabled: document.getElementById("white-background-enabled").checked,
+        depth_only_enabled: document.getElementById("depth-only-enabled").checked,
         // Retire the old live-view default, including previously saved true values.
         persistent_temporal_reference_enabled: false,
         full_rgb_frame_updates_enabled: true,
@@ -112,6 +236,8 @@
         workspace_surface_offset: Number(document.getElementById("workspace-surface-offset").value),
         workspace_surface_size: Number(document.getElementById("workspace-surface-size").value),
         workspace_surface_opacity: Number(document.getElementById("workspace-surface-opacity").value),
+        ...crop,
+        ...modeled,
         display_mode: displayModeSelect.value,
         stream_preset: streamPresetSelect.value,
         settings_version: viewSettingsVersion,
@@ -141,6 +267,7 @@
     }
 
     function sendViewSettings(extra = {}) {
+      if (!updateCropControls()) return false;
       updateViewLabels();
       const payload = viewSettingsPayload(extra);
       // Calibration actions and uploaded files are transient, never startup defaults.
@@ -160,7 +287,7 @@
     function restoreViewSettings(savedInput = null) {
       const localSaved = localSavedViewSettings();
       const saved = savedInput && Object.keys(savedInput).length ? { ...localSaved, ...savedInput } : localSaved;
-      if (!saved || ![6, 7, 8, 9, 10, 11, 12, 13, viewSettingsVersion].includes(saved.settings_version)) {
+      if (!saved || ![6, 7, 8, 9, 10, 11, 12, 13, 14, 15, viewSettingsVersion].includes(saved.settings_version)) {
         updateHeadTrackingOptions();
         return updateViewLabels();
       }
@@ -171,6 +298,7 @@
       document.getElementById("dolly-gain").value = String(saved.dolly_gain ?? 0.008);
       document.getElementById("inspect-fov").value = String(Math.round(saved.fov || 55));
       document.getElementById("white-background-enabled").checked = saved.white_background_enabled === true;
+      document.getElementById("depth-only-enabled").checked = saved.depth_only_enabled === true;
       document.getElementById("head-height").value = String(saved.focus_vertical_offset ?? 0.35);
       document.getElementById("orbit-elevation").value = String(saved.orbit_pitch_offset ?? 0);
       document.getElementById("head-tracking-enabled").checked = saved.head_tracking_enabled !== false;
@@ -180,6 +308,8 @@
       document.getElementById("workspace-surface-offset").value = String(saved.workspace_surface_offset ?? 0);
       document.getElementById("workspace-surface-size").value = String(saved.workspace_surface_size ?? 1.2);
       document.getElementById("workspace-surface-opacity").value = String(saved.workspace_surface_opacity ?? 0.18);
+      restoreCropSettings(saved);
+      if ('modeled_workspace_enabled' in saved || 'modeled_workspace_center' in saved) restoreModeledSettings(saved);
       displayModeSelect.value = displayModes.includes(saved.display_mode) ? saved.display_mode : defaultDisplayMode;
       streamPresetSelect.value = saved.stream_preset === "latency" ? "latency" : "quality";
       startupNavigation = saved.default_navigation || null;
@@ -601,6 +731,7 @@
             sdp: pc.localDescription.sdp,
             type: pc.localDescription.type,
             source: rgbdPreset ? "rgbd_data" : "control_only",
+            client:window.robotTeleopPageId,
             width: rgbdPreset ? rgbdPreset.width : undefined,
             fps: rgbdPreset ? rgbdPreset.fps : undefined,
             contextFps: rgbdPreset ? rgbdPreset.contextFps : undefined,
@@ -1037,6 +1168,15 @@
       const av1Connected = av1Socket && av1Socket.readyState === WebSocket.OPEN && viewportVideo.currentTime > 0;
       const hybrid = window.getGodotHybridRendererStatus ? window.getGodotHybridRendererStatus() : {};
       const connected = activeViewportMode === "hybrid" ? hybrid.connected === true : (peer && peer.connectionState === "connected") || av1Connected;
+      const geometry = hybrid.workspaceCrop;
+      const modeled=modeledWorkspace(modeledViewSettings()),crop=cropViewSettings().workspace_crop_enabled;
+      if ((modeled||crop) && geometry?.sourceCells > 0) {
+        const percent = Math.min(100,100 * geometry.submittedCells / geometry.sourceCells);
+        const network=hybrid.streamCrop;
+        document.getElementById(modeled?'modeled-workspace-status':'workspace-crop-status').textContent = network?.applied&&network.input_bytes>0
+          ? `Server stream: ${(100*network.output_bytes/network.input_bytes).toFixed(1)}% of original RGB-D bytes. Geometry submitted: ${percent.toFixed(1)}% of source cells.`
+          : `Geometry submitted: ${percent.toFixed(1)}% of source cells. Server crop not active; local cropping still applies.`;
+      }
       const hybridStalled = activeViewportMode === "hybrid" && hybrid.stalled === true;
       const headTrackingEnabled = document.getElementById("head-tracking-enabled").checked;
       const navigationReady = active || !headTrackingEnabled;
@@ -1074,6 +1214,9 @@
           ...(hybrid.decodeErrors ? [`Decode errors ${hybrid.decodeErrors} | ${hybrid.status}`] : []),
           `Camera FPS  ${Object.entries(hybrid.cameraFps || {}).map(([id, rate]) => `${id.slice(-4)}:${Math.round(rate)}`).join("  ") || "--"}`,
           `Camera frames ${Object.entries(hybrid.cameraFrames || {}).map(([id, count]) => `${id.slice(-4)}:${count}`).join("  ") || "--"}`,
+          ...(hybrid.workspaceCrop?.enabled && hybrid.workspaceCrop.sourceCells ? [
+            `Workspace crop: ${Math.round(100 * (1 - hybrid.workspaceCrop.submittedCells / hybrid.workspaceCrop.sourceCells))}% of source geometry skipped; native detail inside`,
+          ] : []),
         ] : []),
       ].join("\n");
       statusLines.textContent = [
@@ -1120,14 +1263,50 @@
       control.addEventListener("change", () => control.blur());
     }
     for (const id of [
-      "dolly-enabled", "white-background-enabled",
+      "dolly-enabled", "white-background-enabled", "depth-only-enabled",
       "workspace-surface-enabled", "workspace-boundary-enabled",
       "camera-locations-enabled",
+      "workspace-crop-show-box",
+      "scene-lighting-enabled", "scene-shadows-enabled",
     ]) {
       const control = document.getElementById(id);
       control.addEventListener("change", () => {
         sendViewSettings();
         control.blur();
+      });
+    }
+    document.getElementById('workspace-crop-enabled').addEventListener('change', event => {
+      if (event.currentTarget.checked && !workspaceCropConfigured && !centerCropOnOrbit()) {
+        event.currentTarget.checked = false;
+        updateCropControls();
+        document.getElementById('workspace-crop-status').textContent = 'Open a connected 3D view to center the box.';
+        return;
+      }
+      sendViewSettings();
+    });
+    document.getElementById('modeled-workspace-enabled').addEventListener('change', event => {
+      if (event.currentTarget.checked && !modeledWorkspaceConfigured && !alignModeledTable()) {
+        event.currentTarget.checked = false;
+        return;
+      }
+      updateModeledControls();sendViewSettings();
+    });
+    document.getElementById('modeled-workspace-align').addEventListener('click', () => {
+      if (alignModeledTable('robot')) sendViewSettings();
+    });
+    document.getElementById('modeled-workspace-orbit').addEventListener('click',()=>{if(alignModeledTable('orbit'))sendViewSettings();});
+    for (const name of modeledFields) {
+      const input = document.getElementById(`modeled-workspace-${name}`);
+      input.addEventListener(name === 'light-angle' ? 'input' : 'change', () => {
+        if (updateModeledControls()) {modeledWorkspaceConfigured=true;sendViewSettings();}
+      });
+    }
+    document.getElementById('workspace-crop-center').addEventListener('click', () => {
+      if (centerCropOnOrbit()) sendViewSettings();
+    });
+    for (const bound of ['min', 'max']) for (const axis of ['x', 'y', 'z']) {
+      document.getElementById(`workspace-crop-${bound}-${axis}`).addEventListener('change', () => {
+        if (updateCropControls()) {workspaceCropConfigured = true; sendViewSettings();}
       });
     }
     document.getElementById("head-tracking-enabled").addEventListener("change", async (event) => {
@@ -1146,6 +1325,25 @@
       control.blur();
       updateStatus();
     });
+    let workspaceEditTimer=0;
+    const flushWorkspaceEdit=()=>{clearTimeout(workspaceEditTimer);workspaceEditTimer=0;sendViewSettings();};
+    window.addEventListener('workspace-edit-change',event=>{
+      const {settings,phase}=event.detail;
+      if('workspace_crop_min' in settings)restoreCropSettings({...cropViewSettings(),...settings});
+      if('modeled_workspace_center' in settings)restoreModeledSettings({...modeledViewSettings(),...settings});
+      if(phase==='preview') {if(!workspaceEditTimer)workspaceEditTimer=setTimeout(flushWorkspaceEdit,100);}
+      else flushWorkspaceEdit();
+    });
+    window.addEventListener('workspace-edit-finish',event=>{
+      document.body.classList.remove('workspace-editing');
+      document.getElementById('open-advanced').focus({preventScroll:true});
+    });
+    for(const target of ['crop','table'])document.getElementById(target==='table'?'modeled-workspace-edit':'workspace-crop-edit').addEventListener('click',()=>{
+      if(displayModeSelect.value==='rgb_camera') {displayModeSelect.value='independent_mesh';applyDisplayMode();sendViewSettings();}
+      if(window.editGodotWorkspace?.(target)) {advancedSetup.hidden=true;document.body.classList.add('workspace-editing');}
+      else document.getElementById(target==='table'?'modeled-workspace-status':'workspace-crop-status').textContent='Open a connected 3D view to edit this workspace.';
+    });
+    for(const axis of ['x','y','z'])document.getElementById(`workspace-crop-rotation-${axis}`).addEventListener('change',()=>{if(updateCropControls())sendViewSettings();});
     document.getElementById("open-advanced").addEventListener("click", () => {
       advancedSetup.hidden = false;
       refreshRgbCameras();
@@ -1158,6 +1356,19 @@
     advancedSetup.addEventListener("click", (event) => {
       if (event.target === advancedSetup) advancedSetup.hidden = true;
     });
+    function handleDepthOnlyShortcut(event) {
+      if (event.key !== "Backspace" || event.defaultPrevented || event.isComposing
+        || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+      const target = event.target;
+      if (target?.isContentEditable || target?.closest?.("input, textarea, select, [role='textbox']")) return;
+      if (!hybridMode || displayModeSelect.value === "rgb_camera") return;
+      event.preventDefault();
+      if (event.repeat) return;
+      const control = document.getElementById("depth-only-enabled");
+      control.checked = !control.checked;
+      sendViewSettings();
+    }
+    document.addEventListener("keydown", handleDepthOnlyShortcut);
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !advancedSetup.hidden) advancedSetup.hidden = true;
     });

@@ -1,7 +1,9 @@
 // GPU camera buffers and local surface confidence for the browser renderer.
 // Adapted from this project's Godot/RealSense BlendPCR port.
 // SPDX-License-Identifier: EUPL-1.2
-import { COLOR_PROJECTION_SHADER, bindColorProjection } from './hybrid_color_projection.js?v=20261020_color_coverage';
+import { COLOR_PROJECTION_SHADER, bindColorProjection, validatedColorProjection } from './hybrid_color_projection.js?v=20261021_original_rgb';
+
+import {RgbVisibility} from './hybrid_rgb_visibility.js?v=20261021_original_rgb';
 
 export const FULLSCREEN_VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -95,8 +97,7 @@ bool geometry(uint za,uint zb,uint zc,vec3 pa,vec3 pb,vec3 pc) {
 void main() {
   ivec2 p=ivec2(gl_FragCoord.xy);
   out_quality=vec4(0);
-  out_color=vec4(texelFetch(u_color,p,0).rgb,
-    camera_has_color(point(p,float(depth_mm(p))*0.001))?1.0:0.0);
+  out_color=camera_sample_color(u_color,point(p,float(depth_mm(p))*0.001),p);
   if(any(greaterThanEqual(p,u_size-ivec2(1))))return;
   ivec2 b=p+ivec2(1,0),c=p+ivec2(0,1),d=p+ivec2(1,1);
   uint za=depth_mm(p),zb=depth_mm(b),zc=depth_mm(c),zd=depth_mm(d);
@@ -124,8 +125,11 @@ export const RIG_SAMPLING_SHADER = `
 uniform highp usampler2DArray u_rig_depth;
 uniform highp sampler2DArray u_rig_quality;
 uniform highp sampler2DArray u_rig_color;
+uniform highp sampler2DArray u_rig_rgb;
+uniform highp sampler2DArray u_rig_visibility;
+uniform highp int u_rig_original_rgb_enabled;
 #ifdef RIG_UNIFORM_DATA
-uniform highp vec4 u_rig_uniform_data[RIG_CAMERA_CAPACITY*8];
+uniform highp vec4 u_rig_uniform_data[RIG_CAMERA_CAPACITY*13];
 #else
 uniform highp sampler2D u_rig_data;
 #endif
@@ -136,7 +140,7 @@ uniform vec4 u_mask_capsule_a[6];
 uniform vec4 u_mask_capsule_b[6];
 vec4 rig_data(int camera,int column) {
 #ifdef RIG_UNIFORM_DATA
-  return u_rig_uniform_data[camera*8+column];
+  return u_rig_uniform_data[camera*13+column];
 #else
   return texelFetch(u_rig_data,ivec2(column,camera),0);
 #endif
@@ -220,6 +224,62 @@ bool rig_better(float q,int index,float other,int other_index) {
   float a=rig_rank(q),b=rig_rank(other);
   return a>b || (a==b&&index<other_index);
 }
+vec3 rig_world_normal(int camera,vec3 normal) {
+  return normalize(rig_world(camera,normal)-rig_world(camera,vec3(0)));
+}
+// Color can use an agreeing planar RGB view when millimetre stereo error
+// places its measured surface just beyond the stricter geometry-owner test.
+// This never moves geometry, averages depth, or colors across a sharp edge.
+bool rig_color_agrees(int camera,vec3 world,vec3 normal,RigHit peer) {
+  if(!peer.color_valid||peer.confidence<0.95)return false;
+  float expected=-rig_local(camera,world).z;
+  return abs(-peer.local.z-expected)<=max(rig_tolerance(expected),0.012)
+    &&abs(dot(normal,rig_world_normal(camera,peer.normal)))>=0.985;
+}
+// Color projects the *same world point* into the independent RGB sensor.
+// Visibility is rendered from ALL measured cameras, so a peer depth hole or
+// a different triangulation cannot suppress an otherwise visible RGB image.
+bool rig_rgb_sample(int camera,vec3 world,vec3 normal,out vec3 color,out float score) {
+  if(rig_data(camera,4).z<0.5||rig_data(camera,12).z<0.5)return false;
+  vec3 local=rig_local(camera,world)*vec3(1.0,-1.0,-1.0);
+  vec4 h=vec4(local,1.0);
+  vec3 p=vec3(dot(rig_data(camera,8),h),dot(rig_data(camera,9),h),dot(rig_data(camera,10),h));
+  vec4 k=rig_data(camera,11);vec2 size=rig_data(camera,12).xy;
+  if(p.z<=0.01)return false;
+  vec2 pixel=p.xy/p.z*k.xy+k.zw;
+  if(any(lessThan(pixel,vec2(0)))||any(greaterThan(pixel,size-vec2(1))))return false;
+  ivec2 q=ivec2(floor(pixel)),end=ivec2(size)-1;
+  // Bilinear RGB touches four pixels; guard all four against nearer geometry.
+  float observed=min(min(texelFetch(u_rig_visibility,ivec3(q,camera),0).r,
+      texelFetch(u_rig_visibility,ivec3(min(q+ivec2(1,0),end),camera),0).r),
+    min(texelFetch(u_rig_visibility,ivec3(min(q+ivec2(0,1),end),camera),0).r,
+      texelFetch(u_rig_visibility,ivec3(min(q+ivec2(1),end),camera),0).r));
+  float visible_z=(0.01*65.535)/(65.535-observed*(65.535-0.01));
+  if(visible_z<p.z-max(0.004,0.004*p.z*p.z))return false;
+  vec3 origin=rig_world(camera,vec3(0));vec3 ray=world-origin;
+  float range_sq=max(dot(ray,ray),0.0001);
+  float incidence=abs(dot(normal,ray*inversesqrt(range_sq)));
+  float edge=min(min(pixel.x,pixel.y),min(size.x-1.0-pixel.x,size.y-1.0-pixel.y));
+  score=k.x*k.y*1e-6*max(incidence,0.02)/range_sq*smoothstep(0.0,8.0,edge);
+  if(score<=0.0)return false;
+  color=textureLod(u_rig_rgb,vec3((pixel+vec2(0.5))/vec2(textureSize(u_rig_rgb,0).xy),float(camera)),0.0).rgb;
+  return true;
+}
+vec3 rig_rgb_linear(vec3 c){return mix(c/12.92,pow(max((c+.055)/1.055,vec3(0)),vec3(2.4)),step(vec3(.04045),c));}
+vec3 rig_rgb_srgb(vec3 c){return mix(c*12.92,1.055*pow(max(c,vec3(0)),vec3(1.0/2.4))-.055,step(vec3(.0031308),c));}
+vec3 rig_projected_color(vec3 world,vec3 normal,vec3 fallback) {
+  vec3 color=vec3(0);float total=0.0;
+  for(int camera=0;camera<u_rig_count;camera++) {
+    vec3 rgb;float score;
+    bool valid=rig_rgb_sample(camera,world,normal,rgb,score);
+    if(!valid)continue;
+    // Squared projected pixel density favors close, detailed views while
+    // continuously blending their calibrated coverage edges in linear light.
+    float weight=score*score;
+    color+=rig_rgb_linear(rgb)*weight;total+=weight;
+  }
+  return total>1e-12?rig_rgb_srgb(color/total):fallback;
+}
 float rig_free_space_margin(float confidence,float expected) {
   bool strong_support=confidence>=0.95;
   return max(strong_support?0.012:0.008,rig_tolerance(expected)*(strong_support?3.0:2.0));
@@ -266,7 +326,7 @@ bool rig_veto(int own_index,vec3 world) {
 `;
 
 export class GpuCameraRig {
-  constructor(gl) {
+  constructor(gl, {copyDepthOnGpu = true} = {}) {
     this.gl = gl;
     this.signature = "";
     this.uploads = [];
@@ -280,18 +340,24 @@ export class GpuCameraRig {
     this.metadataValues = null;
     this.maxLayers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS);
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    this.copyDepthOnGpu = copyDepthOnGpu;
+    this.visibility=new RgbVisibility(gl,compileGpuProgram,gpuTexture);
   }
 
   clear() {
     const gl = this.gl;
+    this.visibility.clear();
+    if(this.rgb&&this.rgb!==this.color)gl.deleteTexture(this.rgb);this.rgb=null;
     for (const key of ["depth", "data", "quality", "color"]) {
       if (this[key]) gl.deleteTexture(this[key]);
       this[key] = null;
     }
     if (this.framebuffer) gl.deleteFramebuffer(this.framebuffer);
+    if (this.depthCopyFramebuffer) gl.deleteFramebuffer(this.depthCopyFramebuffer);
+    if (this.colorCopyFramebuffer)gl.deleteFramebuffer(this.colorCopyFramebuffer);this.colorCopyFramebuffer=null;
     if (this.vao) gl.deleteVertexArray(this.vao);
     if (this.program) gl.deleteProgram(this.program);
-    this.framebuffer = this.vao = this.program = null;
+    this.depthCopyFramebuffer = this.framebuffer = this.vao = this.program = null;
     this.signature = this.metadataSignature = "";
     this.uploads = [];
     this.count = 0;
@@ -304,17 +370,18 @@ export class GpuCameraRig {
     let locations = this.bindings.get(program);
     if (!locations) {
       locations = {};
-      for (const name of ["depth","data","quality","color","count"]) locations[name] = gl.getUniformLocation(program,`u_rig_${name}`);
+      for (const name of ["depth","data","quality","color","rgb","visibility","count","original_rgb_enabled"]) locations[name] = gl.getUniformLocation(program,`u_rig_${name}`);
       locations.uniformData=gl.getUniformLocation(program,"u_rig_uniform_data[0]");
       this.bindings.set(program,locations);
     }
     for (const [key, unit, target] of [["depth",4,gl.TEXTURE_2D_ARRAY],["data",5,gl.TEXTURE_2D],
-      ["quality",6,gl.TEXTURE_2D_ARRAY],["color",7,gl.TEXTURE_2D_ARRAY]]) {
+      ["quality",6,gl.TEXTURE_2D_ARRAY],["color",7,gl.TEXTURE_2D_ARRAY],["rgb",14,gl.TEXTURE_2D_ARRAY],["visibility",15,gl.TEXTURE_2D_ARRAY]]) {
       gl.activeTexture(gl.TEXTURE0 + unit);
-      gl.bindTexture(target,this[key]);
+      gl.bindTexture(target,key==="visibility"?this.visibility.texture:this[key]);
       gl.uniform1i(locations[key],unit);
     }
     gl.uniform1i(locations.count,this.count);
+    gl.uniform1i(locations.original_rgb_enabled,this.originalRgb?1:0);
     if(locations.uniformData!==null&&this.metadataValues)gl.uniform4fv(locations.uniformData,this.metadataValues);
   }
 
@@ -322,20 +389,25 @@ export class GpuCameraRig {
     const gl = this.gl;
     if (!cameras.length) {this.clear();return;}
     const width = Math.max(...cameras.map(c => c.width)), height = Math.max(...cameras.map(c => c.height));
+    const colorWidth=Math.max(...cameras.map(c=>c.colorWidth||c.width)),colorHeight=Math.max(...cameras.map(c=>c.colorHeight||c.height));
+    const originalRgb=cameras.some(c=>c.metadata.color_space==='original_rgb');
     if (cameras.length > this.maxLayers
-      || Math.max(width,height,cameras.length) > this.maxTextureSize) {
+      || Math.max(width,height,colorWidth,colorHeight,cameras.length) > this.maxTextureSize) {
       throw new Error("Camera rig exceeds this GPU's texture limits; using independent mesh");
     }
-    const signature = JSON.stringify(cameras.map(c => [c.metadata.id,c.width,c.height]));
+    const signature = JSON.stringify(cameras.map(c => [c.metadata.id,c.width,c.height,c.colorWidth,c.colorHeight,c.metadata.color_space]));
     if (signature === this.failedSignature) throw new Error("GPU camera cache unavailable");
     if (signature !== this.signature) {
       this.clear();
       try {
         this.depth = gpuTexture(gl,gl.TEXTURE_2D_ARRAY,4,gl.R16UI,width,height,cameras.length);
-        this.data = gpuTexture(gl,gl.TEXTURE_2D,5,gl.RGBA32F,8,cameras.length);
+        this.data = gpuTexture(gl,gl.TEXTURE_2D,5,gl.RGBA32F,13,cameras.length);
         this.quality = gpuTexture(gl,gl.TEXTURE_2D_ARRAY,6,gl.RGBA8,width,height,cameras.length);
         this.color = gpuTexture(gl,gl.TEXTURE_2D_ARRAY,7,gl.RGBA8,width,height,cameras.length);
+        this.rgb=originalRgb?gpuTexture(gl,gl.TEXTURE_2D_ARRAY,14,gl.RGBA8,colorWidth,colorHeight,cameras.length,true):this.color;
+        this.colorCopyFramebuffer=gl.createFramebuffer();
         this.framebuffer = gl.createFramebuffer();
+        if(this.copyDepthOnGpu)this.depthCopyFramebuffer = gl.createFramebuffer();
         this.vao = gl.createVertexArray();
         this.program = compileGpuProgram(gl,FULLSCREEN_VERTEX_SHADER,QUALITY_FRAGMENT_SHADER);
         this.uniforms = {};
@@ -357,19 +429,25 @@ export class GpuCameraRig {
       } catch (error) {this.clear();this.failedSignature=signature;throw error;}
     }
     this.count = cameras.length;
+    this.originalRgb=originalRgb;
     const delta = Number(settings.mesh_depth_delta || 0.045), edge = Number(settings.mesh_max_edge || 0.08);
-    const metadata = new Float32Array(cameras.length * 32);
+    const metadata = new Float32Array(cameras.length * 52);
     const changed = [];
     cameras.forEach((camera,index) => {
       const m = inverseTransform(camera.modelMatrix), w = camera.modelMatrix;
       metadata.set([m[0],m[4],m[8],m[12],m[1],m[5],m[9],m[13],m[2],m[6],m[10],m[14],
         ...camera.intrinsicsArray,camera.width,camera.height,now-camera.lastUpdateMs<1000?1:0,0,
-        w[0],w[4],w[8],w[12],w[1],w[5],w[9],w[13],w[2],w[6],w[10],w[14]],index*32);
+        w[0],w[4],w[8],w[12],w[1],w[5],w[9],w[13],w[2],w[6],w[10],w[14]],index*52);
+      const p=validatedColorProjection(camera.metadata);
+      if(p){const e=p.extrinsics;
+        metadata.set([e[0],e[3],e[6],e[9],e[1],e[4],e[7],e[10],e[2],e[5],e[8],e[11],
+          ...p.intrinsics,...p.size,camera.metadata.color_space==='original_rgb'?1:0,1],index*52+32);
+      }
       const revision = `${camera.uploadRevision ?? camera.lastUpdateMs}:${delta}:${edge}:${camera.intrinsicsArray}`;
       const previous = this.uploads[index];
       if (!previous || previous.camera !== camera || previous.revision !== revision) changed.push({camera,index,revision});
     });
-    const key = metadata.toString();
+    const key = metadata.toString()+":"+(settings.depth_only_enabled===true?"gray":"color");
     this.metadataValues = metadata;
     if (!changed.length && key === this.metadataSignature) return;
     const oldFramebuffer = restoreState ? restoreState.framebuffer : gl.getParameter(gl.FRAMEBUFFER_BINDING);
@@ -388,7 +466,14 @@ export class GpuCameraRig {
       changed.forEach(({camera,index,revision}) => {
         // Upload revision is monotonic even when two packets share a timer tick.
         gl.activeTexture(gl.TEXTURE4);gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.depth);
-        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY,0,0,0,index,camera.width,camera.height,1,gl.RED_INTEGER,gl.UNSIGNED_SHORT,camera.depth);
+        if(this.copyDepthOnGpu) {
+          // Reuse the exact R16UI upload already made by uploadCamera. This
+          // GPU copy avoids transferring the same native depth array twice.
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER,this.depthCopyFramebuffer);
+          gl.framebufferTexture2D(gl.READ_FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,camera.depthTexture,0);
+          gl.readBuffer(gl.COLOR_ATTACHMENT0);
+          gl.copyTexSubImage3D(gl.TEXTURE_2D_ARRAY,0,0,0,index,0,0,camera.width,camera.height);
+        } else gl.texSubImage3D(gl.TEXTURE_2D_ARRAY,0,0,0,index,camera.width,camera.height,1,gl.RED_INTEGER,gl.UNSIGNED_SHORT,camera.depth);
         gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,camera.depthTexture);
         gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,camera.colorTexture);
         gl.bindFramebuffer(gl.FRAMEBUFFER,this.framebuffer);
@@ -399,14 +484,23 @@ export class GpuCameraRig {
         gl.uniform4fv(u.u_intrinsics,camera.intrinsicsArray);
         bindColorProjection(gl,this.program,camera);
         gl.drawArrays(gl.TRIANGLES,0,3);
+        if(originalRgb) {
+          // Copy the original RGB texture on-GPU. Never resample onto depth UVs.
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER,this.colorCopyFramebuffer);
+          gl.framebufferTexture2D(gl.READ_FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,camera.colorTexture,0);
+          gl.readBuffer(gl.COLOR_ATTACHMENT0);
+          gl.activeTexture(gl.TEXTURE14);gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.rgb);
+          gl.copyTexSubImage3D(gl.TEXTURE_2D_ARRAY,0,0,0,index,0,0,camera.colorWidth||camera.width,camera.colorHeight||camera.height);
+        }
         this.uploads[index] = {camera,revision};this.rebuilds++;
       });
       // Transforms/freshness can change without a new depth capture.
       if (key !== this.metadataSignature) {
         gl.activeTexture(gl.TEXTURE5);gl.bindTexture(gl.TEXTURE_2D,this.data);
-        gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,8,cameras.length,gl.RGBA,gl.FLOAT,metadata);
+        gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,13,cameras.length,gl.RGBA,gl.FLOAT,metadata);
         this.metadataSignature = key;
       }
+      this.visibility.update(cameras,this.quality,inverseTransform,originalRgb,now,settings.depth_only_enabled!==true);
       this.version++;
     } catch (error) {
       this.failedSignature=signature;

@@ -1,9 +1,14 @@
-import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_color_coverage";
+import {WorkspaceEditor} from './workspace_editor.js?v=20261021_original_rgb';
+import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261021_original_rgb";
 
-import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_color_coverage";
+import { BrowserBlendPCR, nativeMeshIndices } from "./hybrid_blendpcr.js?v=20261021_original_rgb";
+import { DEPTH_SHADING_SHADER } from "./depth_shading.js?v=20261020_depth_only";
 import { CameraRgbViewer } from "./camera_rgb_viewer.js?v=20261020_color_recovery";
-import { NativeRgbdDecoderPool, isIndependentNativeFrame, takeIndependentFrameBatch } from "./rgbd_decode_pool.js?v=20261020_native_pixels";
-import { COLOR_PROJECTION_SHADER, bindColorProjection } from './hybrid_color_projection.js?v=20261020_color_coverage';
+import { NativeRgbdDecoderPool, isIndependentNativeFrame, takeIndependentFrameBatch } from "./rgbd_decode_pool.js?v=20261021_original_rgb";
+import { COLOR_PROJECTION_SHADER, bindColorProjection, colorFrameDimensions } from './hybrid_color_projection.js?v=20261021_original_rgb';
+import { WORKSPACE_CROP_SHADER, WORKSPACE_CROP_CONTEXT, bindWorkspaceCrop, workspaceCropBounds, workspaceSourceWindow, workspaceCropLines, workspaceVisibleTiles, bindWorkspaceTiles, unbindWorkspaceTiles } from './workspace_crop.js?v=20261021_original_rgb';
+import { MODELED_WORKSPACE_DEFAULTS, MODELED_WORKSPACE_SHADER, ModeledWorkspaceRenderer, modeledWorkspace, modeledWorkspaceBounds, bindModeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
+import {SCENE_LIGHTING_SHADER,bindSceneLighting,SceneShadowRenderer} from './scene_lighting.js?v=20261021_lit_workspace';
 
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},
@@ -27,6 +32,9 @@ const state = {
   gl: null,
   program: null,
   uniforms: null,
+  indexedProgram: null,
+  indexedUniforms: null,
+  indexedUnavailable: false,
   cameraFusion: null,
   blendPCR: null,
   robotProgram: null,
@@ -40,6 +48,7 @@ const state = {
   robotRenderer: EMPTY_ROBOT_RENDERER,
   robotTransforms: {},
   robotTransformsUpdatedMs: 0,
+  robotRegistration: null,
   manualRgbCanvas: null,
   manualCropCanvas: null,
   manualRgbBaseCanvas: null,
@@ -75,6 +84,7 @@ const state = {
   animationFrame: 0,
   lastRenderMs: 0,
   pendingFrameQueue: [],
+  pendingCameraUploads: new Map(),
   temporalDepthKeyframes: new Map(),
   temporalColorKeyframes: new Map(),
   persistentMetadata: null,
@@ -122,12 +132,19 @@ const state = {
     robot_overlay_style: "alignment",
     robot_overlay_mask_scanned_robot: true,
     white_background_enabled: false,
+    depth_only_enabled: false,
     workspace_surface_enabled: false,
     workspace_boundary_enabled: false,
     camera_locations_enabled: false,
     workspace_surface_offset: 0,
     workspace_surface_size: 1.2,
     workspace_surface_opacity: 0.18,
+    ...MODELED_WORKSPACE_DEFAULTS,
+    workspace_crop_enabled: false,
+    workspace_crop_show_box: false,
+    workspace_crop_rotation: [0,0,0],
+    workspace_crop_min: [-0.6, -0.45, -0.6],
+    workspace_crop_max: [0.6, 0.45, 0.6],
   },
   stats: {
     status: "idle",
@@ -198,6 +215,30 @@ flat out uint v_triangle_id;
 uniform highp sampler2DArray u_rig_quality;
 uniform highp int u_rig_index;
 uniform highp int u_quality_enabled;
+uniform ivec2 u_source_origin;
+uniform ivec2 u_source_size;
+uniform highp int u_sparse_tiles;
+layout(location=0) in uvec2 a_source_tile;
+layout(location=1) in uint a_source_vertex;
+${WORKSPACE_CROP_SHADER}
+${MODELED_WORKSPACE_SHADER}
+
+bool robot_masked(vec3 world) {
+  for(int index=0;index<6;index++) {
+    vec3 segment=u_mask_capsule_b[index].xyz-u_mask_capsule_a[index].xyz;
+    float length_squared=dot(segment,segment);
+    float along=length_squared>0.000001
+      ?clamp(dot(world-u_mask_capsule_a[index].xyz,segment)/length_squared,0.0,1.0):0.0;
+    vec3 offset=world-u_mask_capsule_a[index].xyz-segment*along;
+    if(dot(offset,offset)<=u_mask_capsule_a[index].w*u_mask_capsule_a[index].w)return true;
+  }
+  return false;
+}
+vec3 source_world(ivec2 pixel) {
+  float z=float(texelFetch(u_depth,pixel,0).r)*0.001;
+  return (u_model*vec4((float(pixel.x)-u_intrinsics.z)*z/u_intrinsics.x,
+    -(float(pixel.y)-u_intrinsics.w)*z/u_intrinsics.y,-z,1.0)).xyz;
+}
 
 bool depth_supported(ivec2 pixel, uint depth_mm) {
   float tolerance_mm = max(2.0, u_mesh_depth_delta * float(depth_mm) * 0.5);
@@ -213,18 +254,42 @@ bool depth_supported(ivec2 pixel, uint depth_mm) {
 }
 
 void main() {
+  int vertex_id=u_sparse_tiles==1?int(a_source_vertex):gl_VertexID;
   v_source_pixel = vec2(0.0);
   v_world_position = vec3(0.0);
-  v_triangle_id = uint(gl_VertexID / 3 + 1);
+  v_triangle_id = uint(vertex_id / 3 + 1);
   ivec2 pixel_coord;
   bool triangle_valid = true;
+  ivec2 source_size=all(greaterThan(u_source_size,ivec2(0)))?u_source_size:u_size;
   if (u_render_mode == 1) {
-    int cells_x = u_size.x - 1;
-    int vertex_in_cell = gl_VertexID % 6;
-    int cell_index = gl_VertexID / 6;
+#ifdef INDEXED_NATIVE_MESH
+      int grid_width=u_sparse_tiles==1?33:u_size.x;
+      int grid_count=grid_width*(u_sparse_tiles==1?9:2);
+      ivec2 grid_origin=u_sparse_tiles==1?ivec2(a_source_tile):ivec2(0,gl_InstanceID+u_source_origin.y);
+      if(vertex_id<grid_count)pixel_coord=ivec2(vertex_id%grid_width,vertex_id/grid_width)+grid_origin;
+      else {
+        int primitive=vertex_id-grid_count,cell=primitive/2;
+        ivec2 top_left=ivec2(cell%(grid_width-1),cell/(grid_width-1))+grid_origin;
+        bool inside=all(lessThan(top_left,u_size-ivec2(1)));
+        vec4 quality=inside?texelFetch(u_rig_quality,ivec3(top_left,u_rig_index),0):vec4(0);
+        bool valid=((primitive%2)==0?quality.r:quality.g)>0.5;
+        // A rejected triangle collapses onto its first corner. Valid triangles
+        // keep all three exact native samples; neighboring triangles share
+        // their other vertices in the GPU's post-transform cache.
+        pixel_coord=valid?top_left+ivec2(0,1):top_left+ivec2((primitive%2)==0?0:1,0);
+      }
+      pixel_coord=min(pixel_coord,u_size-ivec2(1));
+#else
+    int cells_x = u_sparse_tiles==1?32:source_size.x - 1;
+    int vertex_in_cell = vertex_id % 6;
+    int cell_index = vertex_id / 6;
     int cell_x = cell_index % cells_x;
     int cell_y = cell_index / cells_x;
-    ivec2 top_left = ivec2(cell_x, cell_y);
+    ivec2 top_left = ivec2(cell_x, cell_y)+(u_sparse_tiles==1?ivec2(a_source_tile):u_source_origin);
+    if(any(greaterThanEqual(top_left,u_size-ivec2(1)))) {
+      gl_Position=vec4(2.0,2.0,2.0,1.0);v_valid=0.0;v_color=vec3(0);return;
+    }
+    v_triangle_id=uint((top_left.y*(u_size.x-1)+top_left.x)*2+(vertex_in_cell/3)+1);
     ivec2 top_right = top_left + ivec2(1, 0);
     ivec2 bottom_left = top_left + ivec2(0, 1);
     ivec2 bottom_right = top_left + ivec2(1, 1);
@@ -242,6 +307,12 @@ void main() {
       triangle_c = bottom_left;
       pixel_coord = vertex_in_cell == 3 ? triangle_a : (vertex_in_cell == 4 ? triangle_b : triangle_c);
     }
+    // The final corner supplies the flat triangle ID. Reject the complete
+    // native triangle if any corner is scanned arm, matching BlendPCR's hit
+    // reconstruction without interpolation-dependent fragments at the edge.
+    if(u_robot_mask_enabled==1&&(vertex_in_cell==2||vertex_in_cell==5)
+      &&(robot_masked(source_world(triangle_a))||robot_masked(source_world(triangle_b))||robot_masked(source_world(triangle_c))))
+      v_triangle_id=0u;
     if (u_quality_enabled == 1) {
       vec4 quality = texelFetch(u_rig_quality, ivec3(top_left,u_rig_index), 0);
       triangle_valid = (vertex_in_cell < 3 ? quality.r : quality.g) > 0.5;
@@ -269,8 +340,13 @@ void main() {
       && depth_supported(triangle_b, depth_b)
       && depth_supported(triangle_c, depth_c);
     }
+#endif
   } else {
-    pixel_coord = ivec2(gl_VertexID % u_size.x, gl_VertexID / u_size.x);
+    pixel_coord = u_sparse_tiles==1?ivec2(vertex_id%32,vertex_id/32)+ivec2(a_source_tile)
+      :ivec2(vertex_id % source_size.x, vertex_id / source_size.x)+u_source_origin;
+    if(any(greaterThanEqual(pixel_coord,u_size))) {
+      gl_Position=vec4(2.0,2.0,2.0,1.0);gl_PointSize=0.0;v_valid=0.0;v_color=vec3(0);return;
+    }
   }
   int x = pixel_coord.x;
   int y = pixel_coord.y;
@@ -292,8 +368,11 @@ void main() {
     -z
   );
   vec3 world_position = (u_model * vec4(local_position, 1.0)).xyz;
+  if(u_render_mode!=1 && (workspace_crop_outside(world_position)||modeled_workspace_outside(world_position))) {
+    gl_Position=vec4(2.0,2.0,2.0,1.0);gl_PointSize=0.0;v_color=vec3(0);v_valid=0.0;return;
+  }
   v_local_position = local_position;
-  if (u_robot_mask_enabled == 1) {
+  if (u_robot_mask_enabled == 1 && u_render_mode != 1) {
     for (int index = 0; index < 6; index++) {
       vec3 segment = u_mask_capsule_b[index].xyz - u_mask_capsule_a[index].xyz;
       float segment_length_squared = dot(segment, segment);
@@ -346,15 +425,23 @@ in float v_valid;
 in vec3 v_local_position;
 uniform highp int u_render_mode;
 uniform highp int u_quality_enabled;
+uniform highp int u_depth_only_enabled;
+uniform mat4 u_model;
 uniform sampler2D u_color;
 uniform ivec2 u_size;
+flat in uint v_triangle_id;
 out vec4 out_color;
 
 ${FUSION_FRAGMENT_SHADER}
 ${COLOR_PROJECTION_SHADER}
+${DEPTH_SHADING_SHADER}
+${WORKSPACE_CROP_SHADER}
+${MODELED_WORKSPACE_SHADER}
 
 void main() {
   if (v_valid < 0.9999) discard;
+  if (u_render_mode == 1 && v_triangle_id == 0u) discard;
+  if (workspace_crop_outside(v_world_position)||modeled_workspace_outside(v_world_position)) discard;
   if (u_render_mode == 1 && rig_overlap()) discard;
   // A surface triangle is only usable when all three vertices survived the
   // depth-continuity test. Interpolation makes v_valid less than one if even
@@ -364,15 +451,25 @@ void main() {
     vec2 centered = gl_PointCoord * 2.0 - 1.0;
     if (dot(centered, centered) > 1.0) discard;
   }
-  vec3 color = u_render_mode == 1
-    ? texelFetch(u_color, clamp(ivec2(floor(v_source_pixel + 0.5)), ivec2(0), u_size - 1), 0).rgb
-    : v_color;
-  bool has_color;
-  if(u_quality_enabled==1) {
-    vec4 sample_color=texelFetch(u_rig_color,ivec3(clamp(ivec2(floor(v_source_pixel+0.5)),ivec2(0),u_size-1),u_rig_index),0);
-    has_color=sample_color.a>0.5;color=sample_color.rgb;
-  } else has_color=camera_has_color(v_local_position);
-  if(!has_color)color=vec3(0.34);
+  if (u_depth_only_enabled == 1) {
+    vec3 normal;
+    if (u_render_mode == 1) {
+      normal = cross(dFdx(v_world_position), dFdy(v_world_position));
+    } else {
+      // Points have no rasterized surface derivatives. Use a neighboring
+      // measured triangle when available, retaining isolated depth samples.
+      RigHit hit;
+      normal = mat3(u_model) * vec3(0.0, 0.0, 1.0);
+      if (u_quality_enabled == 1 && rig_surface(u_rig_index, v_world_position, hit))
+        normal = mat3(u_model) * hit.normal;
+    }
+    out_color = vec4(depth_surface_gray(normal), 1.0);
+    return;
+  }
+  vec4 source_color=camera_sample_color(u_color,v_local_position,
+    clamp(ivec2(floor(v_source_pixel+0.5)),ivec2(0),u_size-1));
+  vec3 color=source_color.a>0.5?source_color.rgb:vec3(0.34);
+  bool has_color=source_color.a>0.5;
   out_color = vec4(rig_color(color,has_color), 1.0);
 }
 `;
@@ -386,9 +483,13 @@ uniform mat4 u_view_projection;
 uniform mat4 u_model;
 uniform vec2 u_viewport;
 uniform float u_outline_pixels;
+out vec3 v_robot_normal;
+out vec3 v_robot_world;
 
 void main() {
   vec4 world = u_model * vec4(a_position, 1.0);
+  v_robot_world=world.xyz;
+  v_robot_normal=transpose(inverse(mat3(u_model)))*a_normal;
   vec4 clip = u_view_projection * world;
   if (u_outline_pixels > 0.0 && dot(a_normal, a_normal) > 0.01) {
     mat3 normal_matrix = transpose(inverse(mat3(u_model)));
@@ -408,10 +509,13 @@ const ROBOT_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 
 uniform vec4 u_color;
+in vec3 v_robot_normal;
+in vec3 v_robot_world;
 out vec4 out_color;
+${SCENE_LIGHTING_SHADER}
 
 void main() {
-  out_color = u_color;
+  out_color = vec4(scene_material(u_color.rgb,v_robot_normal,v_robot_world,vec2(.6,.08)),u_color.a);
 }
 `;
 
@@ -545,6 +649,8 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
+const standardSurfacePrograms=new WeakSet();
+
 function createProgram(gl, vertexSource = VERTEX_SHADER, fragmentSource = FRAGMENT_SHADER) {
   const vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
   const fragment = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
@@ -555,11 +661,45 @@ function createProgram(gl, vertexSource = VERTEX_SHADER, fragmentSource = FRAGME
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const message = gl.getProgramInfoLog(program) || "shader linking failed";
+    const message = gl.getProgramInfoLog(program) || `shader linking failed (GL ${gl.getError()}, context lost ${gl.isContextLost()})`;
     gl.deleteProgram(program);
     throw new Error(message);
   }
+  if(vertexSource===VERTEX_SHADER&&fragmentSource===FRAGMENT_SHADER)standardSurfacePrograms.add(program);
   return program;
+}
+
+function ensureIndexedProgram() {
+  if(state.indexedUnavailable)return false;
+  if(state.indexedProgram)return true;
+  const gl=state.gl;
+  try {
+    state.indexedProgram=createProgram(gl,VERTEX_SHADER.replace('#version 300 es','#version 300 es\n#define INDEXED_NATIVE_MESH'));
+    state.indexedUniforms=findUniforms(gl,state.indexedProgram);
+    gl.useProgram(state.indexedProgram);
+    for(const [name,unit] of [['depth',0],['color',1],['fusionDepth',2],['fusionColor',3],['rigDepth',4],['rigData',5],['rigQuality',6],['rigColor',7]])
+      gl.uniform1i(state.indexedUniforms[name],unit);
+    gl.uniform1f(state.indexedUniforms.maxPointSize,Math.min(32,gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]));
+    return true;
+  } catch(_) {state.indexedUnavailable=true;return false;}
+}
+
+// Separate original-RGB and legacy color shaders. Keeping both large camera
+// loops live in one shader exceeds some ANGLE/D3D compiler limits.
+function ensureOriginalProgram(indexed=false) {
+  const key=indexed?'originalIndexed':'original';
+  if(state[key+'Unavailable'])return false;
+  if(state[key+'Program'])return true;
+  const gl=state.gl;
+  try {
+    const vertex=indexed?VERTEX_SHADER.replace('#version 300 es','#version 300 es\n#define INDEXED_NATIVE_MESH'):VERTEX_SHADER;
+    const fragment=FRAGMENT_SHADER.replace('#version 300 es','#version 300 es\n#define ORIGINAL_RGB');
+    const program=createProgram(gl,vertex,fragment),u=findUniforms(gl,program);
+    state[key+'Program']=program;state[key+'Uniforms']=u;gl.useProgram(program);
+    for(const [name,unit] of [['depth',0],['color',1],['fusionDepth',2],['fusionColor',3],['rigDepth',4],['rigData',5],['rigQuality',6],['rigColor',7]])gl.uniform1i(u[name],unit);
+    gl.uniform1f(u.maxPointSize,Math.min(32,gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]));
+    return true;
+  }catch(error){state[key+'Unavailable']=true;state.stats.renderWarning=String(error.message||error);return false;}
 }
 
 function findRobotUniforms(gl, program) {
@@ -853,7 +993,8 @@ function workspaceGuideGeometry() {
       );
     }
   }
-  return { anchorName, anchor, fill, grid, boundary };
+  const crop = workspaceCropLines(workspaceCropBounds(state.settings));
+  return { anchorName, anchor, fill, grid, boundary, crop };
 }
 
 function ensureWorkspaceGuide() {
@@ -866,6 +1007,7 @@ function ensureWorkspaceGuide() {
     state.settings.workspace_surface_offset,
     state.settings.workspace_surface_size,
     state.robotRenderer.workspaceBoundary || null,
+    state.settings.workspace_crop_enabled, state.settings.workspace_crop_min, state.settings.workspace_crop_max, state.settings.workspace_crop_rotation,
   ]);
   if (state.workspaceGuide?.signature === signature) return state.workspaceGuide;
   deleteWorkspaceGuide(gl);
@@ -882,6 +1024,7 @@ function ensureWorkspaceGuide() {
       fill: upload(geometry.fill, gl.TRIANGLES),
       grid: upload(geometry.grid, gl.LINES),
       boundary: upload(geometry.boundary, gl.LINES),
+      crop: upload(geometry.crop, gl.LINES),
     },
   };
   return state.workspaceGuide;
@@ -892,7 +1035,8 @@ function drawWorkspaceGuide(viewProjection) {
   const showSurface = state.settings.workspace_surface_enabled === true;
   const showBoundary = state.settings.workspace_boundary_enabled === true
     && state.robotRenderer.workspaceBoundary;
-  if (!showSurface && !showBoundary) return;
+  const showCrop = state.settings.workspace_crop_show_box === true && workspaceCropBounds(state.settings);
+  if (!showSurface && !showBoundary && !showCrop) return;
   const guide = ensureWorkspaceGuide();
   if (!guide) return;
   const gl = state.gl;
@@ -924,6 +1068,7 @@ function drawWorkspaceGuide(viewProjection) {
     draw(guide.items.grid, [0.22, 0.84, 1.0, Math.min(0.75, opacity + 0.24)]);
   }
   if (showBoundary) draw(guide.items.boundary, [1.0, 0.28, 0.08, 0.9]);
+  if (showCrop) draw(guide.items.crop, [0.22, 0.84, 1.0, 1.0]);
   gl.depthMask(true);
   gl.disable(gl.BLEND);
   gl.bindVertexArray(null);
@@ -1030,6 +1175,21 @@ function drawCameraGuides(viewProjection) {
   gl.bindVertexArray(null);
 }
 
+function drawRobotShadow(program,modelUniform) {
+  if(!state.settings.robot_overlay_enabled||state.settings.robot_overlay_style!=='solid'||!state.robotVao)return;
+  const gl=state.gl;gl.bindVertexArray(state.robotVao);
+  for(const [name,primitives] of Object.entries(state.robotMeshes)) {
+    const matrix=transformDictionaryMatrix(state.robotTransforms[name]);if(!matrix)continue;
+    for(const primitive of primitives) {
+      gl.bindBuffer(gl.ARRAY_BUFFER,primitive.positionBuffer);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,0,0);
+      gl.uniformMatrix4fv(modelUniform,false,multiplyMatrix(matrix,primitive.localMatrix));
+      if(primitive.indexBuffer){gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,primitive.indexBuffer);gl.drawElements(robotDrawMode(gl,primitive.mode),primitive.count,gl.UNSIGNED_INT,0);}
+      else gl.drawArrays(robotDrawMode(gl,primitive.mode),0,primitive.count);
+    }
+  }
+  gl.bindVertexArray(null);
+}
+
 function drawRobotOverlay(viewProjection) {
   if (!state.settings.robot_overlay_enabled || !state.robotProgram || !state.robotVao) return;
   const gl = state.gl;
@@ -1040,6 +1200,7 @@ function drawRobotOverlay(viewProjection) {
   gl.enable(gl.DEPTH_TEST);
   gl.depthFunc(gl.LEQUAL);
   const alignmentStyle = state.settings.robot_overlay_style === "alignment";
+  bindSceneLighting(gl,state.robotProgram,state.settings,state.currentViewer?.slice(12,15),state.sceneShadow,!alignmentStyle);
   const drawLinks = (outline) => {
     gl.uniform1f(state.robotUniforms.outlinePixels, outline ? 1.75 : 0.0);
     for (const [name, primitives] of Object.entries(state.robotMeshes)) {
@@ -1115,6 +1276,9 @@ function findUniforms(gl, program) {
     model: gl.getUniformLocation(program, "u_model"),
     intrinsics: gl.getUniformLocation(program, "u_intrinsics"),
     size: gl.getUniformLocation(program, "u_size"),
+    sourceOrigin: gl.getUniformLocation(program, "u_source_origin"),
+    sourceSize: gl.getUniformLocation(program, "u_source_size"),
+    sparseTiles: gl.getUniformLocation(program, "u_sparse_tiles"),
     pointSize: gl.getUniformLocation(program, "u_point_size"),
     maxPointSize: gl.getUniformLocation(program, "u_max_point_size"),
     rigEnabled: gl.getUniformLocation(program, "u_rig_enabled"),
@@ -1126,6 +1290,7 @@ function findUniforms(gl, program) {
     rigColor: gl.getUniformLocation(program, "u_rig_color"),
     rigColorEnabled: gl.getUniformLocation(program, "u_rig_color_enabled"),
     qualityEnabled: gl.getUniformLocation(program, "u_quality_enabled"),
+    depthOnlyEnabled: gl.getUniformLocation(program, "u_depth_only_enabled"),
     renderMode: gl.getUniformLocation(program, "u_render_mode"),
     meshDepthDelta: gl.getUniformLocation(program, "u_mesh_depth_delta"),
     meshMaxEdge: gl.getUniformLocation(program, "u_mesh_max_edge"),
@@ -1360,11 +1525,11 @@ function rgbaToRgb(rgba) {
 }
 
 async function decodeColor(bytes, metadata = {}) {
-  const width = Number(metadata.width || 0);
-  const height = Number(metadata.height || 0);
+  const [width,height] = colorFrameDimensions(metadata);
   const cameraKey = String(metadata.id || metadata.serial || metadata.model || "camera");
   if (metadata.color_encoding !== "rgb8_keyframe_tiles_jpeg") {
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: metadata.color_encoding==='png'?'image/png':'image/jpeg' }));
+    if(bitmap.width!==width||bitmap.height!==height){bitmap.close();throw new Error("color dimensions do not match metadata");}
     if (
       metadata.color_temporal_keyframe === true
       && Number(metadata.color_keyframe_id || 0) > 0
@@ -1562,10 +1727,11 @@ async function decodeColor(bytes, metadata = {}) {
 }
 
 async function decodeCamera(payload) {
-  let color, rawDepth;
+  let color, rawDepth, depthTiles=null;
   if (state.nativeDecoder && !state.nativeDecoder.disabled
       && state.socketOptions?.exactDepth === true && isIndependentNativeFrame(payload.metadata)) {
-    const decoded = await state.nativeDecoder.decode(payload);
+    const decoded = await state.nativeDecoder.decode({...payload,workspaceTiles:state.settings.workspace_crop_enabled===true});
+    depthTiles=decoded.depthTiles;
     color = {bitmap: decoded.bitmap, pixels: null,rgbaPixels:decoded.rgbaPixels};rawDepth = decoded.depth;
     for(const key of ["workerMs","dispatchMs"])state.stats[key]=state.stats[key]>0?state.stats[key]*.8+decoded[key]*.2:decoded[key];
   } else {
@@ -1587,6 +1753,8 @@ async function decodeCamera(payload) {
     width,
     height,
     depth,
+    depthTiles:depth===rawDepth?depthTiles:null,
+    colorWidth:colorFrameDimensions(payload.metadata)[0],colorHeight:colorFrameDimensions(payload.metadata)[1],
     bitmap: color.bitmap,
     colorPixels: color.pixels,
     colorRgbaPixels: color.rgbaPixels,
@@ -1597,67 +1765,78 @@ async function decodeCamera(payload) {
 
 function deleteCameraTextures(camera) {
   if (!state.gl) return;
-  if (camera.depthTexture) state.gl.deleteTexture(camera.depthTexture);
-  if (camera.colorTexture) state.gl.deleteTexture(camera.colorTexture);
+  for(const slot of camera.textureSlots||[camera]) {
+    if (slot.depthTexture) state.gl.deleteTexture(slot.depthTexture);
+    if (slot.colorTexture) state.gl.deleteTexture(slot.colorTexture);
+  }
   if (camera.meshIndexBuffer) state.gl.deleteBuffer(camera.meshIndexBuffer);
+  if (camera.cropTileBuffer?.buffer) state.gl.deleteBuffer(camera.cropTileBuffer.buffer);
+  if (camera.cropTileBuffer?.vertexBuffer) state.gl.deleteBuffer(camera.cropTileBuffer.vertexBuffer);
+  if (camera.cropIndexBuffer) state.gl.deleteBuffer(camera.cropIndexBuffer);
+  camera.cropTileBuffer=null;camera.cropIndexBuffer=null;
 }
 
-function createMeshIndexBuffer(gl, width, height) {
-  const indices = new Uint32Array((width - 1) * (height - 1) * 6);
-  let offset = 0;
-  for (let y = 0; y < height - 1; y += 1) {
-    for (let x = 0; x < width - 1; x += 1) {
-      const topLeft = y * width + x;
-      const topRight = topLeft + 1;
-      const bottomLeft = topLeft + width;
-      const bottomRight = bottomLeft + 1;
-      indices[offset++] = topLeft;
-      indices[offset++] = topRight;
-      indices[offset++] = bottomLeft;
-      indices[offset++] = topRight;
-      indices[offset++] = bottomRight;
-      indices[offset++] = bottomLeft;
-    }
-  }
+function createMeshIndexBuffer(gl, width) {
+  // Preserve the ordinary renderer's row-major tie order at shared edges.
+  // One two-row strip is instanced over every source row. Its indices fit in
+  // 16 bits for normal sensor grids and stay hot in the GPU's index cache.
+  const values = nativeMeshIndices(width, 2, false);
+  const indices = width*4-3<=65535?new Uint16Array(values):values;
   const buffer = gl.createBuffer();
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffer);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
-  return { buffer, count: indices.length };
+  return { buffer, count: indices.length, type: indices instanceof Uint16Array?gl.UNSIGNED_SHORT:gl.UNSIGNED_INT };
 }
 
 function ensureMeshIndexBuffer(camera) {
   if (camera.meshIndexBuffer || !state.gl || camera.width <= 1 || camera.height <= 1) return;
-  const mesh = createMeshIndexBuffer(state.gl, camera.width, camera.height);
+  const mesh = createMeshIndexBuffer(state.gl, camera.width);
   camera.meshIndexBuffer = mesh.buffer;
   camera.meshIndexCount = mesh.count;
+  camera.meshIndexType = mesh.type;
 }
 
 function uploadCamera(decoded) {
   const gl = state.gl;
+  [decoded.colorWidth,decoded.colorHeight]=colorFrameDimensions({...decoded.metadata,width:decoded.width,height:decoded.height});
   const previous = state.cameras.find((camera) => camera.metadata.id === decoded.metadata.id);
   const camera = previous || {};
-  if (!previous || previous.width !== decoded.width || previous.height !== decoded.height) {
+  if (!previous || previous.width !== decoded.width || previous.height !== decoded.height || previous.colorWidth !== decoded.colorWidth || previous.colorHeight !== decoded.colorHeight) {
     deleteCameraTextures(camera);
-    camera.depthTexture = gl.createTexture();
-    camera.colorTexture = gl.createTexture();
+    camera.textureSlots=[];
+    camera.textureSlotIndex=-1;
     camera.meshIndexBuffer = null;
     camera.meshIndexCount = 0;
+  }
+  const completeColor=decoded.colorRgbaPixels||decoded.bitmap||decoded.colorPixels;
+  // Rotate complete frames through a small texture ring. Uploading into the
+  // texture still sampled by an in-flight render can stall the main thread.
+  // Partial RGB updates keep their existing texture and temporal reference.
+  if(!camera.textureSlots.length||completeColor) {
+    camera.textureSlotIndex=(camera.textureSlotIndex+1)%(state.useUploadTextureRing===false?1:3);
+    let slot=camera.textureSlots[camera.textureSlotIndex];
+    if(!slot) {
+    slot={depthTexture:gl.createTexture(),colorTexture:gl.createTexture()};
+    camera.textureSlots[camera.textureSlotIndex]=slot;
 
-    gl.bindTexture(gl.TEXTURE_2D, camera.depthTexture);
+    gl.bindTexture(gl.TEXTURE_2D, slot.depthTexture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R16UI, decoded.width, decoded.height);
 
-    gl.bindTexture(gl.TEXTURE_2D, camera.colorTexture);
+    gl.bindTexture(gl.TEXTURE_2D, slot.colorTexture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     // Browser bitmaps are RGBA. RGB8 forces an extra format conversion on
     // ANGLE/D3D before each upload; the unused alpha does not change RGB.
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, decoded.width, decoded.height);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, decoded.colorWidth, decoded.colorHeight);
+    }
+    camera.depthTexture=slot.depthTexture;
+    camera.colorTexture=slot.colorTexture;
   }
   Object.assign(camera, decoded);
   camera.lastUpdateMs = performance.now();
@@ -1672,7 +1851,7 @@ function uploadCamera(decoded) {
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   updateManualRgbBase(camera);
   if (camera.colorRgbaPixels) {
-    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,camera.width,camera.height,gl.RGBA,gl.UNSIGNED_BYTE,camera.colorRgbaPixels);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,camera.colorWidth,camera.colorHeight,gl.RGBA,gl.UNSIGNED_BYTE,camera.colorRgbaPixels);
   } else if (camera.bitmap) {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, camera.bitmap);
     camera.bitmap.close();
@@ -1696,8 +1875,8 @@ function uploadCamera(decoded) {
       0,
       0,
       0,
-      camera.width,
-      camera.height,
+      camera.colorWidth,
+      camera.colorHeight,
       gl.RGBA,
       gl.UNSIGNED_BYTE,
       rgbToRgba(camera.colorPixels),
@@ -1732,15 +1911,15 @@ function updateManualRgbBase(camera) {
     base = document.createElement("canvas");
     state.manualRgbBaseCanvas = base;
   }
-  if (base.width !== camera.width || base.height !== camera.height) {
-    base.width = camera.width;
-    base.height = camera.height;
+  if (base.width !== camera.colorWidth || base.height !== camera.colorHeight) {
+    base.width = camera.colorWidth;
+    base.height = camera.colorHeight;
   }
   const context = base.getContext("2d", { alpha: false });
   if (camera.colorRgbaPixels) {
-    context.putImageData(new ImageData(new Uint8ClampedArray(camera.colorRgbaPixels.buffer),camera.width,camera.height),0,0);
+    context.putImageData(new ImageData(new Uint8ClampedArray(camera.colorRgbaPixels.buffer),camera.colorWidth,camera.colorHeight),0,0);
   } else if (camera.bitmap) {
-    context.drawImage(camera.bitmap, 0, 0, camera.width, camera.height);
+    context.drawImage(camera.bitmap, 0, 0, camera.colorWidth, camera.colorHeight);
   } else if (Array.isArray(camera.colorTileUpdates)) {
     for (const update of camera.colorTileUpdates) {
       context.putImageData(
@@ -1751,7 +1930,7 @@ function updateManualRgbBase(camera) {
     }
   } else if (camera.colorPixels) {
     context.putImageData(
-      new ImageData(rgbToRgba(camera.colorPixels), camera.width, camera.height),
+      new ImageData(rgbToRgba(camera.colorPixels), camera.colorWidth, camera.colorHeight),
       0,
       0,
     );
@@ -1775,15 +1954,15 @@ function updateRgbDisplay(camera) {
     base = document.createElement("canvas");
     state.rgbDisplayBaseCanvas = base;
   }
-  if (base.width !== camera.width || base.height !== camera.height) {
-    base.width = camera.width;
-    base.height = camera.height;
+  if (base.width !== camera.colorWidth || base.height !== camera.colorHeight) {
+    base.width = camera.colorWidth;
+    base.height = camera.colorHeight;
   }
   const baseContext = base.getContext("2d", { alpha: false });
   if (camera.colorRgbaPixels) {
-    baseContext.putImageData(new ImageData(new Uint8ClampedArray(camera.colorRgbaPixels.buffer),camera.width,camera.height),0,0);
+    baseContext.putImageData(new ImageData(new Uint8ClampedArray(camera.colorRgbaPixels.buffer),camera.colorWidth,camera.colorHeight),0,0);
   } else if (camera.bitmap) {
-    baseContext.drawImage(camera.bitmap, 0, 0, camera.width, camera.height);
+    baseContext.drawImage(camera.bitmap, 0, 0, camera.colorWidth, camera.colorHeight);
   } else if (Array.isArray(camera.colorTileUpdates)) {
     for (const update of camera.colorTileUpdates) {
       baseContext.putImageData(
@@ -1794,14 +1973,14 @@ function updateRgbDisplay(camera) {
     }
   } else if (camera.colorPixels) {
     baseContext.putImageData(
-      new ImageData(rgbToRgba(camera.colorPixels), camera.width, camera.height),
+      new ImageData(rgbToRgba(camera.colorPixels), camera.colorWidth, camera.colorHeight),
       0,
       0,
     );
   }
-  if (visible.width !== camera.width || visible.height !== camera.height) {
-    visible.width = camera.width;
-    visible.height = camera.height;
+  if (visible.width !== camera.colorWidth || visible.height !== camera.colorHeight) {
+    visible.width = camera.colorWidth;
+    visible.height = camera.colorHeight;
   }
   visible.getContext("2d", { alpha: false }).drawImage(base, 0, 0);
 }
@@ -1814,8 +1993,8 @@ function renderManualCalibrationPreview(camera) {
   if (visible.closest("[hidden]")) return;
   const model = String(camera.metadata.model || "").toLowerCase();
   if (state.cameras.length > 0 && !model.includes("455")) return;
-  visible.width = camera.width;
-  visible.height = camera.height;
+  visible.width = camera.colorWidth;
+  visible.height = camera.colorHeight;
   const context = visible.getContext("2d", { alpha: false });
   context.drawImage(base, 0, 0);
   let overlay = state.manualOverlayCanvas;
@@ -1823,9 +2002,9 @@ function renderManualCalibrationPreview(camera) {
     overlay = document.createElement("canvas");
     state.manualOverlayCanvas = overlay;
   }
-  if (overlay.width !== camera.width || overlay.height !== camera.height) {
-    overlay.width = camera.width;
-    overlay.height = camera.height;
+  if (overlay.width !== camera.colorWidth || overlay.height !== camera.colorHeight) {
+    overlay.width = camera.colorWidth;
+    overlay.height = camera.colorHeight;
   }
   const cameraMatrix = Array.isArray(camera.metadata.transform)
     && camera.metadata.transform.length === 16
@@ -1836,10 +2015,10 @@ function renderManualCalibrationPreview(camera) {
   const distalNames = state.robotRenderer.calibrationLinks || [];
   if (!distalNames.length) return;
   const signature = JSON.stringify([
-    camera.width,
-    camera.height,
+    camera.colorWidth,
+    camera.colorHeight,
     camera.metadata.transform,
-    camera.metadata.intrinsics,
+    camera.metadata.intrinsics,camera.metadata.color_space,camera.metadata.color_projection,
     ...distalNames.map((name) => state.robotTransforms[name] || null),
   ]);
   let projectedBounds = state.manualOverlayBounds;
@@ -1847,11 +2026,18 @@ function renderManualCalibrationPreview(camera) {
     const overlayContext = overlay.getContext("2d");
     overlayContext.clearRect(0, 0, overlay.width, overlay.height);
     const worldToCamera = inverseRigidTransform(cameraMatrix);
-    const [fx, fy, cx, cy] = camera.metadata.intrinsics.map(Number);
-    projectedBounds = { minX: camera.width, minY: camera.height, maxX: 0, maxY: 0, count: 0 };
+    const rawProjection=camera.metadata.color_space==='original_rgb'?camera.metadata.color_projection:null;
+    const [fx, fy, cx, cy] = (rawProjection?.intrinsics||camera.metadata.intrinsics).map(Number);
+    projectedBounds = { minX: camera.colorWidth, minY: camera.colorHeight, maxX: 0, maxY: 0, count: 0 };
     const project = (matrix, positions, index) => {
       const local = [positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2]];
       const point = transformPoint(worldToCamera, transformPoint(matrix, local));
+      if(rawProjection) {
+        const e=rawProjection.extrinsics,p=[point[0],-point[1],-point[2]];
+        const cv=[e[0]*p[0]+e[3]*p[1]+e[6]*p[2]+e[9],e[1]*p[0]+e[4]*p[1]+e[7]*p[2]+e[10],e[2]*p[0]+e[5]*p[1]+e[8]*p[2]+e[11]];
+        if(cv[2]<=0.01)return null;
+        return [fx*cv[0]/cv[2]+cx,fy*cv[1]/cv[2]+cy];
+      }
       const depth = -point[2];
       if (depth <= 0.01) return null;
       return [fx * point[0] / depth + cx, -fy * point[1] / depth + cy];
@@ -1900,13 +2086,13 @@ function renderManualCalibrationPreview(camera) {
   const centerX = (projectedBounds.minX + projectedBounds.maxX) * 0.5;
   const centerY = (projectedBounds.minY + projectedBounds.maxY) * 0.5;
   const extent = Math.max(projectedBounds.maxX - projectedBounds.minX, projectedBounds.maxY - projectedBounds.minY, 80) * 1.5;
-  const sourceX = Math.max(0, Math.min(camera.width - extent, centerX - extent * 0.5));
-  const sourceY = Math.max(0, Math.min(camera.height - extent, centerY - extent * 0.5));
+  const sourceX = Math.max(0, Math.min(camera.colorWidth - extent, centerX - extent * 0.5));
+  const sourceY = Math.max(0, Math.min(camera.colorHeight - extent, centerY - extent * 0.5));
   crop.width = 420;
   crop.height = 420;
   const cropContext = crop.getContext("2d", { alpha: false });
   cropContext.imageSmoothingEnabled = false;
-  cropContext.drawImage(visible, sourceX, sourceY, Math.min(extent, camera.width), Math.min(extent, camera.height), 0, 0, crop.width, crop.height);
+  cropContext.drawImage(visible, sourceX, sourceY, Math.min(extent, camera.colorWidth), Math.min(extent, camera.colorHeight), 0, 0, crop.width, crop.height);
 }
 
 function beginFrameDecode(frame) {
@@ -1928,6 +2114,48 @@ function beginFrameDecode(frame) {
     cancel() {canceled = true;release();}};
 }
 
+function clearPendingCameraUploads() {
+  for(const camera of state.pendingCameraUploads.values())camera.bitmap?.close();
+  state.pendingCameraUploads.clear();
+}
+
+function applyCameraUploads(decoded) {
+  const started=performance.now(),updated=decoded.map(uploadCamera);
+  const elapsed=performance.now()-started;
+  state.stats.uploadMs=state.stats.uploadMs>0?state.stats.uploadMs*.8+elapsed*.2:elapsed;
+  for(const camera of updated) {
+    const id=String(camera.metadata.id||camera.metadata.model||'camera');
+    state.stats.cameraFrames[id]=Number(state.stats.cameraFrames[id]||0)+1;
+    state.stats.cameraEncodeMs[id]=Number(camera.metadata.encode_ms||0);
+    if(!state.cameras.includes(camera))state.cameras.push(camera);
+  }
+  const staleBefore=performance.now()-5000;
+  state.cameras=orderedCameras(state.cameras.filter(camera=>{
+    if(Number(camera.lastUpdateMs||0)>=staleBefore)return true;
+    deleteCameraTextures(camera);return false;
+  }));
+  state.stats.cameras=state.cameras.length;
+  state.stats.width=Math.max(0,...state.cameras.map(camera=>camera.width));
+  state.stats.height=Math.max(0,...state.cameras.map(camera=>camera.height));
+}
+
+function queueCameraUploads(decoded) {
+  for(const camera of decoded) {
+    const id=String(camera.metadata.id||camera.metadata.serial||camera.metadata.model||'camera');
+    state.pendingCameraUploads.get(id)?.bitmap?.close();
+    state.pendingCameraUploads.set(id,camera);
+  }
+  // Independent frames need no earlier reference. Keep the newest complete
+  // capture for each camera, never an A-only update in place of B/C.
+  if(state.pendingCameraUploads.size>32)flushPendingCameraUploads();
+}
+
+function flushPendingCameraUploads() {
+  if(!state.pendingCameraUploads.size)return;
+  const decoded=[...state.pendingCameraUploads.values()];state.pendingCameraUploads.clear();
+  applyCameraUploads(decoded);
+}
+
 async function decodeNewestPackets() {
   if (state.decoding) return;
   state.decoding = true;
@@ -1944,11 +2172,13 @@ async function decodeNewestPackets() {
     state.stats.coalesced = Number(state.stats.coalesced || 0) + Number(frame.coalescedPackets || 0);
     const payloads = frame.payloads;
     const metadata = frame.metadata;
+    state.stats.streamCrop=metadata.stream_crop||null;
     persistentFrame = (
       metadata.temporal_reference_mode === "persistent_v1"
     );
     const decodeStarted = prepared.started, queueElapsed = prepared.queueElapsed;
     const robot = metadata.robot;
+    state.robotRegistration=robot?.registration||null;
     if (robot && robot.available !== false && robot.links && typeof robot.links === "object") {
       state.robotTransforms = robot.links;
       state.robotTransformsUpdatedMs = performance.now();
@@ -1981,25 +2211,16 @@ async function decodeNewestPackets() {
         && next.payloads.every(payload => isIndependentNativeFrame(payload.metadata))) {
       state.nextFrameDecode = beginFrameDecode(takeIndependentFrameBatch(state.pendingFrameQueue));
     }
-    const uploadStarted = performance.now();
-    const updatedCameras = decoded.map(uploadCamera);
-    const uploadElapsed = performance.now() - uploadStarted;
-    for (const [key, value] of [["codecMs", codecElapsed], ["uploadMs", uploadElapsed], ["queueMs", queueElapsed]]) {
+    if(state.deferCameraUploads!==false&&!state.rgbdPaused&&!persistentFrame
+        &&payloads.every(payload=>isIndependentNativeFrame(payload.metadata))) {
+      queueCameraUploads(decoded);
+    } else {
+      // Temporal RGB/depth patches must apply to their exact prior reference.
+      flushPendingCameraUploads();applyCameraUploads(decoded);
+    }
+    for (const [key, value] of [["codecMs", codecElapsed], ["queueMs", queueElapsed]]) {
       state.stats[key] = state.stats[key] > 0 ? state.stats[key] * 0.8 + value * 0.2 : value;
     }
-    for (const camera of updatedCameras) {
-      const id = String(camera.metadata.id || camera.metadata.model || "camera");
-      state.stats.cameraFrames[id] = Number(state.stats.cameraFrames[id] || 0) + 1;
-      state.stats.cameraEncodeMs[id] = Number(camera.metadata.encode_ms || 0);
-      if (!state.cameras.includes(camera)) state.cameras.push(camera);
-    }
-    const staleBefore = performance.now() - 5000;
-    state.cameras = state.cameras.filter((camera) => {
-      if (Number(camera.lastUpdateMs || 0) >= staleBefore) return true;
-      deleteCameraTextures(camera);
-      return false;
-    });
-    state.cameras = orderedCameras(state.cameras);
     const viewerTransform = metadata.viewer && metadata.viewer.transform;
     if (!state.baseViewer && Array.isArray(viewerTransform) && viewerTransform.length === 16) {
       state.baseViewer = {
@@ -2013,9 +2234,6 @@ async function decodeNewestPackets() {
       state.focusWorld = add(origin, scale(back, -state.settings.focus_distance));
     }
     state.stats.decoded += 1;
-    state.stats.cameras = state.cameras.length;
-    state.stats.width = Math.max(...state.cameras.map((camera) => camera.width));
-    state.stats.height = Math.max(...state.cameras.map((camera) => camera.height));
     state.stats.captureUnixMs = Number(metadata.capture_unix_ms || Date.now());
     state.stats.captureAgeMs = Math.max(0, Date.now() - state.stats.captureUnixMs);
     const decodeElapsed = performance.now() - decodeStarted;
@@ -2263,6 +2481,7 @@ function resizeCanvas() {
 
 function render() {
   if (!state.running || !state.gl || !state.baseViewer) return;
+  flushPendingCameraUploads();
   if (state.settings.display_mode === "rgb_camera") {
     if (state.blendPCR?.signature) state.blendPCR.clearTargets();
     state.stats.renderWarning = "";
@@ -2281,6 +2500,10 @@ function render() {
   const projection = perspectiveMatrix(fov, dimensions.width / dimensions.height, state.baseViewer.near, state.baseViewer.far);
   const viewProjection = multiplyMatrix(projection, inverseRigidTransform(viewerTransform));
   state.viewProjection = viewProjection;
+  if(state.workspaceEditor?.active) {
+    const rect=state.canvas.getBoundingClientRect();
+    state.workspaceEditor.update({viewProjection,viewer:viewerTransform,fov,width:rect.width,height:rect.height,left:rect.left,top:rect.top});
+  }
 
   gl.viewport(0, 0, dimensions.width, dimensions.height);
   if (state.settings.white_background_enabled) {
@@ -2332,6 +2555,20 @@ function render() {
   state.stats.renderMethod = blended ? "blendpcr" : (state.settings.blendpcr_enabled ? "independent_mesh" : state.settings.display_mode || "independent_mesh");
   const unified = meshMode && state.settings.overlap_suppression_enabled && cached && state.cameras.length >= 2;
   const fusionReference = !cached && state.settings.camera_color_fusion_enabled ? chooseColorReference(state.cameras, now) : null;
+  const originalProgram=state.program,originalUniforms=state.uniforms;
+  const cropBounds = modeledWorkspaceBounds(state.settings, workspaceCropBounds(state.settings));
+  let sourceCells = 0, submittedCells = 0;
+  const indexedMesh=!blended&&meshMode&&cached&&!maskCapsules&&!state.settings.overlap_suppression_enabled
+    &&!state.settings.camera_color_fusion_enabled&&state.useIndexedMeshes!==false
+    &&standardSurfacePrograms.has(state.program)&&ensureIndexedProgram();
+  if(indexedMesh) {state.program=state.indexedProgram;state.uniforms=state.indexedUniforms;}
+  if(cached&&!blended&&state.cameraFusion.originalRgb) {
+    if(ensureOriginalProgram(indexedMesh)) {
+      const key=indexedMesh?'originalIndexed':'original';
+      state.program=state[key+'Program'];state.uniforms=state[key+'Uniforms'];
+    }
+  }
+  try {
   gl.useProgram(state.program);
   if (cached) state.cameraFusion.bind(state.program);
   else gl.uniform1i(state.uniforms.rigCount, 0);
@@ -2344,12 +2581,26 @@ function render() {
   gl.uniform1f(state.uniforms.meshDepthDelta, Number(state.settings.mesh_depth_delta || 0.045));
   gl.uniform1f(state.uniforms.meshMaxEdge, Number(state.settings.mesh_max_edge || 0.08));
   gl.uniform1i(state.uniforms.qualityEnabled, cached ? 1 : 0);
+  gl.uniform1i(state.uniforms.depthOnlyEnabled, state.settings.depth_only_enabled === true ? 1 : 0);
   gl.uniform1i(state.uniforms.rigEnabled, unified ? 1 : 0);
   gl.uniform1i(state.uniforms.rigColorEnabled, cached && state.settings.camera_color_fusion_enabled ? 1 : 0);
   gl.uniform1f(state.uniforms.fusionDepthTolerance, 0.035);
+  bindWorkspaceCrop(gl, state.program, workspaceCropBounds(state.settings));
+  bindModeledWorkspace(gl, state.program, state.settings);
+  gl.vertexAttribI4ui(0,0,0,0,0);
+  gl.vertexAttribI4ui(1,0,0,0,0);
 
   for (const [cameraIndex, camera] of state.cameras.entries()) {
     if (blended || !cameraIsFresh(camera, now)) continue;
+    const source = workspaceSourceWindow(camera, state.useWorkspaceCulling === false ? null : cropBounds);
+    const tiles=state.useWorkspaceCulling===false?null:workspaceVisibleTiles(camera,cropBounds);
+    sourceCells += Math.max(0, camera.width - 1) * Math.max(0, camera.height - 1);
+    submittedCells += tiles?tiles.cellCount:Math.max(0, source.width - 1) * Math.max(0, source.height - 1);
+    if (tiles?tiles.length===0:(source.width < (meshMode ? 2 : 1) || source.height < (meshMode ? 2 : 1))) continue;
+    gl.uniform1i(state.uniforms.sparseTiles,tiles?1:0);
+    if(tiles)camera.cropTileBuffer=bindWorkspaceTiles(gl,tiles,camera.cropTileBuffer||{});
+    gl.uniform2i(state.uniforms.sourceOrigin, source.x, source.y);
+    gl.uniform2i(state.uniforms.sourceSize, source.width, source.height);
     gl.uniform1i(state.uniforms.rigIndex, cameraIndex);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, camera.depthTexture);
@@ -2377,18 +2628,54 @@ function render() {
       if (state.settings.point_underlay && !unified) {
         gl.uniform1i(state.uniforms.renderMode, 2);
         gl.uniform1f(state.uniforms.pointSize, pointSize * 0.85);
-        gl.drawArrays(gl.POINTS, 0, camera.width * camera.height);
+        if(tiles)gl.drawArraysInstanced(gl.POINTS,0,32*8,tiles.length/2);
+        else gl.drawArrays(gl.POINTS, 0, source.width * source.height);
       }
       // Validate each emitted triangle from its actual three depth samples, matching Godot's mesh rule.
       gl.uniform1i(state.uniforms.renderMode, 1);
       gl.uniform1f(state.uniforms.pointSize, pointSize);
-      gl.drawArrays(gl.TRIANGLES, 0, (camera.width - 1) * (camera.height - 1) * 6);
+      if(indexedMesh) {
+        if(tiles) {
+          if(!camera.cropIndexBuffer) {
+            camera.cropIndexBuffer=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,camera.cropIndexBuffer);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(nativeMeshIndices(33,9)),gl.STATIC_DRAW);
+          } else gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,camera.cropIndexBuffer);
+          gl.drawElementsInstanced(gl.TRIANGLES,32*8*6,gl.UNSIGNED_SHORT,0,tiles.length/2);
+        } else {
+          ensureMeshIndexBuffer(camera);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,camera.meshIndexBuffer);
+          const indexBytes=camera.meshIndexType===gl.UNSIGNED_SHORT?2:4;
+          gl.drawElementsInstanced(gl.TRIANGLES,(source.width-1)*6,camera.meshIndexType,source.x*6*indexBytes,source.height-1);
+        }
+      } else if(tiles)gl.drawArraysInstanced(gl.TRIANGLES,0,32*8*6,tiles.length/2);
+      else gl.drawArrays(gl.TRIANGLES, 0, (source.width - 1) * (source.height - 1) * 6);
     } else {
       gl.uniform1i(state.uniforms.renderMode, 0);
       gl.uniform1f(state.uniforms.pointSize, pointSize);
-      gl.drawArrays(gl.POINTS, 0, camera.width * camera.height);
+      if(tiles)gl.drawArraysInstanced(gl.POINTS,0,32*8,tiles.length/2);
+      else gl.drawArrays(gl.POINTS, 0, source.width * source.height);
     }
+    if(tiles)unbindWorkspaceTiles(gl);
   }
+  } finally {state.program=originalProgram;state.uniforms=originalUniforms;}
+  state.stats.workspaceCrop = blended ? state.blendPCR.cropStats : {enabled: Boolean(cropBounds), sourceCells, submittedCells};
+  const stage=modeledWorkspace(state.settings);
+  if (stage) {
+    state.modeledWorkspace ||= new ModeledWorkspaceRenderer(gl);
+  }
+  if(state.settings.scene_lighting_enabled!==false&&state.settings.scene_shadows_enabled!==false
+    &&(stage||robotBasePosition())&&!state.sceneShadowUnavailable) {
+    try {
+      state.sceneShadow ||= new SceneShadowRenderer(gl);
+      const center=stage?.center||robotBasePosition(),extent=Math.max(1,stage?.width||0,stage?.depth||0,stage?.tableHeight||0);
+      const signature=JSON.stringify([stage?.key,state.settings.modeled_workspace_light_angle,state.settings.robot_overlay_enabled,state.settings.robot_overlay_style,state.robotTransforms,state.stats.robotModelsLoaded]);
+      state.sceneShadow.update(state.settings,center,extent,signature,(program,model)=>{
+        state.modeledWorkspace?.drawDepth(state.settings,program,model);
+        drawRobotShadow(program,model);
+      });
+    } catch(error){state.sceneShadow?.dispose();state.sceneShadow=null;state.sceneShadowUnavailable=true;state.stats.shadowWarning='CAD shadows unavailable; scene lighting remains active.';}
+  }
+  if(stage)state.modeledWorkspace.render(state.settings,viewProjection,viewerTransform.slice(12,15),state.sceneShadow);
   drawWorkspaceGuide(viewProjection);
   drawCameraGuides(viewProjection);
   drawRobotOverlay(viewProjection);
@@ -2419,6 +2706,16 @@ function updateStats() {
     renderFrames: state.stats.renderFrames,
     cameraFrames: { ...state.stats.cameraFrames },
   };
+}
+
+function advanceRenderClock(now) {
+  const interval=1000/60,elapsed=now-state.lastRenderMs;
+  if(!state.lastRenderMs||elapsed>interval*4) {state.lastRenderMs=now;return true;}
+  if(elapsed<interval-0.5)return false;
+  // Carry the fractional remainder across refreshes. Resetting to "now"
+  // every render accidentally caps a 144 Hz display at 48 rather than 60.
+  state.lastRenderMs+=Math.max(1,Math.floor(elapsed/interval))*interval;
+  return true;
 }
 
 function animationLoop(now) {
@@ -2457,8 +2754,7 @@ function animationLoop(now) {
   }
   // High-refresh displays were rendering hundreds of thousands of points at
   // 120-165 Hz and starving RGB-D decode/upload work on the same main thread.
-  if (!state.rgbdPaused && (!state.lastRenderMs || now - state.lastRenderMs >= 15.5)) {
-    state.lastRenderMs = now;
+  if (!state.rgbdPaused && advanceRenderClock(now)) {
     render();
   }
   updateStats();
@@ -3001,6 +3297,7 @@ export async function startGodotHybridRenderer(options = {}) {
 
 export function stopGodotHybridRenderer() {
   state.running = false;
+  clearPendingCameraUploads();
   state.nextFrameDecode?.cancel();
   state.nextFrameDecode = null;
   state.nativeDecoder?.close();
@@ -3057,11 +3354,20 @@ export function stopGodotHybridRenderer() {
   state.cameraFusion = null;
   const gl = state.gl;
   deleteWorkspaceGuide(gl);
+  state.modeledWorkspace?.dispose();
+  state.sceneShadow?.dispose();state.sceneShadow=null;state.sceneShadowUnavailable=false;
+  state.modeledWorkspace = null;
   deleteCameraGuides(gl);
   deleteRobotMeshes(gl);
   if (gl && state.robotProgram) gl.deleteProgram(state.robotProgram);
   if (gl && state.robotVao) gl.deleteVertexArray(state.robotVao);
   if (gl && state.program) gl.deleteProgram(state.program);
+  if (gl && state.indexedProgram) gl.deleteProgram(state.indexedProgram);
+  state.indexedProgram=state.indexedUniforms=null;state.indexedUnavailable=false;
+  for(const key of ['original','originalIndexed']) {
+    if(gl&&state[key+'Program'])gl.deleteProgram(state[key+'Program']);
+    state[key+'Program']=state[key+'Uniforms']=null;state[key+'Unavailable']=false;
+  }
   state.gl = null;
   state.program = null;
   state.uniforms = null;
@@ -3070,6 +3376,7 @@ export function stopGodotHybridRenderer() {
   state.robotVao = null;
   state.workspaceGuide = null;
   state.robotTransforms = {};
+  state.robotRegistration=null;
   state.robotRenderer = EMPTY_ROBOT_RENDERER;
   state.baseViewer = null;
   state.currentViewer = null;
@@ -3087,6 +3394,7 @@ export function stopGodotHybridRenderer() {
 }
 
 export function setGodotHybridViewSettings(settings = {}) {
+  if(settings.display_mode==='rgb_camera'&&state.workspaceEditor?.active)state.workspaceEditor.finish(true);
   const overlayStyle = settings.robot_overlay_style;
   state.settings = {
     ...state.settings,
@@ -3131,6 +3439,25 @@ function configureOriginalRgb() {
 export function setGodotHybridRgbCamera(id) {
   if (state.socketOptions) state.socketOptions.camera = id;
   state.rawRgbViewer?.setCamera(id);
+}
+
+export function centerGodotHybridWorkspaceCrop() {
+  if (!state.baseViewer) return null;
+  const center = currentOrbitFocus(state.baseViewer.transform);
+  const old = workspaceCropBounds({...state.settings, workspace_crop_enabled: true});
+  const half = old ? old.size.map(v=>v*0.5) : [0.6, 0.45, 0.6];
+  return {workspace_crop_min: center.map((v, i) => v - half[i]),
+    workspace_crop_max: center.map((v, i) => v + half[i])};
+}
+
+export function alignGodotModeledWorkspace(options={}) {
+  if (!state.baseViewer) return null;
+  const base=transformDictionaryMatrix(state.robotTransforms[state.robotRenderer.baseLink]);
+  if(options.source!=='orbit'&&state.robotRegistration?.registered===true&&base&&Array.from(base).every(Number.isFinite)) {
+    return {modeled_workspace_center:[base[12],base[13]-.002,base[14]]};
+  }
+  if(options.source==='robot')return null;
+  return {modeled_workspace_center: currentOrbitFocus(state.baseViewer.transform).slice()};
 }
 
 export function recenterGodotHybridRenderer() {
@@ -3200,6 +3527,7 @@ export function focusGodotHybridRendererAt(clientX, clientY) {
   const targetY = 1 - ((clientY - rect.top) / rect.height) * 2;
   let bestPoint = null;
   let bestScore = 0.03 * 0.03;
+  const crop = workspaceCropBounds(state.settings);
   for (const camera of state.cameras) {
     const intrinsics = camera.metadata.intrinsics;
     const stride = Math.max(1, Math.floor(Math.max(camera.width, camera.height) / 180));
@@ -3220,8 +3548,10 @@ export function focusGodotHybridRendererAt(clientX, clientY) {
         const ndcY = clip[1] / clip[3];
         const score = (ndcX - targetX) ** 2 + (ndcY - targetY) ** 2;
         if (score < bestScore) {
+          const world = transformPoint(camera.modelMatrix, local);
+          if (crop && world.some((v,i) => v < crop.min[i] || v > crop.max[i])) continue;
           bestScore = score;
-          bestPoint = transformPoint(camera.modelMatrix, local);
+          bestPoint = world;
         }
       }
     }
@@ -3257,3 +3587,23 @@ window.getGodotHybridNavigationState = getGodotHybridNavigationState;
 window.setGodotHybridNavigationState = setGodotHybridNavigationState;
 window.focusGodotHybridRendererAt = focusGodotHybridRendererAt;
 window.getGodotHybridRendererStatus = getGodotHybridRendererStatus;
+window.centerGodotHybridWorkspaceCrop = centerGodotHybridWorkspaceCrop;
+window.alignGodotModeledWorkspace = alignGodotModeledWorkspace;
+window.editGodotWorkspace = (target) => {
+  if(!state.baseViewer||!state.canvas||!['crop','table'].includes(target))return false;
+  state.workspaceEditor ||= new WorkspaceEditor({getSettings:()=>state.settings,
+    onChange:(settings,phase)=>{
+      setGodotHybridViewSettings(settings);
+      window.dispatchEvent(new CustomEvent('workspace-edit-change',{detail:{settings,phase}}));
+    },onFinish:(_commit,target)=>window.dispatchEvent(new CustomEvent('workspace-edit-finish',{detail:{target}})),
+    onWheel:event=>state.pointerNavigation?.wheel(event),
+    onFrame:(box)=>{
+      state.focusWorld=box.center.slice();state.focusPicked=true;state.manualPan=[0,0,0];
+      const fov=Number(state.settings.fov||55)*Math.PI/180;
+      const aspect=Math.min(1,state.canvas.clientWidth/Math.max(1,state.canvas.clientHeight));
+      const radius=Math.hypot(...box.half)/Math.sin(Math.atan(Math.tan(fov/2)*aspect))*1.12;
+      const height=Number(state.settings.focus_vertical_offset||0);
+      state.manualDolly=Math.sqrt(Math.max(.01,radius*radius-height*height))-Number(state.settings.orbit_distance||.65);
+    }});
+  state.workspaceEditor.begin(target);return true;
+};

@@ -179,12 +179,53 @@ def test_original_rgb_websocket_relays_latest_frame_from_capture_port(monkeypatc
     assert stopped.is_set() and handler.server.rgbd_http_slots.acquire(blocking=False)
 
 
-def test_camera_locations_setting_is_typed_and_can_be_saved():
+@pytest.mark.parametrize("setting", ["camera_locations_enabled", "depth_only_enabled", "workspace_crop_enabled", "workspace_crop_show_box", "modeled_workspace_enabled"])
+def test_camera_display_setting_is_typed_and_can_be_saved(setting):
     handler = bare_handler()
-    assert handler.validate_view_settings({"camera_locations_enabled": True})["camera_locations_enabled"] is True
-    assert handler.validate_site_settings({"camera_locations_enabled": False})["camera_locations_enabled"] is False
+    assert handler.validate_view_settings({setting: True})[setting] is True
+    assert handler.validate_site_settings({setting: False})[setting] is False
     with pytest.raises(ValueError, match="boolean"):
-        handler.validate_view_settings({"camera_locations_enabled": "yes"})
+        handler.validate_view_settings({setting: "yes"})
+
+
+def test_workspace_crop_bounds_are_validated_and_persisted():
+    handler = bare_handler()
+    bounds = {"workspace_crop_enabled": True, "workspace_crop_min": [-.5, -.2, -1.4], "workspace_crop_max": [.5, .8, -.4]}
+    saved = handler.validate_site_settings(bounds)
+    assert all(saved[k] == v for k, v in bounds.items())
+    for bad in ([0, 1], [False, 0, 1], ["0", 0, 1], [float("nan"), 0, 1], [21, 0, 1]):
+        with pytest.raises(ValueError, match="three finite"):
+            handler.validate_view_settings({"workspace_crop_min": bad})
+    with pytest.raises(ValueError, match="below maximum"):
+        handler.validate_view_settings({**bounds, "workspace_crop_max": [-.6, .8, -.4]})
+
+
+def test_direct_workspace_transforms_are_validated_and_persisted():
+    handler = bare_handler()
+    settings = {"workspace_crop_rotation": [18, -129, 12], "modeled_workspace_table_height": 0.82}
+    assert all(handler.validate_site_settings(settings)[key] == value for key, value in settings.items())
+    for value in ([0, 0], [False, 0, 0], [0, float("inf"), 0], [0, 361, 0], ["0", 0, 0]):
+        with pytest.raises(ValueError, match="finite angles"):
+            handler.validate_view_settings({"workspace_crop_rotation": value})
+
+
+def test_modeled_workspace_settings_are_typed_and_persisted():
+    handler = bare_handler()
+    settings = {"modeled_workspace_enabled": True, "modeled_workspace_center": [.12, -.3, -1.2],
+                "modeled_workspace_width": .9, "modeled_workspace_depth": .6,
+                "modeled_workspace_heading": 35, "modeled_workspace_clearance": .006,
+                "modeled_workspace_height": .8, "modeled_workspace_light_angle": -40}
+    saved = handler.validate_site_settings(settings)
+    assert all(saved[k] == v for k, v in settings.items())
+    for bad in ([0, 1], [False, 0, 1], ["0", 0, 1], [float("nan"), 0, 1], [21, 0, 1]):
+        with pytest.raises(ValueError, match="three finite"):
+            handler.validate_view_settings({"modeled_workspace_center": bad})
+    for key in ("width", "depth", "heading", "clearance", "height", "light_angle"):
+        with pytest.raises(ValueError, match="finite"):
+            handler.validate_view_settings({f"modeled_workspace_{key}": float("inf")})
+    bounded = handler.validate_view_settings({"modeled_workspace_clearance": -1, "modeled_workspace_width": 100})
+    assert bounded["modeled_workspace_clearance"] == 0
+    assert bounded["modeled_workspace_width"] == 4
 
 
 def test_websocket_origin_must_match_request_host():

@@ -1,5 +1,5 @@
-import { RIG_SAMPLING_SHADER } from "./hybrid_camera_quality.js?v=20261020_color_coverage";
-export { GpuCameraRig as MultiCameraFusion } from "./hybrid_camera_quality.js?v=20261020_color_coverage";
+import { RIG_SAMPLING_SHADER } from "./hybrid_camera_quality.js?v=20261021_original_rgb";
+export { GpuCameraRig as MultiCameraFusion } from "./hybrid_camera_quality.js?v=20261021_original_rgb";
 
 // Shared by the live renderer and the camera-free GPU regression test.
 export function cameraIsFresh(camera, now = performance.now()) {
@@ -44,7 +44,16 @@ bool rig_overlap() {
   return false;
 }
 vec3 rig_color(vec3 fallback,bool source_has_color) {
-  if(u_rig_count<=0||(u_rig_color_enabled==0&&source_has_color))return fallback;
+  if(u_rig_count<=0)return fallback;
+  #ifdef ORIGINAL_RGB
+  {
+    RigHit source;
+    vec3 normal=vec3(0,0,1);
+    if(rig_surface(u_rig_index,v_world_position,source))normal=rig_world_normal(u_rig_index,source.normal);
+    return rig_projected_color(v_world_position,normal,source_has_color&&rig_data(u_rig_index,12).z<0.5?fallback:vec3(0.34));
+  }
+  #else
+  if(u_rig_color_enabled==0&&source_has_color)return fallback;
   RigHit own;
   bool has_own=rig_surface(u_rig_index,v_world_position,own);
   float quality=has_own&&own.color_valid?own.score:-1.0;
@@ -61,6 +70,18 @@ vec3 rig_color(vec3 fallback,bool source_has_color) {
       color=peer.color;quality=peer.score;owner=camera;
     }
   }
+  if(quality<0.0&&has_own&&own.confidence>=0.95) {
+    vec3 normal=rig_world_normal(u_rig_index,own.normal);
+    for(int camera=0;camera<u_rig_count;camera++) {
+      if(camera==u_rig_index)continue;
+      RigHit peer;
+      if(rig_surface(camera,v_world_position,peer)&&rig_color_agrees(camera,v_world_position,normal,peer)
+          &&(quality<0.0||rig_better(peer.score,camera,quality,owner))) {
+        color=peer.color;quality=peer.score;owner=camera;
+      }
+    }
+  }
   return color;
+  #endif
 }
 `;

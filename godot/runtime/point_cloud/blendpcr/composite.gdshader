@@ -4,6 +4,10 @@ shader_type spatial;
 render_mode unshaded, cull_disabled, fog_disabled;
 #include "camera_buffers.gdshaderinc"
 uniform sampler2D weights_a : filter_linear, repeat_disable;
+uniform bool workspace_crop_enabled = false;
+uniform vec3 workspace_crop_min = vec3(-0.6, -0.45, -0.6);
+uniform vec3 workspace_crop_max = vec3(0.6, 0.45, 0.6);
+uniform mat3 workspace_crop_inverse = mat3(1.0);
 void vertex() { POSITION = vec4(VERTEX.xy, 1.0, 1.0); }
 void fragment() {
     vec2 uv = SCREEN_UV;
@@ -57,6 +61,10 @@ void fragment() {
     vec4 ray = INV_PROJECTION_MATRIX * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0);
     vec3 point = ray.xyz / ray.w;
     point *= z / max(-point.z, 0.000001);
+    vec3 world = (INV_VIEW_MATRIX * vec4(point, 1.0)).xyz;
+    vec3 crop_center = (workspace_crop_min + workspace_crop_max) * 0.5;
+    vec3 crop_local = crop_center + workspace_crop_inverse * (world - crop_center);
+    if (workspace_crop_enabled && (any(lessThan(crop_local, workspace_crop_min)) || any(greaterThan(crop_local, workspace_crop_max)))) discard;
     vec4 clip = PROJECTION_MATRIX * vec4(point, 1.0);
     float device_z = clip.z / clip.w;
     DEPTH = CLIP_SPACE_FAR < 0.0 ? device_z * 0.5 + 0.5 : device_z;

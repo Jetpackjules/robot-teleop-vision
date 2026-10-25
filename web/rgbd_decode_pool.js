@@ -42,13 +42,14 @@ export class NativeRgbdDecoderPool {
       let worker = this.workers[index];
       try {
         if (!worker) {
-          worker = new Worker(new URL("./rgbd_decode_worker.js?v=20261020_native_pixels", import.meta.url), {type: "module"});
+          worker = new Worker(new URL("./rgbd_decode_worker.js?v=20261021_original_rgb", import.meta.url), {type: "module"});
           worker.onmessage = ({data}) => {
             const job = this.pending.get(data.id);
             if (!job) {data.bitmap?.close();return;}
             this.pending.delete(data.id);clearTimeout(job.timer);
             if (data.error) job.reject(new Error(data.error));
             else job.resolve({depth:new Uint16Array(data.depth),bitmap:data.bitmap,
+              depthTiles:data.depthTiles?new Uint16Array(data.depthTiles):null,
               rgbaPixels:data.rgba?new Uint8Array(data.rgba):null,workerMs:data.workerMs||0,
               dispatchMs:Math.max(0,performance.now()-job.started-(data.workerMs||0))});
           };

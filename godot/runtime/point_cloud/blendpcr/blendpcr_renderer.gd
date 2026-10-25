@@ -385,6 +385,14 @@ func update_surfaces(sources: Array[MeshInstance3D], viewer: Camera3D, scale: fl
         _pass_material(viewport).set_shader_parameter("seam_radius", radius)
     return true
 
+func set_workspace_crop(enabled: bool, minimum: Vector3, maximum: Vector3, rotation_degrees: Vector3 = Vector3.ZERO) -> void:
+    if _composite == null:
+        return
+    _composite.set_shader_parameter("workspace_crop_enabled", enabled)
+    _composite.set_shader_parameter("workspace_crop_min", minimum)
+    _composite.set_shader_parameter("workspace_crop_max", maximum)
+    _composite.set_shader_parameter("workspace_crop_inverse", preload("res://godot/runtime/point_cloud/workspace_crop.gd").rotation_basis(rotation_degrees).transposed())
+
 static func _effective_depth_span(sources: Array[MeshInstance3D],viewer: Camera3D) -> float:
     var bound:=0.0
     var eye:=viewer.get_camera_transform().origin

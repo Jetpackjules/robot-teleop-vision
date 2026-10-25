@@ -305,6 +305,9 @@ private:
 
     struct RgbdEncodeJob {
         bool original_rgb = false;
+        // RGB-D geometry keeps its native depth grid; color can retain the
+        // independent, calibrated RGB sensor image instead of an aligned copy.
+        godot::Dictionary color_projection;
         uint64_t sequence = 0;
         int depth_width = 0;
         int depth_height = 0;
@@ -330,6 +333,9 @@ private:
         uint64_t sequence = 0;
         int width = 0;
         int height = 0;
+        int color_width = 0;
+        int color_height = 0;
+        godot::Dictionary color_projection;
         godot::Vector4 intrinsics;
         godot::PackedByteArray color_jpeg;
         godot::PackedByteArray compressed_depth;

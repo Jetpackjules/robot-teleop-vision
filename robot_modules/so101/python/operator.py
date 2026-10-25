@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, ClassVar
@@ -112,6 +113,34 @@ class So101Operator(GenericRobotOperator):
             "torque_enabled": False,
             "fault": "follower service unavailable",
         }
+
+    def recording_spec(self) -> dict[str, Any]:
+        return {"robot_type": "so101_robot_teleop", "names": ["shoulder_pan", "shoulder_lift",
+                "elbow_flex", "wrist_flex", "wrist_roll", "gripper"],
+                "units": ["degree", "degree", "degree", "degree", "degree", "percent"],
+                "coordinates": "Robot Teleop internal normalized joint coordinates; motor-profile conversion already applied.",
+                "action": "Last successfully applied absolute normalized position target, including held targets."}
+
+    def recording_sample(self, status: Mapping[str, Any]) -> dict[str, Any] | None:
+        if status.get("follower_connected") is not True or status.get("measured_feedback_fresh") is not True:
+            return None
+        if status.get("fault") or status.get("calibration_sweep_active") or status.get("rest_return_active"):
+            return None
+        vectors = [status.get("follower_normalized"), status.get("applied_normalized")]
+        age = status.get("last_read_age_ms")
+        write_age = status.get("last_write_age_ms")
+        if type(age) not in (int, float) or not math.isfinite(age) or not 0 <= age <= 350:
+            return None
+        if type(write_age) not in (int, float) or not math.isfinite(write_age) or write_age < 0:
+            return None
+        if any(not isinstance(v, (list, tuple)) or len(v) != 6 or any(
+            type(n) not in (int, float) or not math.isfinite(n) for n in v) for v in vectors):
+            return None
+        sequence, epoch = status.get("last_seq", -1), status.get("restart_count", 0)
+        if type(sequence) is not int or type(epoch) is not int:
+            return None
+        return {"state": list(vectors[0]), "action": list(vectors[1]), "read_age_ms": age, "write_age_ms": write_age,
+                "sequence": sequence, "epoch": epoch}
 
     def hold_message(self) -> dict[str, Any]:
         return {"type": "arm_hold"}

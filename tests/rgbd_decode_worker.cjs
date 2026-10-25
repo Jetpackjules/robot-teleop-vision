@@ -5,10 +5,22 @@ const {pathToFileURL} = require('node:url');
 const zlib = require('node:zlib');
 const load = async name => {
   const file = path.join(__dirname, '../web', name);
-  const source = fs.readFileSync(file, 'utf8').replaceAll('import.meta.url', JSON.stringify(pathToFileURL(file).href));
+  const geomUrl='data:text/javascript;base64,'+Buffer.from(fs.readFileSync(path.join(__dirname,'../web/workspace_transform.js'),'utf8')).toString('base64');
+  const cropSource=fs.readFileSync(path.join(__dirname,'../web/workspace_crop.js'),'utf8').replace(/'\.\/workspace_transform.js[^']*'/,JSON.stringify(geomUrl));
+  const cropUrl='data:text/javascript;base64,'+Buffer.from(cropSource).toString('base64');
+  const projectionUrl='data:text/javascript;base64,'+Buffer.from(fs.readFileSync(path.join(__dirname,'../web/hybrid_color_projection.js'),'utf8')).toString('base64');
+  const source = fs.readFileSync(file, 'utf8').replaceAll('import.meta.url', JSON.stringify(pathToFileURL(file).href))
+    .replace(/'\.\/hybrid_color_projection\.js\?[^']+'/,JSON.stringify(projectionUrl))
+    .replace(/'\.\/workspace_crop\.js\?[^']+'/,JSON.stringify(cropUrl));
   return import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 };
 (async () => {
+  const {colorFrameDimensions}=await load('hybrid_color_projection.js');
+  assert.deepEqual(colorFrameDimensions({width:1280,height:720}),[1280,720]);
+  const projection={model:'pinhole',size:[1920,1080],intrinsics:[1300,1300,959.5,539.5],extrinsics:[1,0,0,0,1,0,0,0,1,.015,0,0]};
+  assert.deepEqual(colorFrameDimensions({width:1280,height:720,color_space:'original_rgb',color_width:1920,color_height:1080,color_projection:projection}),[1920,1080]);
+  assert.throws(()=>colorFrameDimensions({width:1280,height:720,color_space:'original_rgb',color_width:1280,color_height:720,color_projection:projection}),/matching calibrated/);
+  assert.throws(()=>colorFrameDimensions({width:1280,height:720,color_space:'original_rgb',color_width:1920,color_height:1080}),/matching calibrated/);
   const {decodeIndependentDepth} = await load('rgbd_decode_worker.js');
   const {NativeRgbdDecoderPool, isIndependentNativeFrame, takeIndependentFrameBatch} = await load('rgbd_decode_pool.js');
   const width = 848, height = 480, values = new Uint16Array(width * height);
@@ -53,8 +65,11 @@ const load = async name => {
   const payload = () => ({metadata: {width: 2, height: 1}, color: new Uint8Array(2), depth: new Uint8Array(4)});
   const first = payload(), result = pool.decode(first);
   assert.equal(first.depth.byteLength, 0, 'compressed inputs transfer without a main-thread copy');
-  workers[0].onmessage({data: {id: 1, depth: new Uint16Array([0, 65535]).buffer, bitmap: {close() {closed++;}}}});
-  assert.deepEqual((await result).depth, new Uint16Array([0, 65535]));
+  workers[0].onmessage({data: {id: 1, depth: new Uint16Array([0, 65535]).buffer,
+    depthTiles:new Uint16Array([65535,65535]).buffer, bitmap: {close() {closed++;}}}});
+  const transferred=await result;
+  assert.deepEqual(transferred.depth, new Uint16Array([0, 65535]));
+  assert.deepEqual(transferred.depthTiles,new Uint16Array([65535,65535]),'conservative native tile ranges survive the worker handoff');
   const stopped = pool.decode(payload());
   pool.close();
   await assert.rejects(stopped, /stopped/);

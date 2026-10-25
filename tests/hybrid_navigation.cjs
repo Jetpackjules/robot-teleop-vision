@@ -6,7 +6,10 @@ const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../web/hybrid_rgbd_renderer.js'), 'utf8')
   .replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, '');
-const context = vm.createContext({window: {}, performance, FUSION_FRAGMENT_SHADER: '', COLOR_PROJECTION_SHADER: ''});
+const context = vm.createContext({window: {}, performance, FUSION_FRAGMENT_SHADER: '', COLOR_PROJECTION_SHADER: '', DEPTH_SHADING_SHADER: '',SCENE_LIGHTING_SHADER:''});
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/workspace_transform.js'), 'utf8').replace(/^export /gm, ''), context);
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/workspace_crop.js'), 'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm, ''), context);
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/modeled_workspace.js'), 'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm, ''), context);
 vm.runInContext(source + '\nwindow.navigationProbe = {state, orbitViewer, attachPointerNavigation, identityMatrix, cameraMarkerGeometry, trimIndependentFrameQueue};', context);
 const {state, orbitViewer, attachPointerNavigation, identityMatrix, cameraMarkerGeometry, trimIndependentFrameQueue} = context.window.navigationProbe;
 Object.assign(state.settings, {orbit_distance: 0.65, focus_vertical_offset: 0.35,
@@ -19,6 +22,34 @@ const radius = Math.hypot(0.65, 0.35);
 const base = identityMatrix();
 let checks = 0;
 function check(condition, label) {checks++; assert.ok(condition, label);}
+
+const advanceRenderClock=vm.runInContext('advanceRenderClock',context);
+for(const refreshHz of [30,59.94,60,90,120,144,165,240]) {
+  state.lastRenderMs=0;let frames=0;
+  for(let tick=0;tick<Math.floor(refreshHz*4);tick++) {
+    if(advanceRenderClock(100+tick*1000/refreshHz+Math.sin(tick*.7)*.15))frames++;
+  }
+  check(Math.abs(frames-Math.min(refreshHz,60)*4)<=2,'60 fps render pacing retains fractional refresh time at '+refreshHz+' Hz');
+}
+check(advanceRenderClock(30000),'a long pause resumes rendering immediately');
+state.lastRenderMs=0;
+const uploadBatches=[],closedBitmaps=[];
+context.uploadSpy=items=>uploadBatches.push(items.map(item=>item.tag));
+vm.runInContext('var savedCameraUpload=applyCameraUploads;applyCameraUploads=uploadSpy;',context);
+const queueCameraUploads=vm.runInContext('queueCameraUploads',context);
+const flushPendingCameraUploads=vm.runInContext('flushPendingCameraUploads',context);
+const clearPendingCameraUploads=vm.runInContext('clearPendingCameraUploads',context);
+const capture=(id,tag)=>({metadata:{id},tag,bitmap:{close(){closedBitmaps.push(tag);}}});
+queueCameraUploads([capture('A','A1'),capture('B','B1')]);queueCameraUploads([capture('A','A2')]);
+check(uploadBatches.length===0,'native decode can finish without interrupting rendering with GPU uploads');
+check(closedBitmaps.join(',')==='A1','replaced independent captures release their bitmap');
+flushPendingCameraUploads();
+check(uploadBatches[0].join(',')==='A2,B1','a newer A capture never erases a pending B capture');
+queueCameraUploads([capture('C','C1')]);clearPendingCameraUploads();
+check(closedBitmaps.includes('C1')&&state.pendingCameraUploads.size===0,'stopping or reconnecting releases pending captures');
+queueCameraUploads(Array.from({length:33},(_,i)=>capture(String(i),'camera'+i)));
+check(uploadBatches[1].length===33&&state.pendingCameraUploads.size===0,'a large rig flushes its bounded batch without truncating cameras');
+vm.runInContext('applyCameraUploads=savedCameraUpload;',context);
 
 for (const yaw of [-170, -80, 0, 80, 170]) {
   for (const pitch of [-80, -50, -10, 0, 10, 50, 80]) {
@@ -55,6 +86,11 @@ state.cameras = [{width:2,height:2,metadata:{intrinsics:[1,1,0,0]},depth:new Uin
 check(vm.runInContext('focusGodotHybridRendererAt(100,100)',context), 'a real depth point can be picked');
 check(state.manualPan.every(v=>v===0), 'picking a point clears the previous pan translation');
 check(state.focusWorld.every((v,i)=>Math.abs(v-[0,0,-1][i])<1e-6), 'the picked world point is the actual pivot');
+state.settings.workspace_crop_enabled=true;state.settings.workspace_crop_min=[1,1,-2];state.settings.workspace_crop_max=[2,2,0];
+check(!vm.runInContext('focusGodotHybridRendererAt(100,100)',context),'hidden outside geometry cannot become an orbit pivot');
+state.settings.workspace_crop_min=[-.1,-.1,-1.1];state.settings.workspace_crop_max=[.1,.1,-.9];
+check(vm.runInContext('focusGodotHybridRendererAt(100,100)',context),'native geometry inside the crop remains pickable');
+state.settings.workspace_crop_enabled=false;
 vm.runInContext('setGodotHybridNavigationState(savedRuntime)',context);
 state.canvas = {addEventListener: (name, listener) => {listeners[name] = listener;},
   setPointerCapture() {}, hasPointerCapture: () => false, clientHeight: 600};
@@ -136,6 +172,24 @@ check(changedReference[0].sequence === 1,
 (async () => {
   const controller = fs.readFileSync(path.join(__dirname, '../web/controller_hybrid.js'), 'utf8');
   const section = (start, end) => controller.slice(controller.indexOf(start), controller.indexOf(end));
+  const depthControl={checked:false};let depthSettingsSent=0;
+  const shortcut=vm.createContext({hybridMode:true,displayModeSelect:{value:'independent_mesh'},
+    document:{getElementById:()=>depthControl},sendViewSettings:()=>{depthSettingsSent++;}});
+  vm.runInContext(section('function handleDepthOnlyShortcut(', 'document.addEventListener("keydown", handleDepthOnlyShortcut)'),shortcut);
+  const key=extra=>({key:'Backspace',target:{},preventDefault(){this.prevented=true;},...extra});
+  const press=event=>{shortcut.event=event;vm.runInContext('handleDepthOnlyShortcut(event)',shortcut);return event;};
+  check(press(key()).prevented&&depthControl.checked,'Backspace enables depth-only and suppresses browser navigation');
+  check(press(key({repeat:true})).prevented&&depthSettingsSent===1,'holding Backspace does not repeatedly toggle depth-only');
+  press(key());check(!depthControl.checked&&depthSettingsSent===2,'a second Backspace restores RGB texturing');
+  for(const extra of [{key:'Delete'},{ctrlKey:true},{altKey:true},{metaKey:true},{shiftKey:true},
+    {defaultPrevented:true},{isComposing:true},{target:{isContentEditable:true}},
+    {target:{closest:()=>({tagName:'INPUT'})}},{target:{closest:()=>({tagName:'TEXTAREA'})}},
+    {target:{closest:()=>({tagName:'SELECT'})}}]) {
+    const event=press(key(extra));
+    check(!event.prevented&&!depthControl.checked&&depthSettingsSent===2,'editing, composition and modified keys keep their normal behavior');
+  }
+  shortcut.displayModeSelect.value='rgb_camera';
+  check(!press(key()).prevented&&depthSettingsSent===2,'original RGB mode is unaffected by the 3D shortcut');
   const route=vm.createContext({window:{location:{protocol:'http:',host:'localhost:8766'}},pageHost:()=> 'localhost'});
   vm.runInContext(section('function remoteUrl(', 'function streamBaseUrl('),route);
   check(vm.runInContext('remoteUrl()',route)==='ws://localhost:8766/head-tracking','local HTTP uses the authenticated control route');
@@ -152,7 +206,11 @@ check(changedReference[0].sequence === 1,
   const presets = await import('data:text/javascript;base64,' + Buffer.from(
     fs.readFileSync(path.join(__dirname, '../web/capture_presets.js'), 'utf8')).toString('base64'));
   const policy = vm.createContext({URLSearchParams, document:{getElementById:control}, robotModule:{},
-    viewSettingsVersion:14,displayModes:['point_cloud','independent_mesh','blendpcr','rgb_camera'],
+    viewSettingsVersion:15,displayModes:['point_cloud','independent_mesh','blendpcr','rgb_camera'],
+    cropViewSettings:()=>({workspace_crop_enabled:false,workspace_crop_show_box:false,
+      workspace_crop_min:[-.6,-.45,-.6],workspace_crop_max:[.6,.45,.6]}),
+    workspaceCropBounds:()=>true,lastValidCrop:{},restoreCropSettings(){},
+    modeledViewSettings:()=>({modeled_workspace_enabled:false}),modeledWorkspace:()=>null,lastValidModeled:{},restoreModeledSettings(){},
     defaultDisplayMode:'independent_mesh',displayModeSelect:control('display-mode'),
     streamPresetSelect:control('stream-preset'),localSavedViewSettings:()=>null,
     updateHeadTrackingOptions(){},updateViewLabels(){},showHybrid(){},updateStatus(){},
@@ -174,6 +232,9 @@ check(changedReference[0].sequence === 1,
     check(policy.payload.persistent_temporal_reference_enabled===false,'old or absent saved compression stays off');
     check(policy.payload.full_rgb_frame_updates_enabled===true,'both camera profiles always send full RGB frames');
     check(policy.payload.fov===71&&policy.payload.orbit_distance===.83,'unrelated saved camera preferences are preserved');
+    policy.saved.depth_only_enabled=true;
+    vm.runInContext('restoreViewSettings(saved);payload=viewSettingsPayload();',policy);
+    check(policy.payload.depth_only_enabled===true,'depth-only preference survives the settings round trip');
     for(const mode of ['quality','latency']) {
       control('stream-preset').value=mode;
       await vm.runInContext('startHybridViewport()',policy);

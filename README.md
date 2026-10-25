@@ -4,6 +4,8 @@ A reusable RealSense-to-browser teleoperation stack with a Godot 3D runtime. The
 
 The browser is the single operator interface. Its compact **Controller** panel contains the selected view and daily robot controls; **Advanced Setup** contains installation defaults, calibration, diagnostics, and tuning. The Godot dock is intentionally limited to setup, diagnostics, launch, and safe shutdown. A clean clone starts in vision-only mode, with physical motion disabled.
 
+For host-side RGB/state/action demonstrations, see [Demonstration recording](docs/RECORDING.md). The browser controls episode capture; the robot host saves the data and the official LeRobot writer exports it for training.
+
 ## First run
 
 Requirements:
