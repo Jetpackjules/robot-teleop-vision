@@ -80,14 +80,16 @@
     "keyCharacteristics": [
       "Plain labelled controls",
       "Flat charcoal surfaces",
-      "Pale blue primary actions"
+      "Pale blue primary actions",
+      "Task-first navy trial HUD with a yellow timer and cyan progress"
     ],
     "rules": [],
     "dos": [
       "Preserve keyboard focus and meaningful state labels."
     ],
     "donts": [
-      "Do not add gradients, emoji controls, glow, or arcade styling."
+      "Do not add gradients, emoji controls, glow, or arcade styling.",
+      "Do not add routine instructional subtitles or repeat Ready beneath the timer."
     ]
   }
 }

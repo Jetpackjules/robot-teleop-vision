@@ -320,13 +320,13 @@
 
     <section id="trial-hud" aria-label="Current trial">
       <div class="trial-copy">
-        <div class="trial-meta"><span id="trial-position">Trial 1 of 3</span><span class="meta-divider" aria-hidden="true">/</span><span id="trial-condition">Fixed cameras</span></div>
         <h1 id="trial-task">Add a task in Settings</h1>
+        <div class="trial-meta"><span id="trial-position">Trial 1 of 3</span><span class="meta-divider" aria-hidden="true">/</span><span id="trial-condition">Fixed cameras</span></div>
       </div>
-      <div class="trial-clock"><output id="trial-timer" aria-label="Trial elapsed time" aria-live="off">00:00</output><span id="trial-recording-state">Ready</span></div>
+      <div class="trial-clock"><output id="trial-timer" aria-label="Trial elapsed time" aria-live="off">00:00</output><span id="trial-recording-state" hidden></span></div>
       <button id="trial-action" class="primary" type="button" disabled>Start trial</button>
       <progress id="trial-progress" value="0" max="3" aria-label="Completed trials"></progress>
-      <p id="trial-message" role="status" aria-live="polite">Checking host recording…</p>
+      <p id="trial-message" role="status" aria-live="polite" hidden></p>
       <div id="trial-outcome-control" hidden><label>Outcome<select id="trial-outcome"><option value="unrated">Not rated</option><option value="success">Success</option><option value="failure">Failure</option></select></label></div>
     </section>
 

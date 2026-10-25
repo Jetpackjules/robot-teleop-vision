@@ -17,6 +17,11 @@ colors:
   bad: "#fa9b9b"
   hold: "#43292c"
   hold-text: "#ffe3e5"
+  trial-panel: "#101d35"
+  trial-line: "#5477a5"
+  trial-muted: "#bfcee2"
+  trial-timer: "#facc15"
+  trial-progress: "#5bc9df"
 typography:
   body:
     fontFamily: "system-ui, sans-serif"
@@ -30,7 +35,7 @@ typography:
     lineHeight: 1.35
   timer:
     fontFamily: "system-ui, sans-serif"
-    fontSize: "26px"
+    fontSize: "28px"
     fontWeight: 500
     lineHeight: 1.15
   label:
@@ -80,6 +85,8 @@ The primary accent is a light, desaturated blue against dark charcoal neutrals. 
 
 Use the action fill for the primary task action and the accent for focus and selected navigation. Main text is off-white; secondary labels use the muted neutral. The line color defines controls and separates settings sections. Semantic green, amber, and red communicate connection, waiting, recording, and error states alongside text. Hold has its existing muted red treatment in Arm settings.
 
+The trial HUD borrows RoboCade's navy, yellow timer, and cyan progress hierarchy, using a flat navy surface and a restrained blue border. Its local muted text is tinted for that navy surface. Keep the task first and omit routine instructional sentences and repeated Ready labels. Show actionable warnings and errors when needed. Keep gradients and decorative subheadings out of the participant view.
+
 ## Typography
 
 Use the platform system sans-serif for interface text. Trial task text uses the title role, secondary information uses the label role, and the timer uses tabular numerals at the timer role's size. Settings headings are slightly larger or heavier, without a separate display face.
@@ -108,7 +115,7 @@ Primary buttons use the pale action fill with dark text. Secondary buttons use t
 
 Settings tabs are flat text controls with an accent underline on the selected tab. Fields have dark fills, light borders, clear labels, and an accent caret. Disclosures expose secondary controls on demand. The connection disclosure retains its short text label alongside a semantic dot.
 
-Trial progress is a thin horizontal bar. Timer figures are tabular. Keep the task distinct through modest size and weight rather than large display typography. Live and loading states use actual application status; demonstrations must identify synthetic inputs.
+Trial progress is a visible 6px cyan horizontal bar. Timer figures are yellow and tabular. Keep the task distinct through modest size and weight rather than large display typography. Live and loading states use actual application status; demonstrations must identify synthetic inputs.
 
 ## Do's and Don'ts
 

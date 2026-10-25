@@ -167,6 +167,7 @@ export class TrialController {
     const label = this.pending ? 'Switching…' : status.state === 'preparing' ? 'Preparing' : status.state === 'saving' ? 'Saving…'
       : active ? 'Recording' : done ? 'Complete' : saved ? 'Saved' : status.state === 'error' ? 'Interrupted' : 'Ready';
     byId('trial-recording-state').textContent = label;
+    byId('trial-recording-state').hidden = label === 'Ready';
     action.textContent = this.pending ? 'Switching…' : recorder.busy ? 'Please wait…' : active ? status.state === 'saving' ? 'Saving…' : 'Finish trial'
       : done ? 'Complete' : saved ? this.state.index === 2 ? 'End session' : 'Next trial' : needsTask ? 'Set task' : guided ? 'Start trial' : 'Start recording';
     action.disabled = this.pending || recorder.busy || status.state === 'saving' || done
@@ -176,12 +177,11 @@ export class TrialController {
     const progress = byId('trial-progress');
     progress.hidden = !guided; progress.max = 3;
     progress.value = done ? 3 : Math.max(this.state.completed.length, saved ? this.state.index + 1 : this.state.index);
-    let message = recorder.error || this.viewError || (done ? 'Session complete. Start a new session in Settings.'
-      : saved ? 'Saved on host. The facilitator can continue when ready.'
+    const message = recorder.error || this.viewError || (done || saved ? ''
       : status.state === 'saving' ? 'Finishing the recording on the host. Keep this page open.'
       : active ? status.is_owner === false ? 'This recording belongs to another controller page.'
-        : needsView ? 'Live view interrupted. Hold the arm if needed; the host is still recording.' : 'Recording RGB, measured joints and actions on the host.'
-      : needsTask ? 'The facilitator sets the task in Settings → Session.'
+        : needsView ? 'Live view interrupted. Hold the arm if needed; the host is still recording.' : ''
+      : needsTask ? ''
       : mismatch ? 'The view was changed in Settings. Restore the trial view, or turn off guided trials.'
       : needsTracking ? 'Waiting for head tracking. Look toward the laptop camera, then reset head tracking.'
       : needsView ? 'Waiting for the live view. Reconnect in Settings → View if it does not return.'
@@ -189,9 +189,10 @@ export class TrialController {
       : !status.controller_active ? 'Reconnect this controller in Settings → View before recording.'
       : !status.ready ? 'Waiting for fresh robot feedback. Check the arm in Settings.'
       : status.state === 'error' ? `${status.message} Start this trial again when ready.`
-      : 'Ready. The facilitator starts the recording.');
+      : '');
     const messageNode = byId('trial-message');
     if (messageNode.textContent !== message) messageNode.textContent = message;
+    messageNode.hidden = !message;
     const messageRole = recorder.error || this.viewError || status.state === 'error' ? 'alert' : 'status';
     if (messageNode.getAttribute('role') !== messageRole) messageNode.setAttribute('role', messageRole);
     byId('trial-outcome-control').hidden = !active || status.is_owner === false;

@@ -39,6 +39,7 @@ These mechanisms describe the implementation. Improved task performance, presenc
 
 - Show one active view at a time, filling the available viewport.
 - Keep the task, condition, trial progress, timer, recording state, and appropriate next action clear.
+- Keep the task first. Omit routine explanatory sentences from the trial HUD; show actionable warnings and errors only when needed. Avoid decorative subheadings and repeated idle-state text.
 - Fixed-camera trials support selecting individual RGB cameras using visible previous/next controls and left/right arrow keys.
 - Mouse 3D trials use the existing 3D scene with head tracking off. Head-tracked trials use that scene with head tracking on and an accessible reset action. Keep the selected 3D renderer consistent between these two conditions.
 - The facilitator chooses the condition order. The implemented default is fixed cameras, mouse 3D, then head tracking; this is configurable rather than a requirement of the study protocol.

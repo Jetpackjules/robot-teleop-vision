@@ -30,13 +30,16 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     });
     browser = await chromium.launch({headless: true, ...(process.env.TEST_BROWSER_CHANNEL ? {channel: process.env.TEST_BROWSER_CHANNEL} : {})});
     const page = await browser.newPage({viewport: {width: 1366, height: 768}});
+    // A developer's Live toolbar must not cover the app controls under test.
+    await page.route('http://localhost:*/live.js*', route => route.abort());
     const capture = path => process.env.TEST_UI_SCREENSHOTS === '0' ? Promise.resolve() : page.screenshot({path});
     page.setDefaultTimeout(15000);
     page.setDefaultNavigationTimeout(20000);
     page.on('pageerror', error => errors.push(error.message));
     console.log('Fixture ready on loopback port', port);
     await page.goto(`http://127.0.0.1:${port}/controller.html?rgbd_transport=websocket`, {waitUntil: 'domcontentloaded'});
-    await page.waitForFunction(() => document.getElementById('trial-message').textContent.includes('facilitator'));
+    await page.waitForFunction(() => document.querySelector('#so101-hold')
+      && document.getElementById('episode-recording').dataset.recordingState === 'idle');
     console.log('Controller initialized');
     assert.equal(await page.locator('#advanced-setup').isVisible(), false, 'Settings begins closed');
     assert.equal(await page.locator('#connection-details').getAttribute('open'), null);
@@ -68,6 +71,8 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     await page.keyboard.press('ArrowRight');
     assert.equal(await page.locator('#rgb-camera-select').inputValue(), 'camera-test');
     await page.waitForFunction(() => !document.getElementById('trial-action').disabled);
+    assert.equal(await page.locator('#trial-message').isVisible(), false, 'ready HUD has no instruction line');
+    assert.equal(await page.locator('#trial-recording-state').isVisible(), false, 'ready is not repeated below the timer');
 
     const episodes = [];
     for (const [index, condition] of ['fixed_rgb', 'mouse_3d', 'head_3d'].entries()) {
@@ -75,6 +80,8 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
       await page.locator('#trial-action').click();
       await page.waitForFunction(() => document.getElementById('episode-recording').dataset.recordingState === 'recording');
       assert.equal(await page.locator('#trial-action').textContent(), 'Finish trial');
+      assert.equal(await page.locator('#trial-message').isVisible(), false, 'normal recording has no explanatory subtext');
+      assert.equal(await page.locator('#trial-recording-state').textContent(), 'Recording');
       await page.locator('#trial-outcome').selectOption(index === 1 ? 'failure' : 'success');
       await page.waitForFunction(() => document.getElementById('trial-timer').textContent !== '00:00');
       assert.equal(await page.locator('#display-mode').isDisabled(), true, 'condition cannot change during a trial');
@@ -91,8 +98,10 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
       await page.locator('#trial-action').click();
       await page.waitForFunction(() => document.getElementById('episode-recording').dataset.recordingState === 'saving');
       assert.equal(await page.locator('#trial-action').isDisabled(), true, 'cannot advance while host saves');
+      assert.equal(await page.locator('#trial-message').isVisible(), true, 'host save warning remains visible');
       assert.equal(await page.locator('#trial-position').textContent(), `Trial ${index + 1} of 3`);
       await page.waitForFunction(() => ['Next trial', 'End session'].includes(document.getElementById('trial-action').textContent));
+      assert.equal(await page.locator('#trial-message').isVisible(), false, 'saved HUD has no redundant explanation');
       assert.equal(await page.locator('#trial-position').textContent(), `Trial ${index + 1} of 3`, 'saving never auto-advances');
       const status = await page.evaluate(async () => await (await fetch('/api/v1/recording?client=recording-fixture')).json());
       const manifest = JSON.parse(readFileSync(resolve(episodeRoot, status.last_saved.episode, 'episode.json'), 'utf8'));
