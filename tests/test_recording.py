@@ -127,6 +127,36 @@ def test_host_episode_preserves_rgb_and_actual_applied_targets(tmp_path):
         assert np.all(data['action_applied_ns'] <= data['obs.robot_received_ns'])
 
 
+TRIAL = {'session_id': 'test-session', 'index': 1, 'total': 3,
+         'condition': 'fixed_rgb', 'display_mode': 'rgb_camera'}
+
+
+def test_trial_metadata_survives_host_save(tmp_path):
+    with recorder_at(tmp_path) as (recorder, _, _):
+        supplied = dict(TRIAL)
+        recorder.start('page-a', 'Match the viewing condition', trial=supplied)
+        supplied['condition'] = 'head_3d'
+        wait_for(lambda: recorder.status()['frames'] >= 3)
+        assert recorder.status()['trial'] == TRIAL
+        recorder.stop('page-a', outcome='success')
+        wait_for(lambda: recorder.status()['state'] == 'idle')
+        saved = recorder.status()['last_saved']
+        assert saved['trial'] == TRIAL and saved['duration_seconds'] > 0
+        manifest, _ = inspect_episode(tmp_path/saved['episode'])
+        assert manifest['trial'] == TRIAL
+
+
+@pytest.mark.parametrize('patch', [
+    {'index': 0}, {'index': True}, {'index': 4}, {'total': 31}, {'session_id': '../test'},
+    {'session_id': []}, {'condition': 'invented'}, {'display_mode': 'blendpcr'}, {'extra': 'unbounded'},
+])
+def test_invalid_trial_metadata_cannot_start_capture(tmp_path, patch):
+    with recorder_at(tmp_path) as (recorder, _, _):
+        with pytest.raises(RecordingError, match='[Tt]rial'):
+            recorder.start('page-a', 'Invalid metadata', trial={**TRIAL, **patch})
+        assert recorder.status()['state'] == 'idle' and recorder.worker is None
+
+
 @pytest.mark.parametrize('change', ['stale_rgb', 'profile', 'robot', 'invalid_feedback'])
 def test_source_faults_preserve_incomplete_episode(tmp_path, change):
     with recorder_at(tmp_path) as (recorder, source, status):
@@ -320,7 +350,8 @@ def test_real_http_and_existing_multipart_rgb_record_without_motor_commands(tmp_
         wait_for(lambda: server.episode_recorder.status()['ready'])
         assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'start', 'client': 'page-a', 'task': 'Synthetic HTTP trial'}, origin=False)[0] == 403
         assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'start', 'client': 'other', 'task': 'Wrong page'})[0] == 409
-        assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'start', 'client': 'page-a', 'task': 'Synthetic HTTP trial'})[0] == 200
+        assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'start', 'client': 'page-a', 'task': 'Synthetic HTTP trial', 'trial': {**TRIAL, 'index': 0}})[0] == 409
+        assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'start', 'client': 'page-a', 'task': 'Synthetic HTTP trial', 'trial': TRIAL})[0] == 200
         wait_for(lambda: server.episode_recorder.status()['frames'] >= 4)
         assert request(server.server_port, 'GET', '/api/v1/recording?client=page-a')[1]['state'] == 'recording'
         assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'stop', 'client': 'page-a', 'outcome': 'success'})[0] == 200
@@ -328,6 +359,7 @@ def test_real_http_and_existing_multipart_rgb_record_without_motor_commands(tmp_
         saved = server.episode_recorder.status()['last_saved']
         manifest, data = inspect_episode(tmp_path/'episodes'/saved['episode'])
         assert manifest['status'] == 'complete' and manifest['task'] == 'Synthetic HTTP trial'
+        assert manifest['trial'] == TRIAL
         assert (tmp_path/'episodes'/saved['episode']/str(data['obs.images.camera_1'][0])).read_bytes() == JPEG
         assert all('w=3840' in path and 'q=95' in path for path in capture.requests)
         with pytest.raises(socket.timeout):

@@ -1,5 +1,6 @@
     import { robotModuleReady } from "./robot_module_host.js";
-    import { EpisodeRecordingControl } from './episode_recording.js?v=20261025_host_recording';
+    import { EpisodeRecordingControl } from './episode_recording.js?v=20261025_trials';
+    import { TrialController } from './trial_controller.js?v=20261025_trials';
     import { CapturePresetControl, nativeStreamPreset } from "./capture_presets.js?v=20261020_native_modes";
     import { workspaceCropBounds } from './workspace_crop.js?v=20261021_original_rgb';
     import { MODELED_WORKSPACE_DEFAULTS, modeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
@@ -1179,9 +1180,8 @@
       }
       const hybridStalled = activeViewportMode === "hybrid" && hybrid.stalled === true;
       const headTrackingEnabled = document.getElementById("head-tracking-enabled").checked;
-      const navigationReady = active || !headTrackingEnabled;
-      statusDot.className = "dot " + (hybridStalled ? "bad" : connected && navigationReady ? "ok" : connected ? "" : "bad");
-      statusTitle.textContent = hybridStalled ? "Stream stalled" : connected && navigationReady ? "Connected" : connected ? "Stream connected" : "Connecting";
+      statusDot.className = "dot " + (hybridStalled ? "bad" : connected ? "ok" : "bad");
+      statusTitle.textContent = hybridStalled ? "Stream stalled" : connected ? "Connected" : "Connecting";
       const size = activeViewportMode === "hybrid"
         ? (hybrid.width > 0 ? `${hybrid.width}x${hybrid.height}` : "--")
         : (viewportVideo.videoWidth > 0 ? `${viewportVideo.videoWidth}x${viewportVideo.videoHeight}` : "--");
@@ -1344,18 +1344,6 @@
       else document.getElementById(target==='table'?'modeled-workspace-status':'workspace-crop-status').textContent='Open a connected 3D view to edit this workspace.';
     });
     for(const axis of ['x','y','z'])document.getElementById(`workspace-crop-rotation-${axis}`).addEventListener('change',()=>{if(updateCropControls())sendViewSettings();});
-    document.getElementById("open-advanced").addEventListener("click", () => {
-      advancedSetup.hidden = false;
-      refreshRgbCameras();
-      document.getElementById("close-advanced").focus();
-    });
-    document.getElementById("close-advanced").addEventListener("click", () => {
-      advancedSetup.hidden = true;
-      document.getElementById("open-advanced").focus();
-    });
-    advancedSetup.addEventListener("click", (event) => {
-      if (event.target === advancedSetup) advancedSetup.hidden = true;
-    });
     function handleDepthOnlyShortcut(event) {
       if (event.key !== "Backspace" || event.defaultPrevented || event.isComposing
         || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
@@ -1369,9 +1357,6 @@
       sendViewSettings();
     }
     document.addEventListener("keydown", handleDepthOnlyShortcut);
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !advancedSetup.hidden) advancedSetup.hidden = true;
-    });
     document.getElementById("save-site-defaults").addEventListener("click", saveSiteSettings);
     document.getElementById("reload-site-defaults").addEventListener("click", async () => {
       await loadSiteSettings({ apply: true });
@@ -1400,4 +1385,23 @@
     restoreViewSettings(installationSettings);
     robotModule.bind?.({ sendViewSettings, updateStatus });
     robotModule.start?.({ sendViewSettings, updateStatus });
+    const trialController = new TrialController({recording: episodeRecording,
+      applyCondition: async (condition, renderer) => {
+        const mode = condition === 'fixed_rgb' ? 'rgb_camera' : renderer;
+        displayModeSelect.value = displayModes.includes(mode) ? mode : defaultDisplayMode;
+        document.getElementById('head-tracking-enabled').checked = condition === 'head_3d';
+        updateHeadTrackingOptions();
+        applyDisplayMode();
+        sendViewSettings();
+        if (userStarted) await startTracking();
+      },
+      resetView: () => {retainedNavigation = null; window.recenterGodotHybridRenderer?.();},
+      resetTracking: () => window.recenterGodotWebcamTracker?.(),
+      viewReady: () => {
+        if (activeViewportMode !== 'hybrid') return viewportVideo.currentTime > 0;
+        const view = window.getGodotHybridRendererStatus?.();
+        return view?.connected === true && view.stalled !== true && Number(view.decoded) > 0;
+      },
+    });
+    await trialController.initialize();
     startController();

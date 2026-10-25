@@ -2626,7 +2626,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
                 raise RecordingError("Recording requests must use application/json.")
             data = json.loads(self.rfile.read(length).decode("utf-8"))
-            if not isinstance(data, dict) or set(data)-{"command", "client", "task", "cameras", "fps", "outcome"}:
+            if not isinstance(data, dict) or set(data)-{"command", "client", "task", "cameras", "fps", "outcome", "trial"}:
                 raise RecordingError("Invalid recording request fields.")
             client = camera_id(data.get("client"))
             recorder = self.server.episode_recorder
@@ -2635,7 +2635,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 with self.server.browser_client_lock:
                     if self.server.browser_client_id != client:
                         raise RecordingError("Reconnect this controller before starting an episode.")
-                    result = recorder.start(client, data.get("task"), data.get("cameras"), data.get("fps", 15))
+                    result = recorder.start(client, data.get("task"), data.get("cameras"), data.get("fps", 15), data.get("trial"))
             elif command in ("stop", "discard"):
                 result = recorder.stop(client, discard=command == "discard", outcome=data.get("outcome", "unrated"))
             else:
@@ -2849,6 +2849,8 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             content_type = "text/html; charset=utf-8"
         elif target.suffix == ".js":
             content_type = "text/javascript; charset=utf-8"
+        elif target.suffix == ".css":
+            content_type = "text/css; charset=utf-8"
         elif target.suffix == ".wasm":
             content_type = "application/wasm"
         elif target.suffix == ".png":

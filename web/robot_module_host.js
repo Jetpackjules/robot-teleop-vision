@@ -54,6 +54,7 @@ function mountPoints() {
     viewRoot: document.getElementById("robot-view-root"),
     statusRoot: document.getElementById("robot-status-root"),
     floatingRoot: document.getElementById("robot-floating-root"),
+    quickControlsRoot: document.getElementById("robot-quick-controls-root"),
   };
 }
 

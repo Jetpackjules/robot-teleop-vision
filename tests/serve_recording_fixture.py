@@ -1,10 +1,17 @@
 """A loopback-only recording rehearsal. Every sensor/robot sample is synthetic."""
 from pathlib import Path
 import argparse
+import base64
+import copy
 import json
 import socket
 import sys
 import threading
+import time
+import struct
+from urllib.parse import parse_qs, urlsplit
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'tests'))
@@ -12,6 +19,76 @@ sys.path.insert(0, str(ROOT))
 from test_recording import CaptureHandler, feedback
 from http.server import ThreadingHTTPServer
 from tools.lan_remote_view_server import LanRemoteHandler, LanRemoteServer
+from workspace_readiness_fixture import generate
+
+
+class TrialCaptureHandler(CaptureHandler):
+    """Two original RGB streams plus public synthetic RGB-D and actual CAD FK."""
+    scene = None
+
+    def do_GET(self):
+        path = urlsplit(self.path).path
+        if path == '/cameras':
+            payload = json.dumps({'cameras': [{'id': 'camera-test', 'name': 'Camera 1'},
+                                              {'id': 'camera-right', 'name': 'Camera 2'}]}).encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if path == '/rgbd':
+            self.send_response(200)
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+            self.end_headers()
+            scene = self.scene
+            original = base64.b64decode(scene['source'])
+            length = struct.unpack('<I', original[5:9])[0]
+            metadata = json.loads(original[9:9+length])
+            payload = original[9+length:]
+            metadata['robot'] = {'available': True, 'registration': {'registered': True},
+                                 'links': scene['poses'][0]['links']}
+            eye, target = np.array([.8, .6, .25]), np.array([0, .12, -1])
+            back = eye-target
+            back /= np.linalg.norm(back)
+            right = np.cross([0, 1, 0], back)
+            right /= np.linalg.norm(right)
+            up = np.cross(back, right)
+            metadata['viewer']['transform'] = [*right, 0, *up, 0, *back, 0, *eye, 1]
+            try:
+                while not self.server.stopping.is_set():
+                    now = time.time()*1000
+                    metadata['capture_unix_ms'] = now
+                    for camera in metadata['cameras']:
+                        camera.update(capture_unix_ms=now, sequence=int(time.monotonic()*10))
+                    header = json.dumps(metadata, separators=(',', ':')).encode()
+                    packet = b'RGBD1'+struct.pack('<I', len(header))+header+payload
+                    self.wfile.write(f'--frame\r\nContent-Length: {len(packet)}\r\n\r\n'.encode()+packet+b'\r\n')
+                    self.wfile.flush()
+                    self.server.stopping.wait(.1)
+            except (OSError, ValueError):
+                pass
+            return
+        if path == '/camera-rgb-stream':
+            selected = parse_qs(urlsplit(self.path).query).get('camera', ['camera-test'])[0]
+            from test_recording import JPEG
+            self.server.requests.append(self.path)
+            self.send_response(200)
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+            self.end_headers()
+            try:
+                while not self.server.stopping.is_set():
+                    sequence = time.monotonic_ns()//30_000_000
+                    header = (f'--frame\r\nContent-Length: {len(JPEG)}\r\nX-Camera-Id: {selected}\r\n'
+                              'X-Frame-Width: 64\r\nX-Frame-Height: 48\r\nX-Source-Width: 64\r\nX-Source-Height: 48\r\n'
+                              f'X-Frame-Sequence: {sequence}\r\nX-Capture-Epoch: synthetic\r\n'
+                              f'X-Capture-Unix-Ms: {time.time()*1000-15:.3f}\r\n\r\n').encode()
+                    self.wfile.write(header+JPEG+b'\r\n')
+                    self.wfile.flush()
+                    self.server.stopping.wait(.03)
+            except (OSError, ValueError):
+                pass
+            return
+        super().do_GET()
 
 
 class FixtureHandler(LanRemoteHandler):
@@ -19,8 +96,21 @@ class FixtureHandler(LanRemoteHandler):
         pass
 
     def do_GET(self):
-        if self.path == '/api/v1/robot-module':
-            self.serve_json({'id': 'disabled', 'label': 'Synthetic recording rehearsal', 'entrypoints': {}, 'capabilities': {}})
+        if self.path == '/trial_fixture.js':
+            payload = (ROOT/'tests/trial_fixture.js').read_bytes()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/javascript')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if self.path == '/api/v1/site-settings':
+            settings = {**self.server.fixture_scene['settings'], 'settings_version': 16,
+                        'robot_overlay_enabled': True, 'robot_overlay_style': 'solid',
+                        'robot_overlay_mask_scanned_robot': False, 'head_tracking_enabled': False,
+                        'scene_lighting_enabled': True, 'scene_shadows_enabled': True,
+                        'orbit_distance': 1.2, 'focus_vertical_offset': .25, 'depth_only_enabled': True}
+            self.serve_json(settings)
             return
         if self.path.startswith('/capture-'):
             self.serve_json({})
@@ -28,11 +118,23 @@ class FixtureHandler(LanRemoteHandler):
         super().do_GET()
 
     def serve_file(self, rel, include_body=True):
+        if rel == 'controller_hybrid.js':
+            # The production HTTP default uses the gateway's normal port. This
+            # fixture gets an ephemeral port to coexist with running services.
+            data = (ROOT/'web/controller_hybrid.js').read_text(encoding='utf-8').replace(
+                'ws://${pageHost()}:8766/head-tracking', 'ws://${window.location.host}/head-tracking').encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/javascript; charset=utf-8')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            if include_body:
+                self.wfile.write(data)
+            return
         if rel != 'controller.html':
             return super().serve_file(rel, include_body)
         source = (ROOT/'web/controller.html').read_text(encoding='utf-8')
         source = source.replace('<script type="module" src="./controller_hybrid.js',
-            '<style>#start-overlay{display:none!important}</style><script>window.robotTeleopPageId="recording-fixture";localStorage.setItem("robotTeleopViewSettings",JSON.stringify({settings_version:16,head_tracking_enabled:false}));</script><script type="module" src="./controller_hybrid.js')
+            '<style>#start-overlay{display:none!important}</style><script>window.robotTeleopPageId="recording-fixture";</script><script type="module" src="/trial_fixture.js"></script><script type="module" src="./controller_hybrid.js')
         source = source.replace('<h3 id="recording-title" class="section-title">Demonstration recording</h3>',
             '<h3 id="recording-title" class="section-title">Demonstration recording</h3><p class="helper-text">Synthetic rehearsal. No hardware is connected.</p>')
         data = source.encode()
@@ -49,7 +151,9 @@ def main():
     parser.add_argument('--port', type=int, default=18768)
     parser.add_argument('--output', type=Path, default=ROOT/'.teleop/recording-rehearsal')
     args = parser.parse_args()
-    capture = ThreadingHTTPServer(('127.0.0.1', 0), CaptureHandler)
+    scene = generate()
+    TrialCaptureHandler.scene = scene
+    capture = ThreadingHTTPServer(('127.0.0.1', 0), TrialCaptureHandler)
     capture.daemon_threads = True
     capture.stopping, capture.requests = threading.Event(), []
     threading.Thread(target=capture.serve_forever, daemon=True).start()
@@ -59,10 +163,18 @@ def main():
         site_settings_path=args.output/'fixture-site-settings.json',
         robot_view_devices={'wrist_rgb': 'unused'})
     original_source = server.episode_recorder.source_factory
+    server.fixture_scene = copy.deepcopy(scene)
 
     def synthetic_source():
         source = original_source()
         source.synthetic = True
+        close = source.close
+
+        def delayed_close():
+            close()
+            time.sleep(.6)  # Exercise the UI's real Saving state.
+
+        source.close = delayed_close
         return source
 
     server.episode_recorder.source_factory = synthetic_source

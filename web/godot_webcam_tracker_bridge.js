@@ -131,7 +131,11 @@ function ensureOverlayElement(parent) {
 }
 
 function ensurePreviewElement() {
-  if (!state.options.preview) return null;
+  if (!state.options.preview || !state.options.debug) {
+    state.preview?.remove();
+    state.preview = null;
+    return null;
+  }
   if (state.preview) return state.preview;
   const preview = document.createElement("div");
   preview.style.cssText = [
@@ -716,11 +720,7 @@ function shouldFallbackToOpenCv(err) {
 function updatePreview() {
   const preview = ensurePreviewElement();
   if (!preview) return;
-  const p = window.godotWebcamTrackerLatest;
-  const lines = [
-    p.status,
-    `x=${p.x.toFixed(1)}cm y=${p.y.toFixed(1)}cm z=${p.z.toFixed(1)}cm`,
-  ];
+  const lines = [];
   if (state.options.debug) {
     const ageMs = state.lastFaceRectMs ? Date.now() - state.lastFaceRectMs : -1;
     const rect = state.lastFaceRect;

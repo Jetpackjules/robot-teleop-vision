@@ -305,7 +305,8 @@
     .crop-rotation {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}
     @media(max-width:620px){.workspace-edit-toolbar{bottom:12px;gap:8px;} .workspace-edit-toolbar strong{width:100%;} .workspace-edit-toolbar kbd{display:none;} .workspace-edit-toolbar button{min-height:44px;} }
   </style>
-  <script type="module" src="./godot_webcam_tracker_bridge.js?v=20260803_settings_cleanup_v1"></script>
+  <link rel="stylesheet" href="./controller_ui.css?v=20261025_trials">
+  <script type="module" src="./godot_webcam_tracker_bridge.js?v=20261025_trials"></script>
   <script type="module" src="./hybrid_rgbd_renderer.js?v=20261021_original_rgb"></script>
 </head>
 <body>
@@ -314,11 +315,103 @@
   <canvas id="hybrid-canvas" hidden></canvas>
   <canvas id="rgb-camera-canvas" hidden aria-label="Full RGB camera view"></canvas>
 
-  <div class="topbar">
-    <div class="control-stack">
-      <details class="settings" open>
-        <summary>Controller</summary>
-        <div class="settings-body">
+  <header class="topbar">
+    <button id="open-advanced" class="settings-trigger" type="button" aria-controls="advanced-setup" aria-expanded="false">Settings</button>
+
+    <section id="trial-hud" aria-label="Current trial">
+      <div class="trial-copy">
+        <div class="trial-meta"><span id="trial-position">Trial 1 of 3</span><span class="meta-divider" aria-hidden="true">/</span><span id="trial-condition">Fixed cameras</span></div>
+        <h1 id="trial-task">Add a task in Settings</h1>
+      </div>
+      <div class="trial-clock"><output id="trial-timer" aria-label="Trial elapsed time" aria-live="off">00:00</output><span id="trial-recording-state">Ready</span></div>
+      <button id="trial-action" class="primary" type="button" disabled>Start trial</button>
+      <progress id="trial-progress" value="0" max="3" aria-label="Completed trials"></progress>
+      <p id="trial-message" role="status" aria-live="polite">Checking host recording…</p>
+      <div id="trial-outcome-control" hidden><label>Outcome<select id="trial-outcome"><option value="unrated">Not rated</option><option value="success">Success</option><option value="failure">Failure</option></select></label></div>
+    </section>
+
+    <details id="connection-details" class="connection-details">
+      <summary class="status-main" aria-label="Connection details"><span id="status-dot" class="dot bad"></span><span id="status-title">Connecting</span><svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="m4 6 4 4 4-4" stroke="currentColor" stroke-width="1.5"/></svg></summary>
+      <div class="connection-body"><div id="status-lines" class="status-lines">Preparing controller</div><div id="robot-status-root"></div></div>
+    </details>
+  </header>
+
+  <div id="robot-quick-controls-root" aria-label="Arm safety controls"></div>
+  <div id="view-navigation" aria-label="View controls">
+    <div id="camera-navigation" hidden>
+      <button id="previous-camera" type="button" aria-label="Previous camera" aria-keyshortcuts="ArrowLeft"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="m14 6-6 6 6 6" stroke="currentColor" stroke-width="1.7"/></svg></button>
+      <span id="camera-name">Waiting for cameras</span>
+      <button id="next-camera" type="button" aria-label="Next camera" aria-keyshortcuts="ArrowRight"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="m10 6 6 6-6 6" stroke="currentColor" stroke-width="1.7"/></svg></button>
+    </div>
+    <span id="view-hint" hidden>Drag to orbit · scroll to zoom</span>
+    <button id="reset-view" type="button" hidden>Reset view</button>
+    <button id="reset-head-tracking" type="button" hidden>Reset head tracking</button>
+  </div>
+  <div id="robot-floating-root"></div>
+
+  <aside id="advanced-setup" hidden role="region" aria-labelledby="advanced-title">
+    <div class="advanced-shell">
+      <div class="advanced-header"><h2 id="advanced-title">Settings</h2><button id="close-advanced" type="button">Close</button></div>
+      <div class="settings-tabs" role="tablist" aria-label="Settings">
+        <button id="tab-session" role="tab" type="button" aria-selected="true" aria-controls="settings-session">Session</button>
+        <button id="tab-controls" role="tab" type="button" aria-selected="false" aria-controls="settings-controls" tabindex="-1">Arm</button>
+        <button id="tab-view" role="tab" type="button" aria-selected="false" aria-controls="settings-view" tabindex="-1">View</button>
+        <button id="tab-diagnostics" role="tab" type="button" aria-selected="false" aria-controls="settings-diagnostics" tabindex="-1">Diagnostics</button>
+      </div>
+      <div class="advanced-body">
+        <div id="settings-session" class="settings-pane" role="tabpanel" aria-labelledby="tab-session" tabindex="0">
+          <section id="episode-recording" class="episode-recording" aria-labelledby="recording-title">
+            <h3 id="recording-title" class="section-title">Demonstration recording</h3>
+            <label>Task instruction
+              <input data-recording-task type="text" required maxlength="500" placeholder="Place the block in the cup" autocomplete="off">
+            </label>
+            <details class="advanced-disclosure"><summary>Recording controls and host status</summary><div class="disclosure-body">
+            <p class="helper-text">Records original RGB from all active capture cameras and any open wrist view, plus measured joints and applied actions, on the robot host.</p>
+            <button data-recording-start class="primary" type="button" disabled>Start recording</button>
+            <label>Episode outcome
+              <select data-recording-outcome disabled>
+                <option value="unrated">Not rated</option>
+                <option value="success">Success</option>
+                <option value="failure">Failure</option>
+              </select>
+            </label>
+            <div class="button-row">
+              <button data-recording-stop type="button" disabled>Stop and save</button>
+              <button data-recording-discard type="button" disabled>Discard</button>
+            </div>
+            <p data-recording-status class="helper-text" role="status" aria-live="polite">Checking host recording…</p>
+            </div></details>
+          </section>
+          <section class="advanced-section">
+            <h3>Trial plan</h3>
+            <label class="toggle-row"><span>Guided trials</span><input id="guided-trials" type="checkbox" checked></label>
+            <p class="helper-text">One view at a time. The facilitator starts and saves each trial, then clicks Next.</p>
+            <label>Condition order<select id="trial-order">
+              <option value="fixed_rgb,mouse_3d,head_3d">Fixed cameras → Mouse 3D → Head tracking</option>
+              <option value="fixed_rgb,head_3d,mouse_3d">Fixed cameras → Head tracking → Mouse 3D</option>
+              <option value="mouse_3d,fixed_rgb,head_3d">Mouse 3D → Fixed cameras → Head tracking</option>
+              <option value="mouse_3d,head_3d,fixed_rgb">Mouse 3D → Head tracking → Fixed cameras</option>
+              <option value="head_3d,fixed_rgb,mouse_3d">Head tracking → Fixed cameras → Mouse 3D</option>
+              <option value="head_3d,mouse_3d,fixed_rgb">Head tracking → Mouse 3D → Fixed cameras</option>
+            </select></label>
+            <p id="trial-plan-help" class="helper-text">Use the same 3D renderer for both 3D conditions. Choose it in View. Turn off guided trials for free configuration.</p>
+            <button id="restore-trial-view" type="button">Restore current trial view</button>
+            <button id="new-trial-session" type="button">New session</button>
+            <p id="trial-session-status" class="helper-text" role="status"></p>
+          </section>
+
+
+        </div>
+        <div id="settings-controls" class="settings-pane" role="tabpanel" aria-labelledby="tab-controls" tabindex="0" hidden>
+          <section class="advanced-section"><h3>Arm controls</h3><div id="robot-settings-root"></div><p class="helper-text">Hold arm stays available at the bottom left of the view.</p></section>
+        <section class="advanced-section wide">
+          <h3>Robot setup and calibration</h3>
+          <div id="robot-setup-root"></div>
+          <div id="robot-view-root"></div>
+        </section>
+        </div>
+        <div id="settings-view" class="settings-pane" role="tabpanel" aria-labelledby="tab-view" tabindex="0" hidden>
+          <section class="advanced-section"><h3>View and streaming</h3>
           <label>View
             <select id="display-mode">
               <option value="point_cloud">3D point cloud</option>
@@ -342,45 +435,8 @@
             <button id="recenter" class="primary" type="button">Recenter</button>
             <button id="restart" type="button">Reconnect Video</button>
           </div>
-          <div id="robot-settings-root"></div>
-          <section id="episode-recording" class="episode-recording" aria-labelledby="recording-title">
-            <h3 id="recording-title" class="section-title">Demonstration recording</h3>
-            <label>Task instruction
-              <input data-recording-task type="text" required maxlength="500" placeholder="Place the block in the cup" autocomplete="off">
-            </label>
-            <p class="helper-text">Records original RGB from all active capture cameras and any open wrist view, plus measured joints and applied actions, on the robot host.</p>
-            <button data-recording-start class="primary" type="button" disabled>Start recording</button>
-            <label>Episode outcome
-              <select data-recording-outcome disabled>
-                <option value="unrated">Not rated</option>
-                <option value="success">Success</option>
-                <option value="failure">Failure</option>
-              </select>
-            </label>
-            <div class="button-row">
-              <button data-recording-stop type="button" disabled>Stop and save</button>
-              <button data-recording-discard type="button" disabled>Discard</button>
-            </div>
-            <p data-recording-status class="helper-text" role="status" aria-live="polite">Checking host recording…</p>
+
           </section>
-          <button id="open-advanced" type="button">Advanced Setup</button>
-        </div>
-      </details>
-    </div>
-
-    <div class="status-chip">
-      <div class="status-main"><span id="status-dot" class="dot"></span><span id="status-title">Starting</span></div>
-      <div id="status-lines" class="status-lines">Preparing controller</div>
-      <div id="robot-status-root"></div>
-    </div>
-  </div>
-
-  <div id="robot-floating-root"></div>
-
-  <div id="advanced-setup" hidden role="dialog" aria-modal="true" aria-labelledby="advanced-title">
-    <div class="advanced-shell">
-      <div class="advanced-header"><h2 id="advanced-title">Advanced Setup</h2><button id="close-advanced" type="button">Done</button></div>
-      <div class="advanced-body">
         <section class="advanced-section">
           <h3>Camera and streaming</h3>
           <label class="toggle-row"><span>White background</span><input id="white-background-enabled" type="checkbox"></label>
@@ -390,10 +446,9 @@
           <p class="helper-text">Camera bodies, labels, and viewing directions. Zoom out to see the full rig.</p>
           <p class="helper-text">Quality uses maximum supported depth and RGB resolution at 30 Hz; Low latency does the same at 60 Hz. Switching briefly restarts the shared cameras for all viewers. Capture targets may exceed delivered FPS.</p>
         </section>
-
         <section class="advanced-section">
           <h3>Head and mouse navigation</h3>
-          <label class="toggle-row"><span>Head tracking</span><input id="head-tracking-enabled" type="checkbox" checked></label>
+          <label class="toggle-row"><span>Head tracking</span><input id="head-tracking-enabled" type="checkbox"></label>
           <div class="navigation-guide">Left-drag orbit · right-drag or Shift-drag pan · wheel zoom · double-click or middle-click set orbit center</div>
           <div id="head-tracking-options" class="conditional-controls">
             <p class="helper-text">Head tracking response</p>
@@ -407,7 +462,6 @@
           <label>View elevation <span id="orbit-elevation-value" class="value-label">0 deg</span><input id="orbit-elevation" type="range" min="-60" max="60" step="1" value="0"></label>
           <label>Field of view <span id="inspect-fov-value" class="value-label">55 deg</span><input id="inspect-fov" type="range" min="30" max="100" step="1" value="55"></label>
         </section>
-
         <section class="advanced-section">
           <h3>Workspace crop</h3>
           <label class="toggle-row"><span>Crop to workspace</span><input id="workspace-crop-enabled" type="checkbox" aria-describedby="workspace-crop-help"></label>
@@ -429,7 +483,6 @@
           </div>
           <p id="workspace-crop-status" class="helper-text" role="status" aria-live="polite"></p>
         </section>
-
         <section class="advanced-section">
           <h3>Modeled workspace</h3>
           <label class="toggle-row"><span>Modeled table and floor</span><input id="modeled-workspace-enabled" type="checkbox" aria-describedby="modeled-workspace-help"></label>
@@ -460,7 +513,6 @@
           </div>
           <p id="modeled-workspace-status" class="helper-text" role="status" aria-live="polite"></p>
         </section>
-
         <section class="advanced-section">
           <h3>Workspace guide</h3>
           <label class="toggle-row"><span>Flat support surface</span><input id="workspace-surface-enabled" type="checkbox"></label>
@@ -470,7 +522,6 @@
           <label>Surface opacity <span id="workspace-surface-opacity-value" class="value-label">18%</span><input id="workspace-surface-opacity" type="range" min="0.04" max="0.5" step="0.01" value="0.18"></label>
           <p class="helper-text">The surface is robot-neutral. A workspace guide appears only when the active robot module declares one; safety enforcement remains inside that module.</p>
         </section>
-
         <section class="advanced-section">
           <h3>Site defaults</h3>
           <p class="helper-text">Save the current camera position and settings for every new browser that opens this installation.</p>
@@ -478,13 +529,8 @@
           <button id="reload-site-defaults" type="button">Reload Saved Defaults</button>
           <div id="site-settings-status"></div>
         </section>
-
-        <section class="advanced-section wide">
-          <h3>Robot setup and calibration</h3>
-          <div id="robot-setup-root"></div>
-          <div id="robot-view-root"></div>
-        </section>
-
+        </div>
+        <div id="settings-diagnostics" class="settings-pane" role="tabpanel" aria-labelledby="tab-diagnostics" tabindex="0" hidden>
         <section class="advanced-section wide">
           <h3>Troubleshooting</h3>
           <p class="helper-text">Both stream profiles keep native depth precision and full RGB frames.</p>
@@ -493,13 +539,11 @@
             <a id="transport-link" class="button" href="/frame-stream">Frame Stream Fallback</a>
           </div>
         </section>
-
         <section class="advanced-section wide">
           <h3>Camera image levels</h3>
           <div id="camera-image-levels" class="network-stats">Camera levels not yet available.</div>
           <p class="helper-text">Measured from original RGB, before mesh blending. Exposure, gain and framing affect brightness; these values are not room illuminance in lux.</p>
         </section>
-
         <section class="advanced-section wide">
           <h3>Diagnostics</h3>
           <div id="network-stats" class="network-stats">Network stats unavailable</div>
@@ -508,9 +552,10 @@
             <canvas id="rgbd-latency-graph" width="708" height="96" aria-label="RGB-D latency over the last 120 seconds"></canvas>
           </div>
         </section>
+        </div>
       </div>
     </div>
-  </div>
+  </aside>
 
   <div id="start-overlay" hidden>
     <div class="start-card">
@@ -521,6 +566,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20261025_host_recording"></script>
+  <script type="module" src="./controller_hybrid.js?v=20261025_trials"></script>
 </body>
 </html>

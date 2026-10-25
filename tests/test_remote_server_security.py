@@ -704,7 +704,8 @@ def test_controller_keeps_daily_controls_separate_from_advanced_setup():
     assert 'id="advanced-setup"' in page
     assert 'id="robot-settings-root"' in page
     assert 'id="robot-setup-root"' in page
-    assert page.index('id="robot-settings-root"') < page.index('id="advanced-setup"')
+    assert page.index('id="robot-quick-controls-root"') < page.index('id="advanced-setup"')
+    assert page.index('id="robot-settings-root"') > page.index('id="settings-controls"')
     assert page.index('id="robot-setup-root"') > page.index('id="advanced-setup"')
     assert 'id="stream-preset"' in page
     assert '>Reconnect Video</button>' in page

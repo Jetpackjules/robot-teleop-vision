@@ -143,7 +143,8 @@ def export_episodes(source: Path, output: Path, repo_id: str = 'local/robot-tele
                 dataset.add_frame(frame)
             dataset.save_episode()
             summary['episodes'].append({'source_episode': manifest['episode_id'], 'frames': len(indices),
-                                        'source_frames': manifest['frames'], 'outcome': manifest['outcome']})
+                                        'source_frames': manifest['frames'], 'outcome': manifest['outcome'],
+                                        'trial': manifest.get('trial')})
     except BaseException:
         write_json(output/'capture_export_incomplete.json', summary)
         raise

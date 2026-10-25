@@ -6,6 +6,7 @@ export class EpisodeRecordingControl {
     this.request = request;
     this.interval = interval;
     this.busy = false;
+    this.revision = 0;
     this.status = null;
     this.message = root.querySelector('[data-recording-status]');
     this.task = root.querySelector('[data-recording-task]');
@@ -22,14 +23,22 @@ export class EpisodeRecordingControl {
 
   async poll() {
     if (this.closed) return;
+    const revision = this.revision;
     try {
       const response = await this.request('/api/v1/recording?'+new URLSearchParams({client: this.client}), {cache: 'no-store'});
       if (!response.ok) throw new Error('Host recording is unavailable. Update the gateway and reconnect.');
-      this.status = await response.json();
-      this.root.hidden = this.status.supported === false;
-      this.error = '';
+      const status = await response.json();
+      if (revision === this.revision && !this.busy) {
+        this.status = status;
+        this.offline = false;
+        this.root.hidden = this.status.supported === false;
+        this.error = this.commandError || '';
+      }
     } catch (error) {
-      this.error = error.message;
+      if (revision === this.revision && !this.busy) {
+        this.offline = true;
+        this.error = error.message;
+      }
     }
     this.render();
     if (!this.closed) this.timer = setTimeout(() => this.poll(), this.interval);
@@ -38,21 +47,27 @@ export class EpisodeRecordingControl {
   async command(command) {
     if (this.busy) return;
     if (command === 'start' && !this.task.reportValidity()) return;
+    this.revision++;
     this.busy = true;
-    this.error = '';
+    this.error = this.commandError = '';
     this.render();
     try {
       const payload = {command, client: this.client};
-      if (command === 'start') payload.task = this.task.value.trim();
+      if (command === 'start') {
+        payload.task = this.task.value.trim();
+        const context = this.context?.();
+        if (context) payload.trial = context;
+      }
       else payload.outcome = this.outcome.value;
       const response = await this.request('/api/v1/recording', {method: 'POST',
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'The host could not change recording state.');
       this.status = result;
+      this.offline = false;
       if (command === 'start') this.outcome.value = 'unrated';
     } catch (error) {
-      this.error = error.message;
+      this.error = this.commandError = error.message;
     } finally {
       this.busy = false;
       this.render();
@@ -84,6 +99,7 @@ export class EpisodeRecordingControl {
     if (active && !owner) message = 'Another controller page owns this recording.';
     this.message.textContent = message;
     this.message.setAttribute('role', this.error || status?.state === 'error' ? 'alert' : 'status');
+    this.root.dispatchEvent(new CustomEvent('recordingchange'));
   }
 
   close() {

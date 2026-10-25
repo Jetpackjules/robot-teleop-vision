@@ -206,12 +206,13 @@ class So101WebModule {
     this.importFile = null;
   }
 
-  async mount({ settingsRoot, setupRoot, viewRoot, statusRoot, floatingRoot }) {
+  async mount({ settingsRoot, setupRoot, viewRoot, statusRoot, floatingRoot, quickControlsRoot }) {
     const style = document.createElement("style");
     style.dataset.robotModule = "so101";
     style.textContent = MODULE_STYLE;
     document.head.append(style);
     if (settingsRoot) settingsRoot.innerHTML = SETTINGS_MARKUP;
+    if (quickControlsRoot) quickControlsRoot.append(element("so101-hold"));
     if (setupRoot) setupRoot.innerHTML = SETUP_MARKUP;
     if (viewRoot) viewRoot.innerHTML = VIEW_MARKUP;
     if (statusRoot) statusRoot.innerHTML = STATUS_MARKUP;

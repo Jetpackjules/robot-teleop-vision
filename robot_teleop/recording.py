@@ -204,6 +204,7 @@ class HostEpisodeRecorder:
         self.interruption = ''
         self.discard = False
         self.outcome = 'unrated'
+        self.trial = None
 
     def observe_robot(self, status: dict, received_ns: int | None = None) -> None:
         """Called by the existing UDP listener; never performs file I/O."""
@@ -228,9 +229,11 @@ class HostEpisodeRecorder:
                     'state': self.state, 'message': self.message, 'episode': self.episode,
                     'frames': self.samples, 'elapsed_seconds':
                     round((time.monotonic_ns()-self.started_ns)/1e9, 1) if self.started_ns and self.state in ('recording', 'saving') else 0,
-                    'is_owner': not self.owner or client == self.owner, 'last_saved': self.last_saved}
+                    'is_owner': not self.owner or client == self.owner, 'last_saved': self.last_saved,
+                    'trial': self.trial}
 
-    def start(self, client: str, task: str, cameras: list[str] | None = None, fps: int = 15) -> dict:
+    def start(self, client: str, task: str, cameras: list[str] | None = None, fps: int = 15,
+              trial: dict | None = None) -> dict:
         if not isinstance(task, str) or not task.strip() or len(task) > 500:
             raise RecordingError('Enter a task instruction (up to 500 characters).')
         if type(fps) is not int or fps not in (10, 15, 20, 30):
@@ -240,6 +243,24 @@ class HostEpisodeRecorder:
         cameras = [camera_id(c) for c in cameras] if cameras is not None else None
         if cameras is not None and len(set(cameras)) != len(cameras):
             raise RecordingError('Select distinct cameras.')
+        if trial is not None:
+            fields = {'session_id', 'index', 'total', 'condition', 'display_mode'}
+            if not isinstance(trial, dict) or set(trial) != fields:
+                raise RecordingError('Invalid trial metadata fields.')
+            session = trial['session_id']
+            if not isinstance(session, str) or not 1 <= len(session) <= 80 or any(
+                    c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in session):
+                raise RecordingError('Invalid trial session identifier.')
+            if (type(trial['index']) is not int or type(trial['total']) is not int
+                    or not 1 <= trial['index'] <= trial['total'] <= 30):
+                raise RecordingError('Invalid trial number.')
+            if trial['condition'] not in ('fixed_rgb', 'mouse_3d', 'head_3d'):
+                raise RecordingError('Invalid trial condition.')
+            if trial['display_mode'] not in ('rgb_camera', 'point_cloud', 'shader_mesh', 'independent_mesh', 'unified_mesh', 'blendpcr'):
+                raise RecordingError('Invalid trial display mode.')
+            if (trial['condition'] == 'fixed_rgb') != (trial['display_mode'] == 'rgb_camera'):
+                raise RecordingError('Trial condition does not match the display mode.')
+            trial = dict(trial)
         with self.lock:
             if self.worker is not None and self.worker.is_alive():
                 raise RecordingError('An episode is already recording or finishing.')
@@ -252,8 +273,9 @@ class HostEpisodeRecorder:
             self.episode = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ_')+uuid.uuid4().hex[:12]
             self.stop_event = threading.Event()
             self.interruption, self.discard, self.outcome = '', False, 'unrated'
+            self.trial = trial
             self.started_ns = 0
-            self.worker = threading.Thread(target=self._record, args=(task.strip(), cameras, fps),
+            self.worker = threading.Thread(target=self._record, args=(task.strip(), cameras, fps, trial),
                                            daemon=True, name='host-episode-recorder')
             self.worker.start()
             return self.status(client)
@@ -302,7 +324,7 @@ class HostEpisodeRecorder:
                 raise RecordingError('Robot feedback and camera capture differ by more than 100 ms.')
         return frames, robot
 
-    def _record(self, task: str, cameras: list[str] | None, fps: int) -> None:
+    def _record(self, task: str, cameras: list[str] | None, fps: int, trial: dict | None) -> None:
         source, destination, manifest = None, None, None
         rows, saved_bytes, failure = [], 0, ''
         try:
@@ -347,6 +369,8 @@ class HostEpisodeRecorder:
                         'timing': 'Capture Unix timestamps mapped to host monotonic time; nearest measured feedback within 100 ms.',
                         'rgb': 'Original capture JPEG, independent of browser crop, viewport and point cloud.',
                         'synthetic': bool(getattr(source, 'synthetic', False))}
+            if trial is not None:
+                manifest['trial'] = trial
             manifest['cameras'] = [{'key': f'camera_{i+1}', 'id': f.camera, 'width': f.width, 'height': f.height,
                                     'timestamp_source': 'host JPEG receipt' if f.camera.startswith('aux_') else 'capture service'}
                                    for i, f in enumerate(frames)]
@@ -432,7 +456,9 @@ class HostEpisodeRecorder:
                                     error=failure, finished_utc=datetime.now(timezone.utc).isoformat())
                     write_json(destination/'episode.json', manifest)
                     self.last_saved = {'episode': self.episode, 'status': status, 'frames': len(rows),
-                                       'outcome': self.outcome, 'host_folder': str(destination)}
+                                       'outcome': self.outcome, 'host_folder': str(destination),
+                                       'duration_seconds': round(rows[-1]['timestamp']+1/fps, 3) if rows else 0,
+                                       'trial': trial}
             except Exception:
                 failure = 'Episode finalization failed; preserve the host folder for recovery.'
             with self.lock:
