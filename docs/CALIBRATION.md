@@ -98,14 +98,20 @@ samples, robot registration and overlay are preserved. The existing scanned-arm
 mask continues to apply when the registered robot overlay is available. Switching
 off restores the original scene and retains the placement for another comparison.
 
-The browser sends its workspace settings with a per-page client ID. The updated
-gateway filters independent native RGB-D packets for that page before HTTPS,
+The browser sends its workspace settings with a per-page client ID over a
+dedicated authenticated settings socket. This works with head tracking off and
+when WebRTC is unavailable; reconnecting resends viewing bounds only, never
+robot or calibration actions. Server cropping pauses while the 3D placement
+handles are active, then resumes on Done or Cancel so moving the workspace
+cannot discard its new surroundings. The gateway filters independent native
+RGB-D packets for that page before HTTPS,
 WebSocket or direct WebRTC transmission. It intersects the rotated crop box
 with the above-table volume, retaining conservative source tiles and a two-pixel
 boundary halo. Depth stays exact uint16 at native sampling density; cropped
 intrinsics retain world positions. Original RGB is projected separately and
-cropped losslessly to PNG only when that saves bytes; otherwise its full JPEG
-is kept. Empty regions send explicit empty depth updates. Capture, shared
+cropped losslessly to PNG only for bounded candidates that save bytes; large
+candidates avoid re-encoding and retain their full original JPEG.
+Empty regions send explicit empty depth updates. Capture, shared
 source packets and other viewers are unchanged. Unsupported packet encodings
 and experimental temporal transport pass through unchanged.
 

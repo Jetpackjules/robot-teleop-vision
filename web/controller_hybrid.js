@@ -1,7 +1,7 @@
     import { robotModuleReady } from "./robot_module_host.js";
     import { EpisodeRecordingControl } from './episode_recording.js?v=20261025_trials';
     import { TrialController } from './trial_controller.js?v=20261025_trials';
-    import { CapturePresetControl, nativeStreamPreset } from "./capture_presets.js?v=20261020_native_modes";
+    import { CapturePresetControl, WorkspaceStreamControl, nativeStreamPreset } from "./capture_presets.js?v=20261026_workspace_delivery";
     import { workspaceCropBounds } from './workspace_crop.js?v=20261021_original_rgb';
     import { MODELED_WORKSPACE_DEFAULTS, modeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
 
@@ -10,6 +10,8 @@
     const episodeRecording = recordingRoot ? new EpisodeRecordingControl(recordingRoot,
       {client: window.robotTeleopPageId}) : null;
     window.addEventListener('pagehide', () => episodeRecording?.close());
+    const workspaceStreamControl = new WorkspaceStreamControl(remoteUrl());
+    window.addEventListener('pagehide', () => workspaceStreamControl.close());
     const viewportVideo = document.getElementById("viewport-video");
     const viewportImage = document.getElementById("viewport-image");
     const hybridCanvas = document.getElementById("hybrid-canvas");
@@ -208,7 +210,7 @@
       const orbitDistance = Number(document.getElementById("orbit-distance").value);
       const payload = {
         rgbd_client_id:window.robotTeleopPageId,
-        workspace_stream_crop_enabled:true,
+        workspace_stream_crop_enabled:!document.body.classList.contains('workspace-editing'),
         // Mouse navigation and click-to-focus are always available. Head
         // tracking layers onto this orbit rather than selecting another mode.
         inspect_enabled: true,
@@ -271,10 +273,15 @@
       if (!updateCropControls()) return false;
       updateViewLabels();
       const payload = viewSettingsPayload(extra);
+      workspaceStreamControl.update(payload);
       // Calibration actions and uploaded files are transient, never startup defaults.
       localStorage.setItem("robotTeleopViewSettings", JSON.stringify(viewSettingsPayload()));
       window.setGodotHybridViewSettings && window.setGodotHybridViewSettings(payload);
-      return window.sendGodotViewSettings && window.sendGodotViewSettings(payload);
+      const remotePayload = {...payload};
+      // The dedicated socket owns page crop state, avoiding reordering with
+      // the optional tracking/WebRTC transport.
+      delete remotePayload.rgbd_client_id;
+      return window.sendGodotViewSettings && window.sendGodotViewSettings(remotePayload);
     }
 
     function localSavedViewSettings() {
@@ -776,6 +783,7 @@
       // Both profiles preserve full native samples. The capture owner selects
       // each device's largest jointly supported depth/RGB pair at this cadence.
       const hybridPreset = nativeStreamPreset(streamPresetSelect.value);
+      workspaceStreamControl.update(viewSettingsPayload());
       window.setGodotHybridViewSettings && window.setGodotHybridViewSettings(viewSettingsPayload({
         splat_fill: hybridPreset.splatFill,
         mesh_depth_delta: 0.05,
@@ -1192,7 +1200,7 @@
       const cameraRates = Object.values(hybrid.cameraFps || {}).map(Number).filter(Number.isFinite);
       if (activeViewportMode === "hybrid" && hybrid.displaySource !== "original_rgb" && cameraRates.length) {
         const minimum = Math.round(Math.min(...cameraRates)), maximum = Math.round(Math.max(...cameraRates));
-        fps = `${minimum === maximum ? minimum : `${minimum}-${maximum}`} fps/camera`;
+        fps = `${minimum === maximum ? minimum : `${minimum}-${maximum}`} updates/s/camera`;
       }
       const bitrate = hasStreamMeasurement ? `${Math.round(Math.max(0, stats.bitrateKbps || 0))} kbps` : "-- kbps";
       networkStats.textContent = [
@@ -1221,6 +1229,8 @@
       ].join("\n");
       statusLines.textContent = [
         `Stream ${hybrid.displaySource === "original_rgb" ? `${currentPreset().label} RGB` : streamMode} | ${size} | ${fps} | ${bitrate}`,
+        ...(activeViewportMode === 'hybrid' && hybrid.displaySource !== 'original_rgb' && hasStreamMeasurement
+          ? [`Viewer drawing ${Math.round(hybrid.renderFps || 0)} fps`] : []),
         !connected ? streamState : "",
         activeViewportMode === "hybrid" ? hybrid.renderWarning : "",
         headTrackingEnabled
@@ -1336,11 +1346,12 @@
     });
     window.addEventListener('workspace-edit-finish',event=>{
       document.body.classList.remove('workspace-editing');
+      sendViewSettings();
       document.getElementById('open-advanced').focus({preventScroll:true});
     });
     for(const target of ['crop','table'])document.getElementById(target==='table'?'modeled-workspace-edit':'workspace-crop-edit').addEventListener('click',()=>{
       if(displayModeSelect.value==='rgb_camera') {displayModeSelect.value='independent_mesh';applyDisplayMode();sendViewSettings();}
-      if(window.editGodotWorkspace?.(target)) {advancedSetup.hidden=true;document.body.classList.add('workspace-editing');}
+      if(window.editGodotWorkspace?.(target)) {advancedSetup.hidden=true;document.body.classList.add('workspace-editing');sendViewSettings();}
       else document.getElementById(target==='table'?'modeled-workspace-status':'workspace-crop-status').textContent='Open a connected 3D view to edit this workspace.';
     });
     for(const axis of ['x','y','z'])document.getElementById(`workspace-crop-rotation-${axis}`).addEventListener('change',()=>{if(updateCropControls())sendViewSettings();});

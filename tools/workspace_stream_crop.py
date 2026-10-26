@@ -5,7 +5,6 @@ The small retained image halo supports native triangles and confidence filters.
 """
 from __future__ import annotations
 
-from collections import OrderedDict
 import copy
 import json
 import math
@@ -13,9 +12,14 @@ import struct
 import threading
 import time
 import zlib
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, wait
 
 import av
+import cv2
 import numpy as np
+
+_CROP_WORKERS = ThreadPoolExecutor(max_workers=3, thread_name_prefix='workspace-crop')
 
 DEPTH_ENCODINGS = {"u16_mm_deflate", "u16_mm_vpredict_shuffle_deflate"}
 STREAM_SETTING_KEYS = frozenset({
@@ -81,59 +85,63 @@ def _decode_depth(data, camera):
     return np.cumsum(delta, axis=0, dtype=np.int32).astype(np.uint16)
 
 
-def _tile_extrema(values, valid):
-    height, width = values.shape
-    rows, columns = (height+7)//8, (width+15)//16
-    low = np.full((rows*8, columns*16), np.inf, dtype=np.float32)
-    high = np.full_like(low, -np.inf)
-    low[:height, :width] = np.where(valid, values, np.inf)
-    high[:height, :width] = np.where(valid, values, -np.inf)
-    low = low.reshape(rows, 8, columns, 16).min(axis=(1, 3))
-    high = high.reshape(rows, 8, columns, 16).max(axis=(1, 3))
-    # Each native cell can use a vertex in the block to its right/below.
-    result_lo, result_hi = low.copy(), high.copy()
-    for dy, dx in [(0, 1), (1, 0), (1, 1)]:
-        result_lo[:rows-dy, :columns-dx] = np.minimum(result_lo[:rows-dy, :columns-dx], low[dy:, dx:])
-        result_hi[:rows-dy, :columns-dx] = np.maximum(result_hi[:rows-dy, :columns-dx], high[dy:, dx:])
-    return result_lo, result_hi
-
-
-def retained_depth(depth, camera, volumes):
-    height, width = depth.shape
-    k = _vector(camera.get("intrinsics"), 4)
+def _depth_clip_planes(shape, camera, volumes):
+    """Cache integer-depth clipping thresholds for each volume half-plane."""
+    height, width = shape
+    k = _vector(camera.get("intrinsics"), 4).astype(np.float32)
     if k[0] <= 0 or k[1] <= 0:
         raise ValueError("invalid source intrinsics")
     model = _vector(camera.get("transform"), 16).reshape(4, 4, order="F")
     if not np.allclose(model[3], [0, 0, 0, 1], atol=1e-6):
         raise ValueError("invalid camera transform")
-    z = depth.astype(np.float32)*.001
-    x = ((np.arange(width, dtype=np.float32)-k[2])/k[0])[None, :]
-    y = (-(np.arange(height, dtype=np.float32)-k[3])/k[1])[:, None]
-    valid = depth != 0
-    keep = np.ones(((height+7)//8, (width+15)//16), dtype=bool)
+    x = np.arange(width, dtype=np.float32)
+    y = np.arange(height, dtype=np.float32)
+    x, y = ((x-k[2])/k[0])[None,:], (-(y-k[3])/k[1])[:,None]
+    result = []
     for center, inverse, half in volumes:
-        basis = inverse @ model[:3, :3]
-        origin = inverse @ (model[:3, 3]-center)
+        basis = (inverse @ model[:3, :3]).astype(np.float32)
+        origin = (inverse @ (model[:3, 3]-center)).astype(np.float32)
+        planes = []
         for axis in range(3):
-            local = (basis[axis, 0]*x+basis[axis, 1]*y-basis[axis, 2])*z+origin[axis]
-            low, high = _tile_extrema(local, valid)
-            keep &= (low <= half[axis]+1e-6) & (high >= -half[axis]-1e-6)
-    mask = np.repeat(np.repeat(keep, 8, axis=0), 16, axis=1)[:height, :width]
-    # Two pixels of unchanged native depth support edge triangles, derivatives
-    # and the confidence filter. Nothing is downsampled or depth-quantized.
-    expanded = mask.copy()
-    for shift in (1, 2):
-        expanded[shift:] |= mask[:-shift]
-        expanded[:-shift] |= mask[shift:]
-    mask = expanded.copy()
-    for shift in (1, 2):
-        mask[:, shift:] |= expanded[:, :-shift]
-        mask[:, :-shift] |= expanded[:, shift:]
+            direction = basis[axis,0]*x+basis[axis,1]*y-basis[axis,2]
+            for coefficient,limit in [(direction,half[axis]+1e-5-origin[axis]),
+                                      (-direction,half[axis]+1e-5+origin[axis])]:
+                ratio = np.divide(limit*1000,coefficient,out=np.zeros_like(coefficient),where=coefficient!=0)
+                kind = np.where(coefficient>0,1,np.where(coefficient<0,2,0)).astype(np.uint8)
+                kind[((coefficient>0)&(ratio<0))|((coefficient<0)&(ratio>65535))|((coefficient==0)&(limit<0))] = 3
+                kind[((coefficient>0)&(ratio>=65535))|((coefficient<0)&(ratio<=0))] = 0
+                threshold = np.where(coefficient>0,np.floor(ratio),np.ceil(ratio))
+                planes.append((np.clip(threshold,0,65535).astype(np.uint16),kind))
+        result.append(planes)
+    return result
+
+
+def retained_depth(depth, camera, volumes, bounds=None):
+    bounds = bounds if bounds is not None else _depth_clip_planes(depth.shape,camera,volumes)
+    cells = np.ones(depth.shape,dtype=np.uint8)
+    for planes in bounds:
+        outcode = np.zeros(depth.shape,dtype=np.uint8)
+        for index,(threshold,kind) in enumerate(planes):
+            outside = ((kind==1)&(depth>threshold))|((kind==2)&(depth<threshold))|(kind==3)
+            np.bitwise_or(outcode,np.uint8(1<<index),out=outcode,where=outside)
+        outcode[depth==0] = 255
+        # A quad is safely outside only when every valid vertex shares an
+        # outside half-plane. This also retains crossing triangles whose
+        # vertices are individually outside different sides of the volume.
+        quad = outcode.copy()
+        quad[:-1] &= outcode[1:]
+        quad[:,:-1] &= quad[:,1:]
+        cells &= quad==0
+    tiles = cv2.dilate(cells,np.ones((8,16),np.uint8),anchor=(0,0),
+                      borderType=cv2.BORDER_CONSTANT,borderValue=0)[::8,::16]
+    mask = np.repeat(np.repeat(tiles,8,axis=0),16,axis=1)[:depth.shape[0],:depth.shape[1]]
+    mask = cv2.dilate(mask,np.ones((5,5),np.uint8),borderType=cv2.BORDER_CONSTANT,borderValue=0)
     return np.where(mask, depth, 0).astype(np.uint16)
 
 
 def _rectangle(mask, quantum=32):
-    y, x = np.nonzero(mask)
+    y = np.flatnonzero(np.any(mask,axis=1))
+    x = np.flatnonzero(np.any(mask,axis=0))
     if not len(x):
         return 0, 0, min(2, mask.shape[1]), min(2, mask.shape[0])
     x0, y0 = int(x.min())//quantum*quantum, int(y.min())//quantum*quantum
@@ -147,41 +155,66 @@ class WorkspaceStreamCropper:
 
     def __init__(self):
         self.lock = threading.RLock()
+        self.cache_lock = threading.RLock()
         self.decoders = OrderedDict()
         self.encoders = OrderedDict()
         self.previous = None
+        self.bounds = OrderedDict()
+        self.bounds_bytes = 0
+
+    def _bounds(self, depth, camera, volumes):
+        with self.cache_lock:
+            return self._cached_bounds(depth,camera,volumes)
+
+    def _cached_bounds(self, depth, camera, volumes):
+        key = (depth.shape,tuple(camera['intrinsics']),tuple(camera['transform']),
+               tuple((tuple(center),tuple(inverse.flat),tuple(half)) for center,inverse,half in volumes))
+        if key in self.bounds:
+            self.bounds.move_to_end(key)
+            return self.bounds[key]
+        bounds = _depth_clip_planes(depth.shape,camera,volumes)
+        size = sum(a.nbytes for planes in bounds for pair in planes for a in pair)
+        while self.bounds and self.bounds_bytes+size>128*1024*1024:
+            _,old = self.bounds.popitem(last=False)
+            self.bounds_bytes -= sum(a.nbytes for planes in old for pair in planes for a in pair)
+        if size<=128*1024*1024:
+            self.bounds[key] = bounds
+            self.bounds_bytes += size
+        return bounds
 
     def _rgb(self, color, key):
-        codec = self.decoders.get(key)
-        if codec is None:
-            codec = av.CodecContext.create("mjpeg", "r")
-            self.decoders[key] = codec
-            if len(self.decoders) > 32:
-                self.decoders.popitem(last=False)
+        with self.cache_lock:
+            codec = self.decoders.get(key)
+            if codec is None:
+                codec = av.CodecContext.create("mjpeg", "r")
+                self.decoders[key] = codec
+                if len(self.decoders) > 32:
+                    self.decoders.popitem(last=False)
         frames = codec.decode(av.Packet(color))
         if not frames:
             raise ValueError("invalid source JPEG")
         return frames[-1].to_ndarray(format="rgb24")
 
-    def _png(self, rgb):
+    def _png(self, rgb, camera_id=''):
         height, width = rgb.shape[:2]
-        key = (width, height)
-        codec = self.encoders.get(key)
-        if codec is None:
-            codec = av.CodecContext.create("png", "w")
-            codec.width, codec.height, codec.pix_fmt = width, height, "rgb24"
-            codec.options = {"compression_level": "1"}
-            codec.open()
-            self.encoders[key] = codec
-            if len(self.encoders) > 8:
-                self.encoders.popitem(last=False)
+        key = (camera_id, width, height)
+        with self.cache_lock:
+            codec = self.encoders.get(key)
+            if codec is None:
+                codec = av.CodecContext.create("png", "w")
+                codec.width, codec.height, codec.pix_fmt = width, height, "rgb24"
+                codec.options = {"compression_level": "1"}
+                codec.open()
+                self.encoders[key] = codec
+                if len(self.encoders) > 32:
+                    self.encoders.popitem(last=False)
         return b"".join(bytes(p) for p in codec.encode(av.VideoFrame.from_ndarray(np.ascontiguousarray(rgb), format="rgb24")))
 
     def _camera(self, camera, color, encoded_depth, volumes):
         original_color=color
         original = copy.deepcopy(camera)
         depth = _decode_depth(encoded_depth, camera)
-        kept = retained_depth(depth, camera, volumes)
+        kept = retained_depth(depth, camera, volumes,self._bounds(depth,camera,volumes))
         box = _rectangle(kept != 0)
         x0, y0, x1, y1 = box
         original_rgb = camera.get("color_space") == "original_rgb"
@@ -197,29 +230,49 @@ class WorkspaceStreamCropper:
             k = _vector(camera["intrinsics"], 4)
             ck, extrinsics = _vector(p.get("intrinsics"), 4), _vector(p.get("extrinsics"), 12)
             rotation, translation = extrinsics[:9].reshape(3, 3, order="F"), extrinsics[9:]
-            yy, xx = np.nonzero(kept)
-            z = kept[yy, xx].astype(np.float32)*.001
+            valid = kept != 0
+            sample_count = int(np.count_nonzero(valid))
+            # Every retained sample lies inside this truncated depth frustum.
+            # Project its eight corners rather than millions of individual
+            # vertices. A near-plane crossing conservatively keeps full RGB.
+            if sample_count <= 65536:
+                # Small object regions can afford a tighter exact bound.
+                yy, xx = np.nonzero(kept)
+                z = kept[yy, xx].astype(np.float32)*.001
+            else:
+                zmin = float(np.min(kept, where=valid, initial=65535))*.001
+                zmax = float(np.max(kept, initial=0))*.001
+                xx, yy, z = [a.reshape(-1) for a in np.meshgrid([x0, x1-1], [y0, y1-1], [zmin, zmax], indexing='ij')]
             local = np.array([(xx-k[2])*z/k[0], (yy-k[3])*z/k[1], z])
             projected = rotation @ local+translation[:, None]
             front = projected[2] > 1e-5
-            uv = projected[:2, front]/projected[2:3, front]*ck[:2, None]+ck[2:, None]
-            inside = (uv[0] >= 0) & (uv[0] < cw-1) & (uv[1] >= 0) & (uv[1] < ch-1)
-            uv = uv[:, inside]
-            if uv.shape[1]:
-                color_box = (max(0, int(math.floor(uv[0].min()-2))//32*32), max(0, int(math.floor(uv[1].min()-2))//32*32),
-                             min(cw, int(math.ceil((uv[0].max()+3)/32))*32), min(ch, int(math.ceil((uv[1].max()+3)/32))*32))
-            else:
+            color_box = (0, 0, cw, ch)
+            if not sample_count:
                 color_box = (0, 0, min(cw, 2), min(ch, 2))
+            elif sample_count <= 65536 or np.all(front):
+                uv = projected[:2, front]/projected[2:3, front]*ck[:2, None]+ck[2:, None]
+                if sample_count <= 65536:
+                    inside = (uv[0] >= 0) & (uv[0] < cw-1) & (uv[1] >= 0) & (uv[1] < ch-1)
+                    uv = uv[:, inside]
+                if not uv.shape[1]:
+                    uv = np.zeros((2, 1))
+                color_box = (max(0, math.floor(uv[0].min()-2)//32*32), max(0, math.floor(uv[1].min()-2)//32*32),
+                             min(cw, math.ceil((uv[0].max()+3)/32)*32), min(ch, math.ceil((uv[1].max()+3)/32)*32))
+                if color_box[0] >= color_box[2] or color_box[1] >= color_box[3]:
+                    color_box = (0, 0, min(cw, 2), min(ch, 2))
         else:
             cw, ch = depth.shape[1], depth.shape[0]
 
         cx0, cy0, cx1, cy1 = color_box
-        # Decode/repack RGB only when an actual image rectangle can shrink.
-        if (cx0, cy0, cx1, cy1) != (0, 0, cw, ch):
+        # Large noisy PNGs usually cost more than the sensor JPEG. Bound the
+        # candidate's raw area before paying for decode/encode; skipped RGB
+        # stays byte-for-byte unchanged at its original resolution.
+        candidate_bytes = (cx1-cx0)*(cy1-cy0)*3
+        if (cx0, cy0, cx1, cy1) != (0, 0, cw, ch) and (not original_rgb or candidate_bytes <= max(4096, len(color)*2)):
             pixels = self._rgb(color, str(camera.get("id", "")))
             if pixels.shape[:2] != (ch, cw):
                 raise ValueError("JPEG dimensions do not match calibration")
-            cropped_color = self._png(pixels[cy0:cy1, cx0:cx1])
+            cropped_color = self._png(pixels[cy0:cy1, cx0:cx1],str(camera.get('id','')))
             if len(cropped_color) < len(color) or not original_rgb:
                 color = cropped_color
                 camera["color_encoding"] = "png"
@@ -231,6 +284,8 @@ class WorkspaceStreamCropper:
                     projection["intrinsics"][3] -= cy0
             else:
                 color_box = (0, 0, cw, ch)
+        else:
+            color_box = (0, 0, cw, ch)
         camera["width"], camera["height"] = x1-x0, y1-y0
         camera["intrinsics"][2] -= x0
         camera["intrinsics"][3] -= y0
@@ -280,21 +335,32 @@ class WorkspaceStreamCropper:
             return packet
         metadata = json.loads(packet[9:9+length])
         cameras = metadata.get("cameras", [])
-        if metadata.get("metadata_delta") or not 0 < len(cameras) <= 32 or any(c.get("depth_encoding") not in DEPTH_ENCODINGS for c in cameras):
+        if (metadata.get("metadata_delta") or not 0 < len(cameras) <= 32
+                or len({c.get('id') for c in cameras})!=len(cameras)
+                or any(c.get("depth_encoding") not in DEPTH_ENCODINGS for c in cameras)):
             return packet
-        offset, payloads, totals = 9+length, [], {}
+        offset, payloads, totals, inputs = 9+length, [], {}, []
         for camera in cameras:
             csize, dsize = int(camera["color_length"]), int(camera["depth_length"])
             if csize < 0 or dsize < 0 or offset+csize+dsize > len(packet):
                 raise ValueError("truncated RGB-D source")
             color, depth = packet[offset:offset+csize], packet[offset+csize:offset+csize+dsize]
             offset += csize+dsize
-            color, depth, counts = self._camera(camera, color, depth, volumes)
+            inputs.append((camera,color,depth,volumes))
+        if offset != len(packet):
+            raise ValueError("unexpected RGB-D trailer")
+        if len(inputs)>1:
+            futures = [_CROP_WORKERS.submit(self._camera,*args) for args in inputs]
+            # Join every job before fail-open handling can start another frame
+            # on the same per-camera codec contexts.
+            wait(futures)
+            results = [future.result() for future in futures]
+        else:
+            results = [self._camera(*args) for args in inputs]
+        for color,depth,counts in results:
             payloads.extend([color, depth])
             for name, value in counts.items():
                 totals[name] = totals.get(name, 0)+value
-        if offset != len(packet):
-            raise ValueError("unexpected RGB-D trailer")
         metadata["stream_crop"] = {"applied": True, "input_bytes": len(packet), "output_bytes": 0, "halo_pixels": 2,
             "processing_ms":round((time.perf_counter()-started)*1000,2), **totals}
         result = b""

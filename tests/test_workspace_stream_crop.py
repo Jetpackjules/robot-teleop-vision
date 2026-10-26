@@ -15,7 +15,7 @@ import pytest
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from tools.workspace_stream_crop import WorkspaceStreamCropper, crop_volumes, _decode_depth
+from tools.workspace_stream_crop import WorkspaceStreamCropper, crop_volumes, _decode_depth, retained_depth
 from tools.lan_remote_view_server import LanRemoteServer, LanRemoteHandler
 from robot_teleop.operator import load_robot_operator
 import tools.lan_remote_view_server as remote
@@ -76,6 +76,56 @@ def packet(original_rgb=True,predictive=False,cameras=1):
 SETTINGS={'workspace_stream_crop_enabled':True,'modeled_workspace_enabled':True,
           'modeled_workspace_center':[0,0,-1],'modeled_workspace_width':1.2,'modeled_workspace_depth':1.2,
           'modeled_workspace_height':.5,'modeled_workspace_clearance':.006}
+
+
+@pytest.mark.parametrize('shape', [(7, 15), (19, 43), (720, 1280)])
+def test_cached_ray_bounds_preserve_every_measured_point_inside_rotated_volumes(shape):
+    rng=np.random.default_rng(87)
+    depth=rng.integers(500,2000,shape,dtype=np.uint16);depth[rng.random(shape)<.1]=0
+    h,w=shape;camera={'intrinsics':[float(w),float(w),(w-1)/2,(h-1)/2],
+                    'transform':np.eye(4).flatten(order='F').tolist()}
+    settings={'workspace_stream_crop_enabled':True,'workspace_crop_enabled':True,
+              'workspace_crop_min':[-.2,-.2,-1.6],'workspace_crop_max':[.3,.25,-.6],
+              'workspace_crop_rotation':[15,25,-10]}
+    volumes=crop_volumes(settings);result=retained_depth(depth,camera,volumes)
+    yy,xx=np.indices(shape);z=depth*.001
+    points=np.stack(((xx-camera['intrinsics'][2])*z/w,-(yy-camera['intrinsics'][3])*z/w,-z),axis=-1)
+    center,inverse,half=volumes[0];inside=np.all(np.abs((points-center)@inverse.T)<half-1e-5,axis=-1)&(depth!=0)
+    assert np.any(inside)
+    np.testing.assert_array_equal(result[inside],depth[inside])
+    assert np.all((result==0)|(result==depth))
+
+
+def test_triangle_crossing_workspace_survives_when_its_vertices_are_outside():
+    depth=np.full((64,128),1000,np.uint16)
+    camera={'intrinsics':[100.,100.,63.5,31.5],'transform':np.eye(4).flatten(order='F').tolist()}
+    settings={'workspace_stream_crop_enabled':True,'workspace_crop_enabled':True,
+              'workspace_crop_min':[-.001,-.2,-1.01],'workspace_crop_max':[.001,.2,-.99]}
+    result=retained_depth(depth,camera,crop_volumes(settings))
+    assert result[30,63]==result[30,64]==1000
+
+
+def test_calibration_change_invalidates_cached_clipping_planes():
+    cropper=WorkspaceStreamCropper();source=packet()
+    first=cropper.crop(source,SETTINGS)
+    assert split(first)[0]['stream_crop']['retained_samples']>0
+    metadata,parts=split(source)
+    metadata['cameras'][0]['transform'][12]+=2.0
+    header=json.dumps(metadata,separators=(',',':')).encode()
+    moved=b'RGBD1'+struct.pack('<I',len(header))+header+b''.join(color+depth for _,color,depth in parts)
+    result=cropper.crop(moved,SETTINGS)
+    document,parts=split(result)
+    assert document['stream_crop']['retained_samples']==0
+    assert not _decode_depth(parts[0][2],parts[0][0]).any()
+
+
+def test_large_rgb_candidate_keeps_original_jpeg_without_reencoding(monkeypatch):
+    _,[(camera,_,depth)]=split(packet())
+    color=jpeg(np.zeros((256,256,3),dtype=np.uint8));camera['color_length']=len(color)
+    cropper=WorkspaceStreamCropper()
+    monkeypatch.setattr(cropper,'_rgb',lambda *_:pytest.fail('Large low-value RGB crop must not decode/reencode'))
+    output,_,_=cropper._camera(camera,color,depth,crop_volumes(SETTINGS))
+    assert output==color
 
 
 @pytest.mark.parametrize('original_rgb',[False,True])
