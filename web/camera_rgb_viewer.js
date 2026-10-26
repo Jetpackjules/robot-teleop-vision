@@ -19,10 +19,12 @@ export class CameraRgbViewer {
     this.watchdogTimer = 0;
   }
 
-  start() {
+  start({ preserveFrame = false } = {}) {
     if (this.running) return;
     this.running = true;
-    this.canvas.getContext("2d", { alpha: false }).clearRect(0, 0, this.canvas.width, this.canvas.height);
+    // A camera handoff must keep its last painted frame until the next sensor
+    // supplies a decoded image. Only a fresh mode entry clears the canvas.
+    if (!preserveFrame) this.canvas.getContext("2d", { alpha: false }).clearRect(0, 0, this.canvas.width, this.canvas.height);
     const generation = ++this.generation;
     this.visibilityHandler = () => {
       this.closeSocket();
@@ -59,7 +61,7 @@ export class CameraRgbViewer {
     this.options = { ...this.options, camera: id };
     this.cameraId = '';this.captureEpoch = '';this.lastSequence = -1;
     this.stats.captureUnixMs = 0;this.stats.connected = false;
-    if (running) this.start();
+    if (running) this.start({ preserveFrame: true });
   }
 
   connect(generation) {
