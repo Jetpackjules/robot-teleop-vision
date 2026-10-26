@@ -55,6 +55,7 @@ if str(REPO_ROOT) not in sys.path:
 from robot_teleop.modules import public_robot_module
 from robot_teleop.operator import RobotCommandError, load_robot_operator
 from robot_teleop.recording import CaptureRgbSource, HostEpisodeRecorder, RecordingError, camera_id
+from robot_teleop.camera_preview import CameraPreviewEncoder
 from robot_teleop.state import godot_app_userdata_root
 from tools.godot_desktop_stream import DesktopStreamConfig, GodotDesktopStream
 from tools.workspace_stream_crop import STREAM_SETTING_KEYS, WorkspaceStreamCropper
@@ -3450,7 +3451,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
 
     def handle_websocket(self):
         path = urlsplit(self.path).path
-        if path not in ("/head-tracking", "/robot-control", "/av1-stream", "/rgbd-stream", "/camera-rgb-stream"):
+        if path not in ("/head-tracking", "/robot-control", "/av1-stream", "/rgbd-stream", "/camera-rgb-stream", "/camera-preview-stream"):
             self.send_error(404, "Unknown websocket path")
             return
         if path == "/robot-control":
@@ -3464,6 +3465,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             return
         if path == "/camera-rgb-stream":
             self.handle_camera_rgb_websocket()
+            return
+        if path == "/camera-preview-stream":
+            self.handle_camera_preview_websocket()
             return
         self.handle_head_websocket()
 
@@ -3599,7 +3603,112 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 peer_thread.join(timeout=1.0)
             self.server.rgbd_http_slots.release()
 
-    def watch_stream_peer(self, stop: threading.Event, conditions: list, send_lock) -> threading.Thread:
+    def handle_camera_preview_websocket(self) -> None:
+        """Native-size H.264 RGB preview; original JPEG/recording stays separate."""
+        params = parse_qs(urlsplit(self.path).query)
+        camera = params.get("camera", [""])[0]
+        if len(camera) > 64 or any(c not in "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-" for c in camera):
+            self.send_error(400, "Invalid camera ID")
+            return
+        if not self.server.ffmpeg_slots.acquire(blocking=False):
+            self.send_error(503, "Encoded preview capacity reached")
+            return
+        reader = None
+        worker = peer_thread = None
+        stop = threading.Event()
+        condition = threading.Condition()
+        send_lock = threading.Lock()
+        newest = None
+        source_sequence = 0
+        sent_sequence = acknowledged = 0
+        force_keyframe = False
+        error = None
+
+        def feedback(payload):
+            nonlocal acknowledged, force_keyframe
+            if len(payload) > 256:
+                return
+            try:
+                data = json.loads(payload)
+                if not isinstance(data, dict):
+                    return
+                with condition:
+                    value = data.get("sequence")
+                    if data.get("type") == "preview-ack" and type(value) is int and acknowledged < value <= sent_sequence:
+                        acknowledged = value
+                    elif data.get("type") == "preview-keyframe":
+                        force_keyframe = True
+                    condition.notify_all()
+            except (ValueError, UnicodeError):
+                pass
+
+        def drain():
+            nonlocal newest, source_sequence, error
+            try:
+                while not stop.is_set():
+                    headers, jpeg = reader.read_part()
+                    if not jpeg or len(jpeg) > 16 * 1024 * 1024:
+                        raise ValueError("Invalid original RGB frame")
+                    metadata = {key: headers.get(key, "")[:128] for key in
+                        ("x-camera-id", "x-frame-width", "x-frame-height", "x-frame-sequence", "x-capture-unix-ms", "x-capture-epoch")}
+                    with condition:
+                        newest = metadata, jpeg
+                        source_sequence += 1
+                        condition.notify_all()
+            except (OSError, ValueError) as exc:
+                error = exc
+            finally:
+                with condition:
+                    condition.notify_all()
+
+        try:
+            encoder = CameraPreviewEncoder()
+            if not self.accept_websocket():
+                return
+            width = clamp_int(params.get("w", ["3840"])[0], 160, 3840)
+            # Preserve the same high-quality original image used by JPEG mode.
+            reader = MultipartRawFrameReader(
+                f"http://{self.server.stream_host}:{self.server.capture_port}/camera-rgb-stream?"
+                + urlencode({"camera": camera, "w": width, "q": 95}))
+            peer_thread = self.watch_stream_peer(stop, [condition], send_lock, on_text=feedback)
+            worker = threading.Thread(target=drain, name="camera-preview-source", daemon=True)
+            worker.start()
+            consumed = 0
+            last_keyframe = 0.0
+            while not stop.is_set():
+                with condition:
+                    condition.wait_for(lambda: stop.is_set() or error is not None or
+                        (source_sequence != consumed and sent_sequence - acknowledged < 16), timeout=2.0)
+                    if stop.is_set() or error is not None:
+                        break
+                    if source_sequence == consumed or sent_sequence - acknowledged >= 16:
+                        continue
+                    (metadata, jpeg), consumed = newest, source_sequence
+                    request_keyframe = force_keyframe and time.monotonic() - last_keyframe > 0.25
+                    force_keyframe = False
+                encoded, data = encoder.encode(jpeg, keyframe=request_keyframe)
+                if encoded["keyframe"]:
+                    last_keyframe = time.monotonic()
+                metadata = {**metadata, **encoded}
+                header = json.dumps(metadata, separators=(",", ":")).encode()
+                packet = struct.pack("<I", len(header)) + header + data
+                with condition:
+                    sent_sequence = encoded["preview_sequence"]
+                with send_lock:
+                    self.send_ws_frame(packet, 0x2)
+        except (ConnectionError, OSError, ValueError) as exc:
+            print(f"Camera preview ended: {type(exc).__name__}: {exc}", flush=True)
+        finally:
+            stop.set()
+            if reader is not None:
+                reader.close()
+            if worker is not None:
+                worker.join(timeout=1.0)
+            if peer_thread is not None:
+                peer_thread.join(timeout=1.0)
+            self.server.ffmpeg_slots.release()
+
+    def watch_stream_peer(self, stop: threading.Event, conditions: list, send_lock, on_text=None) -> threading.Thread:
         """Release capture readers promptly when the browser closes a stream.
 
         Sending frames alone never consumes the peer's close/pong messages.
@@ -3618,6 +3727,8 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     if frame[0] == 0x9:
                         with send_lock:
                             self.send_ws_frame(frame[1], 0xA)
+                    elif frame[0] == 0x1 and on_text is not None:
+                        on_text(frame[1])
             except (ConnectionError, OSError, ValueError):
                 pass
             finally:

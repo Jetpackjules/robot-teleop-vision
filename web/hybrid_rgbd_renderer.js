@@ -1904,6 +1904,7 @@ function rgbToRgba(rgb) {
 function updateManualRgbBase(camera) {
   const visible = state.manualRgbCanvas;
   if (!(visible instanceof HTMLCanvasElement)) return;
+  if (visible.closest("[hidden], details:not([open])")) return;
   const model = String(camera.metadata.model || "").toLowerCase();
   if (state.cameras.length > 0 && !model.includes("455")) return;
   let base = state.manualRgbBaseCanvas;
@@ -1939,6 +1940,7 @@ function updateManualRgbBase(camera) {
 
 function updateRgbDisplay(camera) {
   if (state.rawRgbViewer) return;
+  if (state.settings.display_mode !== "rgb_camera") return;
   const visible = state.rgbDisplayCanvas;
   if (!(visible instanceof HTMLCanvasElement)) return;
   const model = String(camera.metadata.model || "").toLowerCase();

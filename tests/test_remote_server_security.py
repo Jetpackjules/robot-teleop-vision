@@ -65,7 +65,7 @@ def test_desktop_video_is_behind_existing_login_gate():
     assert redirected == [True]
 
 
-@pytest.mark.parametrize("path", ["/camera-rgb?w=3840&q=95", "/camera-rgb-stream?w=3840&q=95", "/api/v1/cameras"])
+@pytest.mark.parametrize("path", ["/camera-rgb?w=3840&q=95", "/camera-rgb-stream?w=3840&q=95", "/camera-preview-stream?w=3840", "/api/v1/cameras"])
 def test_original_camera_rgb_is_behind_existing_login_gate(path):
     handler = bare_handler()
     handler.path = path

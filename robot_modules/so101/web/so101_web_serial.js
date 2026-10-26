@@ -708,6 +708,7 @@ export class So101ArmController extends EventTarget {
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
+    const changed = this.keyboardKeys.has(event.code) !== pressed;
     if (pressed) {
       this.keyboardKeys.add(event.code);
       if (!event.repeat) this.keyboardKeyOrder.set(event.code, ++this.keyboardKeySequence);
@@ -720,6 +721,9 @@ export class So101ArmController extends EventTarget {
       }
     }
     this.latest.keyboardDeadman = true;
+    // Send transitions (including key release) immediately; retain the 30 Hz
+    // heartbeat and existing follower speed limits. OS repeats add no intent.
+    if (changed) this.sendKeyboardIntent();
     this.emitStatus();
   }
 

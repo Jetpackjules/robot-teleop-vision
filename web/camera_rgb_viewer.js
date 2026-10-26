@@ -3,6 +3,8 @@ export class CameraRgbViewer {
   constructor(canvas, options = {}) {
     this.canvas = canvas;
     this.options = { ...options };
+    const requestedCodec = new URLSearchParams(globalThis.location?.search || "").get("rgb_preview");
+    if (!options.rgbPreviewCodec && ["jpeg", "h264"].includes(requestedCodec)) this.options.rgbPreviewCodec = requestedCodec;
     this.running = false;
     this.controllers = new Set();
     this.generation = 0;
@@ -17,35 +19,46 @@ export class CameraRgbViewer {
     this.pending = null;
     this.decoding = false;
     this.watchdogTimer = 0;
+    this.previewFailed = false;
+    this.decoder = null;
+    this.decoderMetadata = new Map();
+    this.decoderCodec = "";
+    this.needsKeyframe = true;
+    this.visibilityHandler = () => {
+      if (!this.running) return;
+      this.closeSocket();
+      if (!document.hidden) this.connect(this.generation);
+    };
   }
 
   start({ preserveFrame = false } = {}) {
     if (this.running) return;
     this.running = true;
+    document.addEventListener("visibilitychange", this.visibilityHandler);
     // A camera handoff must keep its last painted frame until the next sensor
     // supplies a decoded image. Only a fresh mode entry clears the canvas.
     if (!preserveFrame) this.canvas.getContext("2d", { alpha: false }).clearRect(0, 0, this.canvas.width, this.canvas.height);
     const generation = ++this.generation;
-    this.visibilityHandler = () => {
-      this.closeSocket();
-      if (!document.hidden && this.running) this.connect(this.generation);
-    };
-    document.addEventListener("visibilitychange", this.visibilityHandler);
     this.connect(generation);
   }
 
   stop() {
     this.running = false;
+    document.removeEventListener("visibilitychange", this.visibilityHandler);
     this.generation += 1;
     for (const controller of this.controllers) controller.abort();
     this.controllers.clear();
     this.closeSocket();
     this.pending = null;
     clearTimeout(this.retryTimer);
-    if (this.visibilityHandler) document.removeEventListener("visibilitychange", this.visibilityHandler);
   }
 
   closeSocket() {
+    if (this.decoder && this.decoder.state !== "closed") this.decoder.close();
+    this.decoder = null;
+    this.decoderMetadata.clear();
+    this.decoderCodec = "";
+    this.needsKeyframe = true;
     clearTimeout(this.watchdogTimer);
     this.watchdogTimer = 0;
     if (!this.socket) return;
@@ -74,20 +87,35 @@ export class CameraRgbViewer {
       this.pollingGeneration = generation;
       this.poll(generation); this.poll(generation); return;
     }
+    const compressed = !this.previewFailed && this.options.rgbPreviewCodec !== "jpeg"
+      && typeof VideoDecoder === "function" && typeof EncodedVideoChunk === "function";
     const query = new URLSearchParams({ w: String(this.options.width || 3840), q: String(this.options.quality || 95), camera: this.options.camera || '' });
     const scheme = location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${scheme}://${location.host}/camera-rgb-stream?${query}`);
+    const socket = new WebSocket(`${scheme}://${location.host}/${compressed ? "camera-preview-stream" : "camera-rgb-stream"}?${query}`);
     this.socket = socket;
     socket.binaryType = "arraybuffer";
-    this.stats.transport = "Original RGB WebSocket";
+    this.stats.transport = compressed ? "H.264 camera preview" : "Original RGB WebSocket";
     const started = performance.now();
     const reconnect = () => {
       if (this.socket !== socket || !this.running || generation !== this.generation) return;
+      // Older gateways or unsupported decoder profiles retain the JPEG path.
+      if (compressed && !decodedPreview) this.previewFailed = true;
       this.closeSocket();
       this.stats.connected = false;
       this.stats.status = "Original RGB reconnecting";
       clearTimeout(this.retryTimer);
       this.retryTimer = setTimeout(() => this.connect(generation), 500);
+    };
+    let decodedPreview = false;
+    const fallback = () => {
+      if (this.socket !== socket) return;
+      this.previewFailed = true;
+      reconnect();
+    };
+    const acknowledge = sequence => {
+      if (this.socket === socket && socket.readyState === WebSocket.OPEN && Number.isInteger(sequence)) {
+        socket.send(JSON.stringify({ type: "preview-ack", sequence }));
+      }
     };
     const watch = () => {
       if (this.socket !== socket || !this.running || generation !== this.generation) return;
@@ -104,10 +132,64 @@ export class CameraRgbViewer {
       if (length > 4096 || length + 4 >= bytes.length || bytes.length > 16 * 1024 * 1024 + 4100) return;
       try {
         const metadata = JSON.parse(new TextDecoder().decode(bytes.subarray(4, length + 4)));
+        if (metadata.encoding === "h264") {
+          this.stats.received++;
+          this.stats.bytes += bytes.length;
+          const requestKeyframe = () => {
+            if (this.socket === socket && socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: "preview-keyframe" }));
+            }
+          };
+          if (!this.decoder) {
+            this.decoder = new VideoDecoder({
+              output: frame => {
+                const info = this.decoderMetadata.get(frame.timestamp);
+                this.decoderMetadata.delete(frame.timestamp);
+                try {
+                  if (info && this.running && generation === this.generation && this.socket === socket) {
+                    this.paintFrame(frame, info, generation);
+                    decodedPreview = true;
+                    this.stats.previewEncodeMs = info.encode_ms;
+                    acknowledge(info.preview_sequence);
+                  }
+                } finally { frame.close(); }
+              },
+              error: fallback,
+            });
+          }
+          if (this.decoder.decodeQueueSize > 4) {
+            this.decoder.reset();
+            this.decoderMetadata.clear();
+            this.needsKeyframe = true;
+            this.decoderCodec = "";
+            requestKeyframe();
+          }
+          if (this.needsKeyframe && !metadata.keyframe) {
+            this.stats.dropped++;
+            acknowledge(metadata.preview_sequence);
+            return;
+          }
+          if (this.decoderCodec !== metadata.codec) {
+            this.decoder.configure({ codec: metadata.codec, optimizeForLatency: true,
+              hardwareAcceleration: "prefer-hardware",
+              colorSpace: { matrix: "smpte170m", primaries: "bt709", transfer: "iec61966-2-1", fullRange: true } });
+            this.decoderCodec = metadata.codec;
+          }
+          this.needsKeyframe = false;
+          this.decoderMetadata.set(metadata.timestamp_us, metadata);
+          try {
+            this.decoder.decode(new EncodedVideoChunk({ type: metadata.keyframe ? "key" : "delta",
+              timestamp: metadata.timestamp_us, data: bytes.subarray(length + 4) }));
+          } catch (_) { fallback(); }
+          return;
+        }
         if (this.pending) this.stats.dropped++;
         this.pending = { blob: new Blob([bytes.subarray(length + 4)], { type: "image/jpeg" }), metadata };
         this.drain(generation);
-      } catch (_) { this.stats.renderWarning = "Invalid original RGB packet"; }
+      } catch (_) {
+        if (compressed) fallback();
+        else this.stats.renderWarning = "Invalid original RGB packet";
+      }
     };
     socket.onerror = reconnect;
     socket.onclose = reconnect;
@@ -141,16 +223,26 @@ export class CameraRgbViewer {
     this.stats.bytes += blob.size;
     const bitmap = await createImageBitmap(blob);
     try {
-      if (!this.running || generation !== this.generation || stale()) return;
-      if (this.canvas.width !== bitmap.width || this.canvas.height !== bitmap.height) {
-        this.canvas.width = bitmap.width; this.canvas.height = bitmap.height;
-      }
-      this.canvas.getContext("2d", { alpha: false }).drawImage(bitmap, 0, 0);
-      this.lastPacketMs = performance.now();
-      this.lastSequence = sequence; this.cameraId = id; this.captureEpoch = epoch;
-      Object.assign(this.stats, { connected: true, status: "Original camera RGB", renderWarning: "",
-        width: bitmap.width, height: bitmap.height, decoded: this.stats.decoded + 1, captureUnixMs: capture });
+      this.paintFrame(bitmap, metadata, generation);
     } finally { bitmap.close(); }
+  }
+
+  paintFrame(image, metadata, generation) {
+    if (!this.running || generation !== this.generation || document.hidden) return;
+    const id = metadata["x-camera-id"] || "camera";
+    if (this.options.camera && id !== this.options.camera) return;
+    const sequence = Number(metadata["x-frame-sequence"] ?? -1);
+    const epoch = metadata["x-capture-epoch"] || "";
+    if (id === this.cameraId && epoch === this.captureEpoch && sequence >= 0 && sequence <= this.lastSequence) return;
+    const width = image.displayWidth || image.width, height = image.displayHeight || image.height;
+    if (this.canvas.width !== width || this.canvas.height !== height) {
+      this.canvas.width = width; this.canvas.height = height;
+    }
+    this.canvas.getContext("2d", { alpha: false }).drawImage(image, 0, 0);
+    this.lastPacketMs = performance.now();
+    this.lastSequence = sequence; this.cameraId = id; this.captureEpoch = epoch;
+    Object.assign(this.stats, { connected: true, status: metadata.encoding === "h264" ? "Camera RGB · H.264" : "Original camera RGB", renderWarning: "",
+      width, height, decoded: this.stats.decoded + 1, captureUnixMs: Number(metadata["x-capture-unix-ms"] || 0) });
   }
 
   async poll(generation) {

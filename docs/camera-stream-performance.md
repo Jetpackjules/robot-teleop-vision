@@ -1,5 +1,34 @@
 # Camera stream performance
 
+## Camera preview and input latency
+
+The fixed RGB view prefers a native-resolution H.264 preview through the authenticated
+`/camera-preview-stream` WebSocket. WebCodecs decodes and paints the selected camera.
+The encoder uses full-range JPEG color, CRF 10, no B frames, no lookahead, and an
+ultrafast preset. This is high-quality preview recompression, not a lossless RGB
+transport. Original host recordings, capture profiles, depth samples, and the 3D
+RGB-D textures are unchanged. `?rgb_preview=jpeg` selects the original JPEG preview
+for comparisons; browsers without a working VideoDecoder fall back automatically.
+
+Only RGB mode opens this preview. Returning to 3D closes it; RGB mode pauses hidden
+RGB-D processing unless a visible calibration panel needs that data. Leaving the
+page or hiding the tab closes the camera decoder and connection. Camera changes
+retain the last painted image until the new camera decodes. The server retains one
+newest source image and allows at most sixteen unacknowledged encoded frames;
+backpressure drops source images before encoding, preserving the H.264 reference
+chain. A lagging decoder can request an independent keyframe.
+
+Keyboard press/release transitions send immediately, with the existing 30 Hz
+heartbeat retained. OS repeats do not add commands. The follower loop frequency,
+physical speed/step limits, watchdog, Pause, and explicit Enable behavior are unchanged.
+
+Fresh-frame FPS, camera-frame age, and command-to-visible-motion latency are different
+measurements. Public-route request round trips alone were 214–261 ms in the
+2026-10-26 Singapore-host probe; direct STUN-only WebRTC did not connect during its
+twenty-second observation window. A sub-100 ms end-to-end guarantee is not established
+for that route. Measure actual physical movement in captured images and browser
+presentation separately; do not treat an animated robot overlay as physical feedback.
+
 Measure fresh acquisitions, encoded frames and browser redraws separately.
 A 60 Hz redraw can reuse an older camera frame; the Controller's camera FPS
 counter counts newly decoded captures, not animation frames.
