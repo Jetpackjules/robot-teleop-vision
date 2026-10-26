@@ -11,6 +11,8 @@ function createTestServer() {
     res.setHeader('Cache-Control','no-store');
     if(path==='/workspace-readiness-fixture.json') {
       res.setHeader('Content-Type','application/json');res.end(readFileSync(resolve(root,'.teleop/offline-ready-20261021/fixture.json')));
+    } else if(path==='/jpeg_i420_rgba.wasm') {
+      res.setHeader('Content-Type','application/wasm');res.end(readFileSync(resolve(root,'web/jpeg_i420_rgba.wasm')));
     } else if(path==='/so101-renderer.json') {
       const source=readFileSync(resolve(root,'robot_modules/so101/web/module.js'),'utf8').split('const MODULE_STYLE')[0];
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify(vm.runInNewContext(source+'\nRENDERER')));

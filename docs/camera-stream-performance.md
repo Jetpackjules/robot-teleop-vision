@@ -401,3 +401,54 @@ fragment-stage validity, and framebuffer-copy presentation were rejected.
 JPEG coefficient-preserving entropy repacking saved only about 1.3% and added
 processing delay, so it was not enabled. Raw diagnostic evidence is retained
 under `.teleop/live-quality-20261026/`.
+
+### Exact JPEG decode follow-up with GeForce NOW running
+
+The laptop still misses the sustained 30 FPS UI target. A further live
+comparison, after the independent host RGB-buffer repair, used the same full
+controller, three Quality cameras, seven arm models and 1888×2041 canvas.
+The existing Canvas decoder measured 11.6 and 10.9 median rendered FPS in
+alternating windows; an exact CPU decoder measured 9.8 and 11.7. Decode times
+were 74/106 ms versus 81/77 ms. These windows demonstrate substantial runtime
+variation, **not a consistent UI FPS improvement**. They are measurements of
+an isolated production controller on this laptop, not the operator's existing
+foreground tab or physical display presentation.
+
+The added JPEG path uses ImageDecoder's native I420 planes and a 1,487-byte
+WebAssembly SIMD converter, avoiding the Canvas readback for supported images.
+It reconstructs the existing integer JPEG chroma rounding and RGB bytes;
+ordinary VideoFrame-to-RGBA conversion was rejected because it changed pixels.
+Each worker verifies every RGBA byte of its first image at each size against
+the existing Canvas path. It then prefers the new decoder only if that same
+image's decode/conversion was at least 10% faster, excluding verification and
+Wasm loading time. Unsupported formats, profiles, dimensions, unavailable Wasm,
+or a mismatch retain Canvas. This startup choice is a conservative local
+measurement, not a guarantee against later CPU/GPU contention changes.
+
+The converter follows the integer H2V2 interpolation described in
+[libjpeg's upsampler](https://skia.googlesource.com/external/github.com/libjpeg-turbo/libjpeg-turbo/%2B/refs/tags/jpeg-ari/jdsample.c).
+Rebuild the checked-in binary with `python tools/build_jpeg_rgba_wasm.py`
+using the development-only `wasmtime` package. Production needs no new package.
+The browser regression covers 54 checks, including exact RGB/alpha at seven
+sizes through 1920×1080, concurrent conversions, full worker transfers, native
+depth preservation and the Canvas fallback.
+
+GPU timer instrumentation of the full UI attributed about 58% of measured
+draw/copy time to native RGB visibility, 15% to final composition, and 12% to
+the arm overlay. Timer queries perturb throughput; those shares identify work
+to investigate and are not normal FPS measurements. The visibility pass
+projects native depth triangles into each independent RGB camera for correct
+occlusion, and remains the main GPU cost. Other laptop CPU activity was also
+present; GeForce NOW and unrelated processes were left running.
+
+Additional experiments were rejected: larger fixed draw batches produced no
+useful gain; individual peer visibility caches and a float32 source-position
+cache did not justify their cost. Exact planar GPU color reconstruction passed
+80 checks and reduced CPU upload time to about 6 ms, but shifted work onto the
+busy GPU without improving live UI FPS. None of those experiments is enabled.
+The stream, native depth, JPEG quality, rendering resolution policy, calibration,
+adaptive geometry and 3D wire representation are unchanged.
+
+Raw follow-up evidence is in the laptop's task-local temporary directory
+`teleop-quality-20261026-pass2`, outside OneDrive to avoid synchronizing large
+profiling artifacts. No robot commands were sent by these tests.

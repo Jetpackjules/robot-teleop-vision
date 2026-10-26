@@ -27,12 +27,13 @@ export function takeIndependentFrameBatch(queue) {
 }
 
 export class NativeRgbdDecoderPool {
-  constructor({rgbaPixels = true} = {}) {
+  constructor({rgbaPixels = true,softwareColor=true} = {}) {
     this.workers = [];
     this.pending = new Map();
     this.nextId = 0;
     this.disabled = typeof Worker !== "function";
     this.rgbaPixels=rgbaPixels;
+    this.softwareColor=softwareColor;
   }
 
   decode(payload) {
@@ -42,7 +43,7 @@ export class NativeRgbdDecoderPool {
       let worker = this.workers[index];
       try {
         if (!worker) {
-          worker = new Worker(new URL("./rgbd_decode_worker.js?v=20261021_original_rgb", import.meta.url), {type: "module"});
+          worker = new Worker(new URL("./rgbd_decode_worker.js?v=20261026_exact_color", import.meta.url), {type: "module"});
           worker.onmessage = ({data}) => {
             const job = this.pending.get(data.id);
             if (!job) {data.bitmap?.close();return;}
@@ -59,7 +60,7 @@ export class NativeRgbdDecoderPool {
         }
         const timer = setTimeout(() => this.close(new Error("native decoder timed out")), 5000);
         this.pending.set(id, {resolve, reject, timer,started:performance.now()});
-        worker.postMessage({id, ...payload,rgbaPixels:this.rgbaPixels}, [...new Set([payload.color.buffer, payload.depth.buffer])]);
+        worker.postMessage({id, ...payload,rgbaPixels:this.rgbaPixels,softwareColor:this.softwareColor}, [...new Set([payload.color.buffer, payload.depth.buffer])]);
       } catch (error) {
         // Transferred inputs may already be detached. Drop this frame and use
         // the main-thread compatibility decoder for subsequent frames.

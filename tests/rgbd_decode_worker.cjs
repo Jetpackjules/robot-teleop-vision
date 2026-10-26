@@ -9,8 +9,11 @@ const load = async name => {
   const cropSource=fs.readFileSync(path.join(__dirname,'../web/workspace_crop.js'),'utf8').replace(/'\.\/workspace_transform.js[^']*'/,JSON.stringify(geomUrl));
   const cropUrl='data:text/javascript;base64,'+Buffer.from(cropSource).toString('base64');
   const projectionUrl='data:text/javascript;base64,'+Buffer.from(fs.readFileSync(path.join(__dirname,'../web/hybrid_color_projection.js'),'utf8')).toString('base64');
+  const jpegUrl='data:text/javascript;base64,'+Buffer.from(fs.readFileSync(path.join(__dirname,'../web/jpeg_rgba_decoder.js'),'utf8')
+    .replaceAll('import.meta.url',JSON.stringify(pathToFileURL(path.join(__dirname,'../web/jpeg_rgba_decoder.js')).href))).toString('base64');
   const source = fs.readFileSync(file, 'utf8').replaceAll('import.meta.url', JSON.stringify(pathToFileURL(file).href))
     .replace(/'\.\/hybrid_color_projection\.js\?[^']+'/,JSON.stringify(projectionUrl))
+    .replace(/'\.\/jpeg_rgba_decoder\.js\?[^']+'/,JSON.stringify(jpegUrl))
     .replace(/'\.\/workspace_crop\.js\?[^']+'/,JSON.stringify(cropUrl));
   return import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 };
