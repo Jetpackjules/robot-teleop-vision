@@ -1781,6 +1781,16 @@ class NvencH264Encoder(h264.H264Encoder):
 aiortc_codecs.H264Encoder = NvencH264Encoder
 
 
+def controller_session_cookie() -> str:
+    """Allow a guarded gateway restart to retain its existing browser sessions."""
+    retained = os.environ.get("GODOT_REMOTE_SESSION_COOKIE", "")
+    if retained:
+        if len(retained) != 43 or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" for c in retained):
+            raise ValueError("Invalid retained controller session cookie")
+        return retained
+    return base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
+
+
 class LanRemoteServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -1860,7 +1870,7 @@ class LanRemoteServer(ThreadingHTTPServer):
         self.access_team_domain = access_team_domain.strip().lower().removeprefix("https://").rstrip("/")
         self.access_audience = access_audience.strip()
         self.access_jwk_client = None
-        self.session_cookie = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
+        self.session_cookie = controller_session_cookie()
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.robot_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.packet_count = 0
@@ -3773,6 +3783,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             and params.get("persistent_reference", ["0"])[0]
             in ("1", "true", "yes", "on")
         )
+        acknowledged_stream = params.get("flow_control", ["0"])[0] == "1" and not temporal_depth and not temporal_color
         source_url = (
             f"http://{self.server.stream_host}:{self.server.capture_port}"
             f"/rgbd?w={width}&fps={fps}&context_fps={context_fps}&detail_fps={detail_fps}&q={quality}"
@@ -3790,6 +3801,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         persistent_packet_pending = False
         newest_lock = threading.Condition()
         reader_error = None
+        wire_sequence = 0
+        outstanding = deque()
+        credit_limit = 4
+        minimum_roundtrip = None
+        minimum_fresh_raw_sequence = 0
         temporal_encoder = (
             TemporalRgbdDepthEncoder(
                 temporal_color=temporal_color,
@@ -3804,6 +3820,40 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         self.rgbd_preempted = threading.Event()
         self.rgbd_send_lock = threading.Lock()
         peer_thread = None
+
+        def acknowledge_packet(payload):
+            nonlocal credit_limit, minimum_roundtrip, newest_packet, minimum_fresh_raw_sequence
+            if len(payload) > 256:
+                return
+            try:
+                data = json.loads(payload)
+                if not isinstance(data, dict) or data.get("type") != "rgbd-ack":
+                    return
+                sequence = data.get("sequence")
+                if type(sequence) is not int:
+                    return
+                now = time.monotonic()
+                with newest_lock:
+                    if not outstanding or sequence < outstanding[0][0] or sequence > wire_sequence:
+                        return
+                    was_full = len(outstanding) >= credit_limit
+                    while outstanding and outstanding[0][0] <= sequence:
+                        sent_id, sent_at = outstanding.popleft()
+                        if sent_id == sequence:
+                            roundtrip = max(0.001, now - sent_at)
+                            minimum_roundtrip = roundtrip if minimum_roundtrip is None else min(minimum_roundtrip, roundtrip)
+                    # Fill the measured bandwidth-delay pipeline, but never
+                    # increase it to accommodate a growing congestion queue.
+                    if minimum_roundtrip is not None:
+                        credit_limit = max(2, min(16, math.ceil(minimum_roundtrip * fps) + 1))
+                    if was_full:
+                        # An already-processed image may predate the stall.
+                        # Require a current capture when transmission resumes.
+                        minimum_fresh_raw_sequence = newest_raw_sequence
+                        newest_packet = None
+                    newest_lock.notify_all()
+            except (ValueError, UnicodeError):
+                pass
 
         def drain_latest_packet() -> None:
             nonlocal newest_raw_packet, newest_raw_sequence, reader_error
@@ -3830,6 +3880,13 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             encoded_raw_sequence = 0
             try:
                 while not reader_stop.is_set():
+                    if acknowledged_stream:
+                        with newest_lock:
+                            newest_lock.wait_for(lambda: len(outstanding) < credit_limit or reader_error is not None or reader_stop.is_set(), timeout=1.0)
+                            if reader_error is not None or reader_stop.is_set():
+                                return
+                            if len(outstanding) >= credit_limit:
+                                continue
                     if persistent_reference:
                         with newest_lock:
                             newest_lock.wait_for(
@@ -3869,6 +3926,8 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     if temporal_encoder is not None:
                         packet, is_keyframe = temporal_encoder.encode(packet)
                     with newest_lock:
+                        if acknowledged_stream and encoded_raw_sequence < minimum_fresh_raw_sequence:
+                            continue
                         if is_keyframe:
                             # A delta must never overtake the keyframe it names.
                             # Keep the newest keyframe in a priority slot while
@@ -3899,7 +3958,10 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             reader = MultipartRawFrameReader(source_url)
             reader_thread = threading.Thread(target=drain_latest_packet, daemon=True)
             encoder_thread = threading.Thread(target=encode_latest_packet, daemon=True)
-            peer_thread = self.watch_stream_peer(reader_stop, [newest_raw_lock, newest_lock], self.rgbd_send_lock)
+            if acknowledged_stream:
+                peer_thread = self.watch_stream_peer(reader_stop, [newest_raw_lock, newest_lock], self.rgbd_send_lock, on_text=acknowledge_packet)
+            else:
+                peer_thread = self.watch_stream_peer(reader_stop, [newest_raw_lock, newest_lock], self.rgbd_send_lock)
             reader_thread.start()
             encoder_thread.start()
             print(
@@ -3918,8 +3980,8 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                             self.rgbd_preempted.is_set()
                             or reader_stop.is_set()
                             or
-                            pending_keyframe is not None
-                            or newest_sequence != sent_sequence
+                            (pending_keyframe is not None or (newest_packet is not None and newest_sequence != sent_sequence))
+                            and (not acknowledged_stream or len(outstanding) < credit_limit)
                             or reader_error is not None
                         ),
                         timeout=5.0,
@@ -3930,6 +3992,8 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                         break
                     if reader_error is not None:
                         raise reader_error
+                    if acknowledged_stream and len(outstanding) >= credit_limit:
+                        continue
                     if pending_keyframe is not None:
                         packet = pending_keyframe
                         pending_keyframe = None
@@ -3950,6 +4014,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 with self.rgbd_send_lock:
                     if self.rgbd_preempted.is_set():
                         raise ConnectionError("superseded by newer browser")
+                    if acknowledged_stream:
+                        with newest_lock:
+                            wire_sequence += 1
+                            outstanding.append((wire_sequence, time.monotonic()))
+                        self.send_ws_frame(json.dumps({"type": "rgbd-sequence", "sequence": wire_sequence}).encode(), 0x1)
                     self.send_ws_frame(packet, 0x2)
         except (ConnectionError, OSError, ValueError) as exc:
             print(f"hybrid RGB-D client ended: {peer} ({exc})", flush=True)

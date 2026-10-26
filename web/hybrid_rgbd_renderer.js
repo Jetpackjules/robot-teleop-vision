@@ -2720,6 +2720,32 @@ function advanceRenderClock(now) {
   return true;
 }
 
+function gpuFrameReady() {
+  const gl = state.gl;
+  if (!gl) return true;
+  const fences = state.renderFences || [];
+  while (fences.length) {
+    const status = gl.clientWaitSync(fences[0], 0, 0);
+    if (status === gl.TIMEOUT_EXPIRED) {
+      // Two submissions retain CPU/GPU overlap while bounding old views.
+      if (fences.length < 2) return true;
+      state.stats.gpuDeferredFrames = Number(state.stats.gpuDeferredFrames || 0) + 1;
+      return false;
+    }
+    gl.deleteSync(fences.shift());
+    if (status === gl.WAIT_FAILED) state.gpuPacingUnavailable = true;
+  }
+  return true;
+}
+
+function markGpuFrame() {
+  const gl = state.gl;
+  if (!gl || state.gpuPacingUnavailable || typeof gl.fenceSync !== "function") return;
+  const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (fence) (state.renderFences ||= []).push(fence);
+  gl.flush();
+}
+
 function animationLoop(now) {
   if (!state.running) return;
   if (state.rawRgbViewer && (!state.lastRgbModeCheck || now-state.lastRgbModeCheck>250)) {
@@ -2753,8 +2779,13 @@ function animationLoop(now) {
   }
   // High-refresh displays were rendering hundreds of thousands of points at
   // 120-165 Hz and starving RGB-D decode/upload work on the same main thread.
-  if (!state.rgbdPaused && advanceRenderClock(now)) {
+  // Do not queue obsolete views behind GPU work. A zero-timeout fence poll
+  // leaves the main thread free for input, network and worker completion.
+  // When ready, render() uploads each camera's newest pending capture.
+  if (!state.rgbdPaused && advanceRenderClock(now) && gpuFrameReady()) {
+    const before = state.stats.renderFrames;
     render();
+    if (state.stats.renderFrames !== before) markGpuFrame();
   }
   updateStats();
   state.animationFrame = requestAnimationFrame(animationLoop);
@@ -2964,6 +2995,7 @@ function rgbdSocketUrl(options) {
     depth_exact: options.exactDepth === true ? "1" : "0",
     temporal_color: options.temporalColor === false ? "0" : "1",
     persistent_reference: options.persistentReference === true ? "1" : "0",
+    flow_control: options.flowControl !== false && options.temporalDepth === false && options.temporalColor === false ? "1" : "0",
     client: state.rgbdClientId,
   });
   return `${scheme}://${window.location.host}/rgbd-stream?${query}`;
@@ -2997,7 +3029,20 @@ function startRgbdWebSocket(options) {
   };
   socket.onmessage = (event) => {
     if (!state.running || state.socket !== socket || document.hidden) return;
+    if (typeof event.data === "string") {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === "rgbd-sequence" && Number.isSafeInteger(message.sequence) && message.sequence > 0) {
+          socket.latestFrameSequence = message.sequence;
+        }
+      } catch (_) { /* Older transports need no acknowledgement. */ }
+      return;
+    }
     handleRgbdPacket(event.data, "WebSocket latest-frame");
+    if (socket.latestFrameSequence && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({type: "rgbd-ack", sequence: socket.latestFrameSequence}));
+      socket.latestFrameSequence = 0;
+    }
   };
   socket.onerror = () => {
     if (state.socket === socket) state.stats.status = "RGB-D WebSocket error";
@@ -3266,6 +3311,8 @@ export async function startGodotHybridRenderer(options = {}) {
     }
   });
   state.lastRenderMs = 0;
+  state.renderFences = [];
+  state.gpuPacingUnavailable = false;
   state.stats = {
     ...state.stats,
     status: "connecting",
@@ -3287,6 +3334,7 @@ export async function startGodotHybridRenderer(options = {}) {
     receiveFps: 0,
     decodeErrors: 0,
     renderFrames: 0,
+    gpuDeferredFrames: 0,
     renderFps: 0,
     cameraFrames: {},
     cameraFps: {},
@@ -3323,6 +3371,8 @@ export async function startGodotHybridRenderer(options = {}) {
 
 export function stopGodotHybridRenderer() {
   state.running = false;
+  for (const fence of state.renderFences || []) state.gl?.deleteSync(fence);
+  state.renderFences = [];
   clearPendingCameraUploads();
   state.nextFrameDecode?.cancel();
   state.nextFrameDecode = null;

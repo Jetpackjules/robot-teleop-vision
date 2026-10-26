@@ -18,6 +18,22 @@ newest source image and allows at most sixteen unacknowledged encoded frames;
 backpressure drops source images before encoding, preserving the H.264 reference
 chain. A lagging decoder can request an independent keyframe.
 
+Independent native RGB-D WebSocket viewers also negotiate `flow_control=1`.
+Small sequence messages accompany the unchanged binary RGB-D packets, and the
+browser acknowledges their receipt. The sender bounds outstanding frames using
+the smallest observed acknowledgement round trip and requested cadence (2–16
+frames). Congestion cannot inflate that window indefinitely. When credit runs
+out, source draining continues in its newest-frame slot and expensive packet
+processing waits. The next available credit selects current captures rather
+than replaying every missed frame. Legacy clients and temporal-reference streams
+retain their existing wire protocol.
+
+The browser also bounds GPU work to two submitted views using nonblocking WebGL
+fences. While the GPU is busy, camera uploads continue coalescing to the newest
+complete frame per camera; the main thread remains available for input and
+decoder completion. No sensor samples, RGB texture dimensions, or shader detail
+are reduced. Submitted-render FPS is not a measurement of display presentation.
+
 Keyboard press/release transitions send immediately, with the existing 30 Hz
 heartbeat retained. OS repeats do not add commands. The follower loop frequency,
 physical speed/step limits, watchdog, Pause, and explicit Enable behavior are unchanged.
