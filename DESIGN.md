@@ -115,7 +115,7 @@ Primary buttons use the pale action fill with dark text. Secondary buttons use t
 
 Settings tabs are flat text controls with an accent underline on the selected tab. Fields have dark fills, light borders, clear labels, and an accent caret. Disclosures expose secondary controls on demand. The connection disclosure retains its short text label alongside a semantic dot.
 
-Set task edits the task inline in the top bar, with the primary action becoming Save task and a labelled cancel control beside the field. Saving returns to the normal trial controls; it does not start recording. Settings remains the full configuration panel.
+Show the preconfigured study task in the top bar with Start trial as the initial action. Task configuration belongs in Settings → Session; participants do not type the task between trials. The current block-and-cup instruction is a placeholder for the final study task.
 
 Trial progress is a visible 6px cyan horizontal bar showing elapsed time toward the configured target. Keep a compact 1/3 trial counter beside the condition. Timer figures are yellow and tabular, turning red when the time target has been reached; recording still ends manually. Keep the task distinct through modest size and weight rather than large display typography. Live and loading states use actual application status; demonstrations must identify synthetic inputs.
 

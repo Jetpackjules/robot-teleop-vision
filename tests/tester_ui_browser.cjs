@@ -49,29 +49,14 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     assert.equal(await page.locator('#so101-hold').isVisible(), false, 'Hold stays off the participant view');
     assert.equal(await page.locator('#settings-controls #so101-hold').count(), 1);
 
-    await page.locator('#trial-action').click();
-    const taskInput = page.locator('#trial-task-input');
-    assert.equal(await page.locator('#advanced-setup').isVisible(), false, 'Set task edits inline rather than opening Settings');
-    assert.equal(await taskInput.evaluate(el => el === document.activeElement), true);
-    await page.locator('#trial-action').click();
-    assert.equal(await page.locator('#trial-task-editor').isVisible(), true, 'empty task cannot be saved');
-    await taskInput.fill('Unsaved task');
-    await taskInput.press('Escape');
-    assert.equal(await page.locator('#trial-task-editor').isVisible(), false);
-    assert.equal(await page.locator('[data-recording-task]').inputValue(), '', 'Escape leaves the saved task unchanged');
-    await page.locator('#trial-action').click();
-    await taskInput.fill('Another draft');
-    await page.locator('#trial-task-cancel').click();
-    assert.equal(await page.locator('[data-recording-task]').inputValue(), '', 'Cancel leaves the saved task unchanged');
-    await page.locator('#trial-action').click();
-    await taskInput.fill('Place the block in the cup');
-    await page.locator('#trial-action').click();
-    assert.equal(await page.locator('#trial-task-editor').isVisible(), false);
-    assert.equal(await page.locator('#advanced-setup').isVisible(), false);
+    await page.waitForFunction(() => !document.getElementById('trial-action').disabled);
+    assert.equal(await page.locator('#trial-action').textContent(), 'Start trial', 'preset task is immediately ready to start');
+    assert.equal(await page.locator('#trial-task-editor').count(), 0, 'participant view has no task-entry workflow');
     assert.equal(await page.locator('#trial-task').textContent(), 'Place the block in the cup');
-    assert.equal(await page.locator('#episode-recording').getAttribute('data-recording-state'), 'idle', 'saving a task never starts recording');
+    assert.equal(await page.locator('#episode-recording').getAttribute('data-recording-state'), 'idle', 'loading the preset never starts recording');
     await page.locator('#open-advanced').click();
-    assert.equal(await page.locator('[data-recording-task]').inputValue(), 'Place the block in the cup', 'Settings shares the same saved task');
+    const taskInput = page.locator('[data-recording-task]');
+    assert.equal(await taskInput.inputValue(), 'Place the block in the cup', 'facilitator settings contain the preset');
     await page.getByRole('spinbutton', {name: 'Time target (minutes)', exact: true}).fill('0.5');
     await page.locator('#tab-session').focus();
     assert.equal(await page.locator('#trial-progress').getAttribute('max'), '30');
@@ -144,6 +129,7 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
       const status = await page.evaluate(async () => await (await fetch('/api/v1/recording?client=recording-fixture')).json());
       const manifest = JSON.parse(readFileSync(resolve(episodeRoot, status.last_saved.episode, 'episode.json'), 'utf8'));
       assert.equal(manifest.status, 'complete'); assert.equal(manifest.synthetic, true);
+      assert.equal(manifest.task, 'Place the block in the cup', 'all conditions record the preset without retyping it');
       assert.equal(manifest.trial.condition, condition); assert.equal(manifest.trial.index, index + 1);
       assert.equal(manifest.outcome, index === 1 ? 'failure' : 'success');
       assert.equal(manifest.trial.display_mode, index ? 'blendpcr' : 'rgb_camera');
@@ -171,6 +157,9 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     await page.waitForFunction(() => document.querySelector('[data-recording-status]').textContent.includes('discarded'));
     assert.equal(await page.locator('#trial-position').textContent(), 'Free session');
     await page.locator('#new-trial-session').click();
+    await taskInput.fill('');
+    assert.equal(await page.locator('#trial-action').isDisabled(), true, 'empty facilitator configuration cannot start a trial');
+    await taskInput.fill('Move the block to the target');
     await page.locator('#guided-trials').check();
     await page.locator('#trial-order').selectOption('mouse_3d,fixed_rgb,head_3d');
     await page.keyboard.press('Escape');
@@ -203,6 +192,7 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     await page.reload({waitUntil: 'domcontentloaded'});
     await page.waitForFunction(() => !document.getElementById('trial-action').disabled);
     assert.equal(await page.locator('#trial-duration').inputValue(), '0.5', 'time target survives reload');
+    assert.equal(await taskInput.inputValue(), 'Move the block to the target', 'facilitator task override survives new sessions and reload');
     await page.locator('#open-advanced').click();
     assert.equal((await page.locator('#advanced-setup').boundingBox()).y, 70);
     await page.setViewportSize({width: 1366, height: 768});
@@ -213,6 +203,7 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     const result = {synthetic: true, conditions: 3, episodes, hostSaveGate: true, manualNext: true,
       outcomes: true, cameraArrows: true, tabsAndFocus: true, holdInSettings: true, freeConfiguration: true,
       elapsedTimeProgress: true, timeTargetNoAutoStop: true,
+      presetTask: true, taskAcrossConditions: true, facilitatorTaskOverride: true,
       actualCadModels: 7, layouts, episodeRoot};
     writeFileSync(resolve(output, 'browser-results.json'), JSON.stringify(result, null, 2));
     console.log(JSON.stringify(result));

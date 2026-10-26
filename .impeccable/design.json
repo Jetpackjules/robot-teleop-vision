@@ -62,8 +62,8 @@
     {
       "name": "Task field",
       "kind": "input",
-      "description": "Labelled task instruction input.",
-      "html": "<label class=\"ds-field\">Task instruction<input placeholder=\"Place the block in the cup\"></label>",
+      "description": "Facilitator task field, prefilled with the study placeholder.",
+      "html": "<label class=\"ds-field\">Task instruction<input value=\"Place the block in the cup\"></label>",
       "css": ".ds-field{display:grid;gap:5px;color:var(--muted,#b8c1cc);font:13px/1.45 system-ui,sans-serif}.ds-field input{min-height:40px;padding:9px;border:1px solid var(--line,#383e46);border-radius:6px;background:#111;color:var(--text,#f0f3f6);font:inherit;caret-color:var(--accent,#afd6f2)}.ds-field input::placeholder{color:#9ba6b3}.ds-field input:focus-visible{outline:2px solid var(--accent,#afd6f2);outline-offset:3px}"
     },
     {
@@ -85,7 +85,8 @@
     ],
     "rules": [],
     "dos": [
-      "Preserve keyboard focus and meaningful state labels."
+      "Preserve keyboard focus and meaningful state labels.",
+      "Show the preconfigured study task; keep task editing in Settings."
     ],
     "donts": [
       "Do not add gradients, emoji controls, glow, or arcade styling.",
