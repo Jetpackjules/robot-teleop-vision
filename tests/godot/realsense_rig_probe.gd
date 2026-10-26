@@ -153,6 +153,7 @@ func run() -> void:
 	check(view._alignment_transforms == current and view.calibration_status.contains("could not save"), "write failure cannot apply staged poses")
 	view.realsense_device_registry = {"A": {"model": "D455"}, "B": {"model": "D435"}, "C": {"model": "D435"}, "D": {"model": "D455"}}
 	view.render_mode = "unified_mesh"
+	view.unified_camera_priority = 0
 	var order: Array[String] = [ids[2], ids[3], ids[1], ids[0]]
 	order.sort_custom(view._fusion_camera_precedes)
 	check(order == [ids[0], ids[3], ids[1], ids[2]], "stable mesh priority includes all cameras and serial tie-breakers")
@@ -163,9 +164,66 @@ func run() -> void:
 	view._update_realsense_direct_status()
 	check(view.realsense_status.contains("needs rebuilding"), "stream status does not overwrite a mesh failure")
 	view.free()
+	check_joint_refinement_transaction()
 	check_color_matching()
 	print("REALSENSE_RIG_PROBE checks=%d failures=%d" % [checks, failures])
 	quit(0 if failures == 0 else 1)
+
+func check_joint_refinement_transaction() -> void:
+	var view := TestView.new()
+	var ids: Array[String] = ["realsense:A", "realsense:B", "realsense:C"]
+	var original := {ids[0]: Transform3D.IDENTITY, ids[1]: Transform3D(Basis.IDENTITY, Vector3(0.1,0,0)), ids[2]: Transform3D(Basis.IDENTITY, Vector3(0,0.1,0))}
+	var rig := Rig.new()
+	rig.begin(ids, ids[0], original)
+	while not rig.next_pair().is_empty(): rig.accept(response(original[rig.active_pair.target_camera]))
+	view._native_realsense_rig = rig
+	view._native_realsense_calibration_mode = "markerless"
+	view._alignment_transforms = original.duplicate()
+	view._camera_alignment_registry_path = "user://joint-rig.json"
+	view._write_camera_alignment_set(original, ids[0], "previous", "previous")
+	view._native_realsense_registry_before = FileAccess.get_file_as_bytes(view._camera_alignment_registry_path)
+	var worker := View.JointRefinement.new()
+	worker.folder = ProjectSettings.globalize_path("user://joint-worker-test")
+	DirAccess.make_dir_recursive_absolute(worker.folder)
+	worker.previous_registry = view._native_realsense_registry_before
+	view._joint_realsense_refinement = worker
+	check(view._realsense_cloud_alignment_running(), "joint stage still blocks another calibration")
+	check(not view._realsense_capture_exclusive(), "joint stage releases capture for fresh frame validation")
+	view._joint_realsense_refinement = null
+	check(view._realsense_capture_exclusive(), "native pair stage still pauses capture")
+	view._joint_realsense_refinement = worker
+	var transforms := {}
+	for id in ids: transforms[view._realsense_serial(id)] = Rig.payload(original[id])
+	var result := {"ok": true, "selected": "refined", "reference_camera": "A", "transforms": transforms}
+	var bad := result.duplicate(true)
+	bad.transforms.erase("C")
+	check(not view._apply_joint_realsense_result(bad), "partial joint output cannot save a subset of the rig")
+	bad = result.duplicate(true)
+	bad.transforms.A.T[0] = 0.02
+	check(not view._apply_joint_realsense_result(bad), "joint output cannot move the fixed reference")
+	bad = result.duplicate(true)
+	bad.transforms.B.R[0][0] = NAN
+	check(not view._apply_joint_realsense_result(bad), "nonfinite joint output rejected")
+	var previous_result := result.duplicate(true)
+	previous_result.selected = "previous"
+	check(view._apply_joint_realsense_result(previous_result), "better existing alignment can be retained")
+	check(FileAccess.get_file_as_bytes(view._camera_alignment_registry_path) == view._native_realsense_registry_before, "retaining saved alignment does not rewrite it")
+	var newer: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(view._camera_alignment_registry_path))
+	newer["updated_at"] = 1234
+	Rig.write_atomic(view._camera_alignment_registry_path, newer)
+	check(not view._apply_joint_realsense_result(result), "concurrent newer calibration cannot be overwritten")
+	var file := FileAccess.open(view._camera_alignment_registry_path, FileAccess.WRITE)
+	file.store_buffer(view._native_realsense_registry_before)
+	file.close()
+	result.transforms.B.T[1] = 0.005
+	check(view._apply_joint_realsense_result(result), "validated whole joint rig saves")
+	check(FileAccess.get_file_as_bytes(worker.folder + "/registry-before.json") == worker.previous_registry, "previous rig is backed up before commit")
+	var saved: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(view._camera_alignment_registry_path))
+	check(saved.transforms[ids[1]].method == "joint_rgbd_reprojection_refinement", "joint calibration is persisted as the new method")
+	check(absf((view._alignment_transforms[ids[1]] as Transform3D).origin.y - 0.005) < 0.00001, "live poses update only after successful commit")
+	view._release_native_realsense_rig()
+	check(not view._realsense_cloud_alignment_running(), "joint transaction releases busy state")
+	view.free()
 
 func check_color_matching() -> void:
 	var view := ColorView.new()

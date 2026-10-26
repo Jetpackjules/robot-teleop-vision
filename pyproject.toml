@@ -20,7 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 realsense = ["pyrealsense2>=2.55; platform_system != 'Darwin'"]
-calibration = ["open3d>=0.18", "trimesh>=4.4"]
+calibration = ["open3d>=0.18", "trimesh>=4.4", "onnxruntime>=1.20"]
 recording = ["lerobot==0.4.3"]
 test = ["pytest>=8", "ruff>=0.6", "moderngl>=5.12; sys_platform == 'linux'"]
 

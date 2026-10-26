@@ -2,6 +2,7 @@
 extends Node3D
 
 const RigCalibration = preload("res://godot/runtime/point_cloud/realsense_rig_calibration.gd")
+const JointRefinement = preload("res://godot/runtime/point_cloud/realsense_joint_refinement.gd")
 const MeshFusion = preload("res://godot/runtime/point_cloud/realsense_mesh_fusion.gd")
 const BlendPCR = preload("res://godot/runtime/point_cloud/blendpcr/blendpcr_renderer.gd")
 const CameraRigGuides = preload("res://godot/runtime/point_cloud/camera_rig_guides.gd")
@@ -626,7 +627,7 @@ var _workspace_crop_guide_key: Array = []
 
 @export_group("Calibration")
 @export_subgroup("Core Actions")
-## Calibrates all enabled RealSense cameras in one run using native RGB-D matching. Keep the cameras and scene still. Saves only when the whole rig succeeds.
+## Calibrates all enabled cameras, then jointly refines RGB-D image alignment and validates fresh frames. Keep the scene still. Preserves a better saved alignment.
 @export var auto_align_realsense_without_marker_now: bool = false:
 	set(value):
 		auto_align_realsense_without_marker_now = false
@@ -869,6 +870,8 @@ var _native_realsense_calibration_mode := ""
 var _native_realsense_calibration_reference_id := ""
 var _native_realsense_calibration_target_id := ""
 var _native_realsense_rig: RigCalibration
+var _joint_realsense_refinement: JointRefinement
+var _native_realsense_registry_before := PackedByteArray()
 var _mesh_fusion := MeshFusion.new()
 var _blendpcr: Node3D
 var _mesh_quality_rig: Node
@@ -973,6 +976,8 @@ func _exit_tree() -> void:
 		_blendpcr.clear()
 	if _native_realsense_calibrator != null and _native_realsense_calibrator.has_method("cancel"):
 		_native_realsense_calibrator.cancel()
+	if _joint_realsense_refinement != null:
+		_joint_realsense_refinement.cancel()
 	if not Engine.is_editor_hint():
 		_clear_runtime_stream_owner()
 	if _stream_commands_active:
@@ -991,6 +996,7 @@ func _process(_delta: float) -> void:
 	_poll_camera_alignment_registry(false)
 	_update_realsense_cloud_alignment_process()
 	_update_native_realsense_calibration()
+	_update_joint_realsense_refinement()
 	_update_robot_position_calibration_status()
 	_update_camera_renderers()
 	_update_realsense_direct_status()
@@ -1982,7 +1988,7 @@ func _sync_capture_control() -> void:
 			var renderer := _camera_nodes.get(id) as Node3D
 			if is_instance_valid(renderer): settings["_capture_transform"]=renderer.global_transform
 			cameras[id]=settings
-		var state := {"cameras":cameras,"paused":_realsense_cloud_alignment_running()}
+		var state := {"cameras":cameras,"paused":_realsense_capture_exclusive()}
 		if state==_capture_control_previous and (not bool(state.paused) or now-_capture_control_last_write<500): return
 		_capture_control_previous=state.duplicate(true)
 		_capture_control_last_write=now
@@ -2307,6 +2313,11 @@ func _native_realsense_calibration_running() -> bool:
 			and bool(_native_realsense_calibrator.is_running())
 		)
 	)
+
+func _realsense_capture_exclusive() -> bool:
+	# Joint refinement reads the existing stream. It keeps the transaction busy,
+	# while releasing the SDK pause lease so fresh frames can be validated.
+	return _realsense_cloud_alignment_running() and _joint_realsense_refinement == null
 
 func _enabled_realsense_serials() -> Array[String]:
 	var serials: Array[String] = []
@@ -2707,6 +2718,8 @@ func _request_native_realsense_calibration(mode: String) -> void:
 		calibration_status = "The reference camera must be enabled and discovered."
 		return
 	_native_realsense_rig = rig
+	var registry_path := ProjectSettings.globalize_path(CAMERA_ALIGNMENT_REGISTRY_PATH) if _camera_alignment_registry_path.is_empty() else _camera_alignment_registry_path
+	_native_realsense_registry_before = FileAccess.get_file_as_bytes(registry_path) if FileAccess.file_exists(registry_path) else PackedByteArray()
 	_native_realsense_calibration_mode = mode
 	_native_realsense_calibration_pending = true
 	_set_realsense_direct_renderers_enabled(false)
@@ -2789,6 +2802,16 @@ func _update_native_realsense_calibration() -> void:
 func _finish_native_realsense_rig() -> void:
 	var rig := _native_realsense_rig
 	var mode := _native_realsense_calibration_mode
+	if rig.complete() and mode == "markerless":
+		_joint_realsense_refinement = JointRefinement.new()
+		if _joint_realsense_refinement.begin(self, rig, _native_realsense_registry_before):
+			calibration_status = _joint_realsense_refinement.status
+			_native_realsense_calibration_pending = false
+			_restart_realsense_direct_renderers()
+			return
+		calibration_status = _joint_realsense_refinement.status
+		_release_native_realsense_rig()
+		return
 	if rig.complete():
 		var status := "All %d cameras calibrated and saved (%s)." % [rig.cameras.size(), mode]
 		if not _write_camera_alignment_set(rig.transforms, rig.reference_id, "native_rig_" + mode, status):
@@ -2806,6 +2829,11 @@ func _finish_native_realsense_rig() -> void:
 					calibration_status += " Alignment saved; ArUco benchmark file could not be written."
 	else:
 		calibration_status = "Camera rig calibration incomplete: %s could not be aligned. Previous alignment preserved. %s" % [", ".join(rig.pending_cameras()), " | ".join(rig.failures)]
+	_release_native_realsense_rig()
+
+func _release_native_realsense_rig() -> void:
+	if _joint_realsense_refinement != null: _joint_realsense_refinement.cancel()
+	_joint_realsense_refinement = null
 	_native_realsense_rig = null
 	_native_realsense_calibration_pending = false
 	_native_realsense_calibration_mode = ""
@@ -2813,6 +2841,56 @@ func _finish_native_realsense_rig() -> void:
 	_native_realsense_calibration_target_id = ""
 	_restart_realsense_direct_renderers()
 	_update_camera_renderers()
+
+func _update_joint_realsense_refinement() -> void:
+	if _joint_realsense_refinement == null: return
+	var result = _joint_realsense_refinement.poll()
+	calibration_status = _joint_realsense_refinement.status
+	if result == null: return
+	_apply_joint_realsense_result(result)
+	_release_native_realsense_rig()
+
+func _apply_joint_realsense_result(result: Dictionary) -> bool:
+	if not bool(result.get("ok", false)):
+		calibration_status = str(result.get("status", "Joint refinement failed; previous alignment preserved."))
+		return false
+	var rig := _native_realsense_rig
+	var transforms = result.get("transforms", {})
+	if rig == null or not transforms is Dictionary or transforms.size() != rig.cameras.size() or str(result.get("reference_camera", "")) != _realsense_serial(rig.reference_id):
+		calibration_status = "Joint refinement returned an incomplete rig; previous alignment preserved."
+		return false
+	var staged: Dictionary = {}
+	for camera in rig.cameras:
+		var payload = transforms.get(_realsense_serial(camera), {})
+		var solved = RigCalibration.transform_from_payload(payload) if payload is Dictionary else null
+		if solved == null:
+			calibration_status = "Joint refinement returned an invalid camera pose; previous alignment preserved."
+			return false
+		staged[camera] = solved
+	if not (staged[rig.reference_id] as Transform3D).is_equal_approx(rig.transforms[rig.reference_id]):
+		calibration_status = "Joint refinement moved the fixed reference; previous alignment preserved."
+		return false
+	var path := ProjectSettings.globalize_path(CAMERA_ALIGNMENT_REGISTRY_PATH) if _camera_alignment_registry_path.is_empty() else _camera_alignment_registry_path
+	var latest := FileAccess.get_file_as_bytes(path) if FileAccess.file_exists(path) else PackedByteArray()
+	if latest != _native_realsense_registry_before:
+		calibration_status = "Saved camera alignment changed during calibration; newer alignment preserved."
+		return false
+	var selected := str(result.get("selected", ""))
+	if selected == "previous":
+		calibration_status = "Joint refinement checked all %d cameras; existing saved alignment fits best and was retained." % rig.cameras.size()
+		return true
+	if selected not in ["refined", "initial"] or not _joint_realsense_refinement.backup_registry():
+		calibration_status = "Joint refinement could not back up the saved rig; previous alignment preserved."
+		return false
+	var status := "All %d cameras calibrated and saved (joint RGB-D refinement; fresh-frame validation)." % rig.cameras.size()
+	if selected == "initial": status = "All %d cameras calibrated and saved (joint RGB-D check retained the initial fit)." % rig.cameras.size()
+	if not _write_camera_alignment_set(staged, rig.reference_id, "joint_rgbd_reprojection_refinement", status):
+		calibration_status = "Joint refinement could not save the rig; previous alignment preserved."
+		return false
+	_alignment_transforms.merge(staged, true)
+	_camera_alignment_registry_token = ""
+	calibration_status = status
+	return true
 
 func _read_camera_registry() -> Dictionary:
 	if _camera_alignment_registry_path.is_empty():
@@ -3534,7 +3612,7 @@ func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) ->
 			node.call("set_direct_realsense_crop_rect", crop_rect)
 		if node.has_method("set_direct_realsense_filter_config"):
 			node.call("set_direct_realsense_filter_config", _direct_realsense_filter_config(camera_id))
-		node.call("set_direct_realsense_enabled", _direct_capture_enabled() and _streams_enabled() and _camera_enabled(camera_id) and not _realsense_cloud_alignment_running() and (depth_source in ["sdk_depth", "fast_foundation_native"]))
+		node.call("set_direct_realsense_enabled", _direct_capture_enabled() and _streams_enabled() and _camera_enabled(camera_id) and not _realsense_capture_exclusive() and (depth_source in ["sdk_depth", "fast_foundation_native"]))
 		if node.has_method("get_direct_realsense_status"):
 			realsense_status = "%s: %s" % [_camera_label(camera_id), str(node.call("get_direct_realsense_status"))]
 

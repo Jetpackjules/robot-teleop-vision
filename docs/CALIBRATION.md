@@ -7,8 +7,7 @@ Every connected RealSense is discovered dynamically. The first enabled camera is
 In Godot, select **View → Calibration → Core Actions**. Both **Auto Align
 RealSense Without Marker** and **Calibrate RealSense With ArUco** now calibrate
 all enabled RealSense cameras in one run, including rigs of three or more. They
-solve camera pairs internally, with one fixed world reference; this is not a
-simultaneous bundle-adjustment solver. If a camera cannot see the reference,
+solve initial camera pairs internally, with one fixed world reference. If a camera cannot see the reference,
 the run tries an already aligned camera as a bridge. Every camera must have an
 overlap path to the reference. Keep all cameras, the scene, and (for ArUco) the
 marker stationary throughout the run. The target-serial setting applies only
@@ -22,6 +21,26 @@ intrinsics, coordinate axes and saved transforms keep their original meaning.
 The same match-count, depth-consistency, reprojection and cloud-fit checks apply
 to every orientation. Result details include `markerless_rotation_ccw_deg` and
 `markerless_attempts`, including match counts and rejection reasons.
+
+**Auto Align RealSense Without Marker** then runs joint RGB-D refinement across
+all enabled cameras and every usable overlap pair. It fixes the reference pose,
+optimizes symmetric RGB-feature reprojection with depth consistency, and checks
+a separate fresh capture before saving. It also compares against the previously
+saved alignment; an already better saved rig is retained. This addresses lateral
+texture misalignment that a low point-to-plane ICP residual can miss. A successful
+solve is not a claim of zero depth noise or millimetre absolute accuracy.
+
+This stage reads the existing local RGB-D stream with capture running. It does
+not open another camera pipeline, change stream presets, or require a marker.
+Install the Python calibration dependencies (`python -m pip install -e ".[calibration]"`),
+including ONNX Runtime, in the project's `.venv`; that interpreter is preferred.
+The same packaged SuperPoint/LightGlue model is reused. Keep the entire scene
+still until the final joint validation finishes. A missing dependency, failed
+optimization, insufficient fresh overlap, or concurrent change to the saved rig
+preserves the previous calibration. Per-run requests, captures, validation
+metrics, and the pre-save registry backup are under
+`user://camera_joint_refinement/<run-id>/`. ArUco and the geometry-only Refine
+action keep their existing paths.
 
 The run stages all results and atomically saves them only when every enabled
 camera succeeds. A failed pair can be retried through another camera; an
