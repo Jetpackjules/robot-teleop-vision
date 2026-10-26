@@ -353,3 +353,51 @@ viewpoint movement and 21 FPS under capture refresh; BlendPCR was about 60 and
 37 FPS respectively. These short local replay measurements are not live WAN
 sensor-rate or command-to-motion measurements. Raw evidence remains in
 `.teleop/render-native-20261026/` alongside the captured source frame.
+
+## Live Quality BlendPCR follow-up
+
+The full controller was profiled with live cameras in a separate diagnostic
+browser on the laptop, using the production tunnel/WebSocket path. This is a
+larger workload than the frozen replay above: three 1280×720 native depth views,
+three 1920×1080 original RGB images, seven loaded arm models, and an 1888×2041
+output canvas (1079×1166 CSS at DPR 1.75). Robot-control messages were intercepted
+in the diagnostic browser; the run sent no robot commands to the host.
+
+Native arm masking now caches the existing capsule test in an R8UI flag for
+each measured depth sample. Capture revisions, camera calibration, transforms
+and capsule poses invalidate the affected layers. Every triangle still rejects
+if any of its exact three measured corners is masked. Allocation or shader
+failure retains the direct capsule test. Masking remains enabled.
+
+RGB visibility rejects only empty tiles or tiles wholly outside the actual RGB
+sensor frustum, retaining occluders outside the displayed workspace. BlendPCR's
+metadata raster also rejects tiles wholly outside the current viewing frustum.
+The native pixel cones and fixed optical-plane slopes are reused across capture
+updates. Retained triangles use the same native vertices and integer IDs.
+Shared visibility vertices retain separate triangle validity in two passes;
+the original provoking-vertex path remains available for comparison.
+
+An earlier full-UI sequence measured 11.7 FPS stationary and 10.0 FPS orbiting
+before these changes. Subsequent candidates reached about 31 FPS stationary;
+view-frustum rejection reached about 28 FPS while orbiting. These are short
+measurements, not a sustained minimum. Later tests with GeForce NOW and other
+laptop activity running varied substantially; the final warmed run measured
+14.5 FPS stationary and 11.6 FPS orbiting, with roughly 10–12 decoded camera
+batches/s. An adjacent warmed baseline run under that load measured 8.1 FPS
+stationary and 6.8 FPS orbiting. **A sustained 30 FPS minimum, and 60 FPS, remain unverified.** The
+earlier 60 FPS frozen replay must not be presented as live UI performance.
+
+Captured full-Quality comparisons at three viewpoints were pixel-identical for
+BlendPCR, points and unified mesh. Regressions cover cached masks, pose and
+camera updates, view culling, original RGB visibility, gray material and CAD
+depth occlusion. Rendering FPS, fresh camera FPS and command-to-visible-motion
+latency remain separate measurements. Startup intervals without fresh camera
+updates are excluded from meaningful performance claims.
+
+No sensor resolution, depth sample, JPEG quality, output resolution policy or
+3D wire representation changed in this follow-up. Adaptive geometry and new
+lossy compression remain deferred. Experimental visibility-minimum caches,
+fragment-stage validity, and framebuffer-copy presentation were rejected.
+JPEG coefficient-preserving entropy repacking saved only about 1.3% and added
+processing delay, so it was not enabled. Raw diagnostic evidence is retained
+under `.teleop/live-quality-20261026/`.

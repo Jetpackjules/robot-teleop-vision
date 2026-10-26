@@ -122,11 +122,18 @@ void main() {
 // Shared by Unified mesh, shared-color points/mesh and BlendPCR. Arrays allow
 // every camera in the rig to participate, including rigs with more than four.
 export const RIG_SAMPLING_SHADER = `
+#ifndef RIG_CAMERA_CAPACITY
+#define RIG_CAMERA_CAPACITY 32
+#endif
 uniform highp usampler2DArray u_rig_depth;
 uniform highp sampler2DArray u_rig_quality;
 uniform highp sampler2DArray u_rig_color;
 uniform highp sampler2DArray u_rig_rgb;
 uniform highp sampler2DArray u_rig_visibility;
+#ifdef RIG_CACHED_MASK
+uniform highp usampler2DArray u_rig_mask;
+#endif
+uniform highp ivec4 u_rig_visibility_layers[RIG_CAMERA_CAPACITY];
 uniform highp int u_rig_original_rgb_enabled;
 #ifdef RIG_UNIFORM_DATA
 uniform highp vec4 u_rig_uniform_data[RIG_CAMERA_CAPACITY*13];
@@ -174,7 +181,7 @@ bool rig_masked(vec3 world) {
   return false;
 }
 struct RigHit {vec3 local;vec3 world;vec3 normal;vec3 color;bool color_valid;float confidence;float score;};
-bool rig_triangle(int camera,uint id,vec3 origin,vec3 ray,out RigHit hit) {
+bool rig_triangle_checked(int camera,uint id,vec3 origin,vec3 ray,bool check_mask,out RigHit hit) {
   if(id==0u||rig_data(camera,4).z<0.5)return false;
   int primitive=int(id-1u),width=int(rig_data(camera,4).x)-1;
   int cell=primitive/2;
@@ -187,7 +194,13 @@ bool rig_triangle(int camera,uint id,vec3 origin,vec3 ray,out RigHit hit) {
   if(second){a=b;b=p+ivec2(1,1);}
   vec4 k=rig_data(camera,3);
   vec3 pa=rig_point(a,rig_z(camera,a),k),pb=rig_point(b,rig_z(camera,b),k),pc=rig_point(c,rig_z(camera,c),k);
-  if(u_robot_mask_enabled==1&&(rig_masked(rig_world(camera,pa))||rig_masked(rig_world(camera,pb))||rig_masked(rig_world(camera,pc))))return false;
+  if(check_mask&&u_robot_mask_enabled==1){
+#ifdef RIG_CACHED_MASK
+    if(texelFetch(u_rig_mask,ivec3(a,camera),0).r!=0u||texelFetch(u_rig_mask,ivec3(b,camera),0).r!=0u||texelFetch(u_rig_mask,ivec3(c,camera),0).r!=0u)return false;
+#else
+    if(rig_masked(rig_world(camera,pa))||rig_masked(rig_world(camera,pb))||rig_masked(rig_world(camera,pc)))return false;
+#endif
+  }
   vec3 v0=pb-pa,v1=pc-pa,n=cross(v0,v1);
   float denominator=dot(n,ray);
   if(abs(denominator)<1e-15)return false;
@@ -196,16 +209,28 @@ bool rig_triangle(int camera,uint id,vec3 origin,vec3 ray,out RigHit hit) {
   vec3 p3=origin+ray*t,v2=p3-pa;
   float d00=dot(v0,v0),d01=dot(v0,v1),d11=dot(v1,v1),det=d00*d11-d01*d01;
   if(det<=1e-25)return false;
-  float v=(d11*dot(v2,v0)-d01*dot(v2,v1))/det,w=(d00*dot(v2,v1)-d01*dot(v2,v0))/det;
   hit.local=p3;hit.world=rig_world(camera,p3);hit.normal=normalize(n);
+#ifdef RIG_NATIVE_RGB_ONLY
+  hit.color=vec3(0);hit.color_valid=false;
+#else
+  float v=(d11*dot(v2,v0)-d01*dot(v2,v1))/det,w=(d00*dot(v2,v1)-d01*dot(v2,v0))/det;
   // Match Godot's nearest RGB texture sampling at the reconstructed UV.
   ivec2 color_pixel=clamp(ivec2(floor((1.0-v-w)*vec2(a)+v*vec2(b)+w*vec2(c)+0.5)),ivec2(0),ivec2(rig_data(camera,4).xy)-1);
   vec4 sample_color=texelFetch(u_rig_color,ivec3(color_pixel,camera),0);
   hit.color=sample_color.rgb;hit.color_valid=sample_color.a>0.5;
+#endif
   hit.confidence=second?cache.a:cache.b;
   float range_sq=max(dot(p3,p3),0.0001);
   hit.score=k.x*k.y*1e-6*hit.confidence*abs(dot(hit.normal,p3/sqrt(range_sq)))/range_sq;
   return true;
+}
+bool rig_triangle(int camera,uint id,vec3 origin,vec3 ray,out RigHit hit) {
+  return rig_triangle_checked(camera,id,origin,ray,true,hit);
+}
+bool rig_metadata_triangle(int camera,uint id,vec3 origin,vec3 ray,out RigHit hit) {
+  // Metadata already rejected the complete masked native triangle. Peer
+  // surface queries still use rig_triangle and retain their own mask check.
+  return rig_triangle_checked(camera,id,origin,ray,false,hit);
 }
 bool rig_surface(int camera,vec3 world,out RigHit hit) {
   vec3 p=rig_local(camera,world);
@@ -269,9 +294,10 @@ bool rig_rgb_sample(int camera,vec3 world,vec3 normal,out vec3 color,out float s
   // Bilinear RGB touches four pixels. Actual self-occlusion is always tested
   // against this camera's native surface, before considering peer uncertainty.
   float strict_margin=max(0.004,0.004*p.z*p.z);
-  float own_z=rig_rgb_visible_depth(q,end,u_rig_count+camera);
+  ivec4 layers=u_rig_visibility_layers[camera];
+  float own_z=rig_rgb_visible_depth(q,end,layers.y);
   if(own_z<p.z-strict_margin)return false;
-  float visible_z=rig_rgb_visible_depth(q,end,camera);
+  float visible_z=min(own_z,rig_rgb_visible_depth(q,end,layers.x));
   float gap=p.z-visible_z;
   if(gap>strict_margin) {
     if(!rig_rgb_same_surface(camera,world,normal))return false;
@@ -280,7 +306,7 @@ bool rig_rgb_sample(int camera,vec3 world,vec3 normal,out vec3 color,out float s
     // boundary band; a clear occluder is rejected on its first frame.
     if(gap>0.012) {
       if(gap>0.016)return false;
-      float previous_z=rig_rgb_visible_depth(q,end,u_rig_count*2+camera);
+      float previous_z=min(rig_rgb_visible_depth(q,end,layers.z),rig_rgb_visible_depth(q,end,layers.w));
       if(p.z-previous_z>0.012)return false;
     }
   }
@@ -373,6 +399,7 @@ export class GpuCameraRig {
     this.failedSignature = "";
     this.version = 0;
     this.metadataValues = null;
+    this.maskTexture=null;
     this.maxLayers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS);
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
     this.copyDepthOnGpu = copyDepthOnGpu;
@@ -406,7 +433,9 @@ export class GpuCameraRig {
     if (!locations) {
       locations = {};
       for (const name of ["depth","data","quality","color","rgb","visibility","count","original_rgb_enabled"]) locations[name] = gl.getUniformLocation(program,`u_rig_${name}`);
+      locations.visibilityLayers=gl.getUniformLocation(program,"u_rig_visibility_layers[0]");
       locations.uniformData=gl.getUniformLocation(program,"u_rig_uniform_data[0]");
+      locations.mask=gl.getUniformLocation(program,'u_rig_mask');
       this.bindings.set(program,locations);
     }
     for (const [key, unit, target] of [["depth",4,gl.TEXTURE_2D_ARRAY],["data",5,gl.TEXTURE_2D],
@@ -417,7 +446,9 @@ export class GpuCameraRig {
     }
     gl.uniform1i(locations.count,this.count);
     gl.uniform1i(locations.original_rgb_enabled,this.originalRgb?1:0);
+    if(this.visibility.layers.length)gl.uniform4iv(locations.visibilityLayers,this.visibility.layers);
     if(locations.uniformData!==null&&this.metadataValues)gl.uniform4fv(locations.uniformData,this.metadataValues);
+    if(locations.mask!==null){gl.activeTexture(gl.TEXTURE3);gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.maskTexture||this.depth);gl.uniform1i(locations.mask,3);}
   }
 
   update(cameras, inverseTransform, now = performance.now(), settings = {}, restoreState = null) {
@@ -535,7 +566,7 @@ export class GpuCameraRig {
         gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,13,cameras.length,gl.RGBA,gl.FLOAT,metadata);
         this.metadataSignature = key;
       }
-      this.visibility.update(cameras,this.quality,inverseTransform,originalRgb,now,settings.depth_only_enabled!==true);
+      this.visibility.update(cameras,this.quality,inverseTransform,originalRgb,now,settings.depth_only_enabled!==true,this.uploads.map(entry=>entry.revision));
       this.version++;
     } catch (error) {
       this.failedSignature=signature;

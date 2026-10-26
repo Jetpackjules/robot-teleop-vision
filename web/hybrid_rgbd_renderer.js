@@ -11,6 +11,7 @@ import { MODELED_WORKSPACE_DEFAULTS, MODELED_WORKSPACE_SHADER, ModeledWorkspaceR
 import {SCENE_LIGHTING_SHADER,bindSceneLighting,SceneShadowRenderer} from './scene_lighting.js?v=20261021_lit_workspace';
 import {NativePointColors} from './hybrid_point_colors.js?v=20261026_native_render';
 import {visibleNativeTiles} from './native_geometry.js?v=20261026_native_render';
+import {NativeRobotMask} from './native_robot_mask.js?v=20261026_quality_profile';
 
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},
@@ -1748,7 +1749,7 @@ async function decodeCamera(payload) {
   let color, rawDepth, depthTiles=null;
   if (state.nativeDecoder && !state.nativeDecoder.disabled
       && state.socketOptions?.exactDepth === true && isIndependentNativeFrame(payload.metadata)) {
-    const decoded = await state.nativeDecoder.decode({...payload,workspaceTiles:state.useNativeTileCulling!==false&&state.settings.geometry_mode!=='mesh'||state.settings.workspace_crop_enabled===true||state.settings.modeled_workspace_enabled===true});
+    const decoded = await state.nativeDecoder.decode({...payload,workspaceTiles:state.useNativeTileCulling!==false||state.settings.workspace_crop_enabled===true||state.settings.modeled_workspace_enabled===true});
     depthTiles=decoded.depthTiles;
     color = {bitmap: decoded.bitmap, pixels: null,rgbaPixels:decoded.rgbaPixels};rawDepth = decoded.depth;
     for(const key of ["workerMs","dispatchMs"])state.stats[key]=state.stats[key]>0?state.stats[key]*.8+decoded[key]*.2:decoded[key];
@@ -2555,6 +2556,14 @@ function render() {
     }
   }
   let blended = false;
+  if(state.cameraFusion)state.cameraFusion.maskTexture=null;
+  if(cached&&meshMode&&state.settings.blendpcr_enabled&&maskCapsules&&state.useCachedRobotMask!==false&&!state.robotMaskCacheUnavailable){
+    try{
+      state.robotMaskCache ||= new NativeRobotMask(gl);
+      state.robotMaskCache.update(state.cameras,maskCapsules,[0,0,dimensions.width,dimensions.height]);
+      state.cameraFusion.maskTexture=state.robotMaskCache.texture;
+    }catch(error){state.robotMaskCache?.dispose();state.robotMaskCache=null;state.robotMaskCacheUnavailable=true;}
+  }
   let pointColors=false;
   if(!meshMode&&cached&&state.cameraFusion.originalRgb&&state.usePointColorCache!==false
       &&!state.settings.depth_only_enabled&&!state.pointColorCacheUnavailable
@@ -3466,6 +3475,7 @@ export function stopGodotHybridRenderer() {
   state.cameraFusion?.clear();
   state.cameraFusion = null;
   state.pointColors?.dispose();state.pointColors=null;state.pointColorCacheUnavailable=false;
+  state.robotMaskCache?.dispose();state.robotMaskCache=null;state.robotMaskCacheUnavailable=false;
   const gl = state.gl;
   deleteWorkspaceGuide(gl);
   state.modeledWorkspace?.dispose();

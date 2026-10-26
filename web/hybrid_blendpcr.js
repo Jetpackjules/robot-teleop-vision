@@ -6,6 +6,7 @@ import { FULLSCREEN_VERTEX_SHADER, RIG_SAMPLING_SHADER, compileGpuProgram, gpuTe
 import { DEPTH_SHADING_SHADER } from "./depth_shading.js?v=20261020_depth_only";
 import { WORKSPACE_CROP_CONTEXT, WORKSPACE_CROP_SHADER, bindWorkspaceCrop, workspaceCropBounds, workspaceSourceWindow, workspaceVisibleTiles, bindWorkspaceTiles, unbindWorkspaceTiles } from './workspace_crop.js?v=20261021_original_rgb';
 import { MODELED_WORKSPACE_SHADER, modeledWorkspaceBounds, bindModeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
+import {visibleNativeTiles} from './native_geometry.js?v=20261026_native_render';
 
 const METADATA_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
@@ -39,6 +40,9 @@ uniform mat4 u_view_projection;
 uniform highp int u_robot_mask_enabled;
 uniform vec4 u_mask_capsule_a[6];
 uniform vec4 u_mask_capsule_b[6];
+#ifdef RIG_CACHED_MASK
+uniform highp usampler2DArray u_rig_mask;
+#endif
 #ifdef INSTANCED_GRID
 uniform ivec2 u_tile_size;
 uniform int u_tile_columns;
@@ -91,7 +95,11 @@ void main() {
     if(inside&&v_valid>0.5&&u_robot_mask_enabled==1) {
       bool second=(primitive%2)==1;
       ivec2 a=top_left+ivec2(second?1:0,0),b=top_left+ivec2(1,second?1:0),c=top_left+ivec2(0,1);
+#ifdef RIG_CACHED_MASK
+      if(texelFetch(u_rig_mask,ivec3(a,u_rig_index),0).r!=0u||texelFetch(u_rig_mask,ivec3(b,u_rig_index),0).r!=0u||texelFetch(u_rig_mask,ivec3(c,u_rig_index),0).r!=0u) {
+#else
       if(robot_masked(source_world(a))||robot_masked(source_world(b))||robot_masked(source_world(c))) {
+#endif
         v_valid=0.0;v_triangle_id=0u;
       }
     }
@@ -127,7 +135,7 @@ bool sample_camera(int camera,vec2 uv,out RigHit hit,out float view_z) {
   vec2 screen=(vec2(pixel)+vec2(0.5))/vec2(u_output_size)*2.0-1.0;
   vec3 ray=mat3(u_viewer)*vec3(screen.x/u_projection[0][0],screen.y/u_projection[1][1],-1.0);
   vec3 origin=rig_local(camera,u_viewer[3].xyz);
-  if(!rig_triangle(camera,id,origin,rig_direction(camera,ray),hit))return false;
+  if(!rig_metadata_triangle(camera,id,origin,rig_direction(camera,ray),hit))return false;
   view_z=-(u_view*vec4(hit.world,1.0)).z;
   return view_z>0.0;
 }
@@ -230,6 +238,7 @@ void main() {
       if(u_depth_only_enabled==1||u_rig_original_rgb_enabled==1)
         best_normal=rig_world(camera,hit.normal)-rig_world(camera,vec3(0));
     }
+#ifndef RIG_NATIVE_RGB_ONLY
     if(u_depth_only_enabled==1||(u_rig_original_rgb_enabled==1&&rig_data(camera,12).z>0.5))continue;
     if(!hit.color_valid)continue;
     if(color_owner<0||rig_better(hit.score,camera,color_quality,color_owner)) {
@@ -238,6 +247,7 @@ void main() {
     float weight=texture(u_weights,vec3(uv,float(camera/4)))[camera%4];
     color+=to_linear(hit.color)*weight;
     total+=weight;
+#endif
   }
   if(owner<0)discard;
   if(u_depth_only_enabled!=1&&u_rig_original_rgb_enabled==0&&color_owner<0&&samples[owner].confidence>=0.95) {
@@ -253,9 +263,14 @@ void main() {
   }
   // Thin surfaces can disappear from the small dominance grid. They still
   // retain their full-resolution coverage and their best local source color.
+#ifdef RIG_NATIVE_RGB_ONLY
+  out_color=vec4(u_depth_only_enabled==1?depth_surface_gray(best_normal)
+    :rig_projected_color(best_world,normalize(best_normal),vec3(0.34),owner),1.0);
+#else
   out_color=vec4(u_depth_only_enabled==1?depth_surface_gray(best_normal)
     :u_rig_original_rgb_enabled==1?rig_projected_color(best_world,normalize(best_normal),color_owner>=0?best_color:vec3(0.34),owner)
     :total>0.00001?to_srgb(color/total):color_owner>=0?best_color:vec3(0.34),1.0);
+#endif
   vec4 clip=u_projection*u_view*vec4(best_world,1.0);
   gl_FragDepth=(clip.z/clip.w)*0.5+0.5;
 }`;
@@ -335,11 +350,11 @@ export class BrowserBlendPCR {
     this.vao=null;this.programs=null;this.failedSignature="";
   }
 
-  prepare(width,height,count) {
+  prepare(width,height,count,nativeRgbOnly=false,cachedMask=false) {
     const gl = this.gl;
     const signature = `${width}:${height}:${count}`;
     if(this.failedSignature===signature)throw new Error("BlendPCR unavailable on this GPU; using independent mesh");
-    if(!this.programs || this.capacity!==count) {
+    if(!this.programs || this.capacity!==count || this.nativeRgbOnly!==nativeRgbOnly || this.cachedMask!==cachedMask) {
       this.dispose();
       this.programs={};
       try {
@@ -355,6 +370,7 @@ export class BrowserBlendPCR {
           // Specialize only array capacity, never resolution or sampling. Each
           // camera triangle is reconstructed once per output pixel per pass.
           let source=fragment.replace('#version 300 es',`#version 300 es\n#define RIG_CAMERA_CAPACITY ${count}`);
+          if(nativeRgbOnly)source=source.replace('#version 300 es','#version 300 es\n#define RIG_NATIVE_RGB_ONLY');
           // Camera transforms/intrinsics are constant across the frame. Load
           // their exact float32 values from uniforms instead of issuing many
           // repeated texture fetches per output pixel. Large rigs retain the
@@ -366,11 +382,15 @@ export class BrowserBlendPCR {
           // sampling and scalarize the per-camera hit arrays.
           if(this.staticCameraLoops)source=source.replaceAll('camera<u_rig_count','camera<RIG_CAMERA_CAPACITY')
             .replaceAll('peer<u_rig_count','peer<RIG_CAMERA_CAPACITY');
-          const program=compileGpuProgram(gl,vertex,source);
+          let vertexShader=vertex;
+          if(cachedMask){source=source.replace('#version 300 es','#version 300 es\n#define RIG_CACHED_MASK');vertexShader=vertex.replace('#version 300 es','#version 300 es\n#define RIG_CACHED_MASK');}
+          const program=compileGpuProgram(gl,vertexShader,source);
           this.programs[name]={program,uniforms:uniforms(gl,program)};
         }
         this.vao=gl.createVertexArray();
         this.capacity=count;
+        this.nativeRgbOnly=nativeRgbOnly;
+        this.cachedMask=cachedMask;
       } catch(error) {this.dispose();this.failedSignature=signature;throw error;}
     }
     if(this.signature===signature)return;
@@ -451,7 +471,7 @@ export class BrowserBlendPCR {
 
   render(rig,cameras,view,maskCapsules,settings) {
     const gl=this.gl;
-    this.prepare(view.width,view.height,cameras.length);
+    this.prepare(view.width,view.height,cameras.length,cameras.every(c=>c.metadata.color_space==='original_rgb'),Boolean(rig.maskTexture));
     this.maskCapsules=maskCapsules;
     const crop=modeledWorkspaceBounds(settings,workspaceCropBounds(settings));
     const contextCrop=modeledWorkspaceBounds(settings,workspaceCropBounds(settings,WORKSPACE_CROP_CONTEXT),WORKSPACE_CROP_CONTEXT);
@@ -463,7 +483,7 @@ export class BrowserBlendPCR {
       const rows=source.height>1?Math.ceil((source.y+source.height-1-y)/8):0;
       this.cropStats.sourceCells+=(camera.width-1)*(camera.height-1);
       const tiles=this.indexedMetadata&&this.instancedMetadata&&this.useWorkspaceCulling!==false
-        ?workspaceVisibleTiles(camera,contextCrop):null;
+        ?(this.useViewCulling===false?null:visibleNativeTiles(camera,view.viewProjection,contextCrop))||workspaceVisibleTiles(camera,contextCrop):null;
       this.cropStats.submittedCells+=tiles?tiles.cellCount:this.indexedMetadata&&this.instancedMetadata
         ? Math.max(0,Math.min(camera.width-1-x,columns*32))*Math.max(0,Math.min(camera.height-1-y,rows*8))
         : (camera.width-1)*(camera.height-1);
@@ -473,7 +493,7 @@ export class BrowserBlendPCR {
     gl.vertexAttribI4ui(0,0,0,0,0);
     gl.vertexAttribI4ui(1,0,0,0,0);
     try {
-      const key=`${rig.version}:${view.viewProjection}:${maskCapsules?.starts}:${maskCapsules?.ends}:${settings.white_background_enabled}:${settings.depth_only_enabled===true}:${crop?.key}:${this.useWorkspaceCulling!==false}`;
+      const key=`${rig.version}:${view.viewProjection}:${maskCapsules?.starts}:${maskCapsules?.ends}:${settings.white_background_enabled}:${settings.depth_only_enabled===true}:${crop?.key}:${this.useWorkspaceCulling!==false}:${this.useViewCulling!==false}`;
       if(this.cacheKey!==key) {
         // One dense native mesh pass per camera; no second color rasterization.
         const indexed=this.indexedMetadata;
@@ -489,9 +509,10 @@ export class BrowserBlendPCR {
         gl.uniformMatrix4fv(u.u_view_projection,false,view.viewProjection);
         if(instanced)gl.uniform2i(u.u_tile_size,32,8);
         gl.uniform1i(u.u_robot_mask_enabled,maskCapsules?1:0);
+        if(rig.maskTexture){gl.activeTexture(gl.TEXTURE3);gl.bindTexture(gl.TEXTURE_2D_ARRAY,rig.maskTexture);gl.uniform1i(u.u_rig_mask,3);}
         if(maskCapsules){gl.uniform4fv(u.u_mask_capsule_a,maskCapsules.starts);gl.uniform4fv(u.u_mask_capsule_b,maskCapsules.ends);}
         gl.viewport(0,0,this.width,this.height);gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);
-        const rasterKey=`${view.viewProjection}:${maskCapsules?.starts}:${maskCapsules?.ends}:${settings.mesh_depth_delta}:${settings.mesh_max_edge}:${contextCrop?.key}:${this.useWorkspaceCulling!==false}`;
+        const rasterKey=`${view.viewProjection}:${maskCapsules?.starts}:${maskCapsules?.ends}:${settings.mesh_depth_delta}:${settings.mesh_max_edge}:${contextCrop?.key}:${this.useWorkspaceCulling!==false}:${this.useViewCulling!==false}`;
         cameras.forEach((camera,index)=> {
           const fresh=rig_data_fresh(camera,view.now);
           const layerKey=`${rasterKey}:${camera.metadata.id}:${camera.uploadRevision??camera.lastUpdateMs}:${camera.width}:${camera.height}:${camera.modelMatrix}:${camera.intrinsicsArray}:${fresh}`;
@@ -510,7 +531,8 @@ export class BrowserBlendPCR {
               // 4x8 traversal order. One reusable 16-bit tile replaces a large
               // per-resolution index stream without decimating the mesh.
               const tile=this.tileBuffer();
-              const tiles=this.useWorkspaceCulling===false?null:workspaceVisibleTiles(camera,contextCrop);
+              const tiles=this.useWorkspaceCulling===false?null:
+                (this.useViewCulling===false?null:visibleNativeTiles(camera,view.viewProjection,contextCrop))||workspaceVisibleTiles(camera,contextCrop);
               const source=workspaceSourceWindow(camera,this.useWorkspaceCulling===false?null:contextCrop);
               const origin=[Math.floor(source.x/32)*32,Math.floor(source.y/8)*8];
               const columns=source.width>1?Math.ceil((source.x+source.width-1-origin[0])/32):0;
@@ -536,7 +558,7 @@ export class BrowserBlendPCR {
         });
         // The gray material selects the same full-resolution geometry below,
         // but never consumes RGB dominance weights.
-        if(settings.depth_only_enabled!==true) {
+        if(settings.depth_only_enabled!==true&&!rig.originalRgb) {
         gl.disable(gl.DEPTH_TEST);gl.viewport(0,0,this.smallWidth,this.smallHeight);
         this.attach(this.owner,null);
         const dominant=this.use("dominance",rig,view);
