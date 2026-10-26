@@ -74,6 +74,8 @@ private:
         int inliers = 0;
         double match_median_m = 0.0;
         std::string markerless_solver;
+        int markerless_rotation_ccw_deg = 0;
+        std::string markerless_attempts;
         double markerless_reprojection_px = 0.0;
         double icp_fitness = 0.0;
         double icp_rmse_m = 0.0;

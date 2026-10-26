@@ -14,6 +14,15 @@ overlap path to the reference. Keep all cameras, the scene, and (for ArUco) the
 marker stationary throughout the run. The target-serial setting applies only
 to the expert pair tools; disable a camera to exclude it from a rig run.
 
+Markerless matching first uses the original images. If that pose is rejected,
+it retries quarter-turn image orientations before giving up. This helps side
+cameras whose view of printed text is rotated relative to the reference. Pixel
+matches are mapped back to the original image before depth lookup, so camera
+intrinsics, coordinate axes and saved transforms keep their original meaning.
+The same match-count, depth-consistency, reprojection and cloud-fit checks apply
+to every orientation. Result details include `markerless_rotation_ccw_deg` and
+`markerless_attempts`, including match counts and rejection reasons.
+
 The run stages all results and atomically saves them only when every enabled
 camera succeeds. A failed pair can be retried through another camera; an
 unconnected camera or failed save preserves the previous rig. Progress names

@@ -1,4 +1,5 @@
 #include "realsense_pair_calibrator.h"
+#include "calibration_image_orientation.h"
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/array.hpp>
@@ -1917,10 +1918,11 @@ bool mask_marker(cv::Mat &p_bgr, int p_marker_id, cv::Mat &r_mask) {
     return true;
 }
 
-bool run_lightglue(
+bool run_lightglue_orientation(
     const RealSensePairCalibrator::Options &p_options,
     Capture &p_reference,
     Capture &p_target,
+    int p_rotation_ccw_deg,
     cv::Matx44d &r_target_depth_to_reference_depth,
     int &r_matches,
     int &r_inliers,
@@ -1961,6 +1963,9 @@ bool run_lightglue(
     cv::Mat reference_image = p_reference.color_bgr.clone();
     mask_marker(target_image, p_options.marker_id, p_target.marker_mask);
     mask_marker(reference_image, p_options.marker_id, p_reference.marker_mask);
+    if (p_rotation_ccw_deg == 90) cv::rotate(target_image, target_image, cv::ROTATE_90_COUNTERCLOCKWISE);
+    else if (p_rotation_ccw_deg == 180) cv::rotate(target_image, target_image, cv::ROTATE_180);
+    else if (p_rotation_ccw_deg == 270) cv::rotate(target_image, target_image, cv::ROTATE_90_CLOCKWISE);
     cv::resize(target_image, target_image, cv::Size(input_width, input_height), 0.0, 0.0, cv::INTER_AREA);
     cv::resize(reference_image, reference_image, cv::Size(input_width, input_height), 0.0, 0.0, cv::INTER_AREA);
     std::vector<float> input(size_t(2 * input_width * input_height));
@@ -2020,8 +2025,9 @@ bool run_lightglue(
     const int match_count = int(matches_shape[0]);
     std::vector<Match3D> lifted;
     lifted.reserve(match_count);
-    const double target_scale_x = double(p_target.color_width) / input_width;
-    const double target_scale_y = double(p_target.color_height) / input_height;
+    const bool swapped_axes = p_rotation_ccw_deg == 90 || p_rotation_ccw_deg == 270;
+    const double target_scale_x = double(swapped_axes ? p_target.color_height : p_target.color_width) / input_width;
+    const double target_scale_y = double(swapped_axes ? p_target.color_width : p_target.color_height) / input_height;
     const double reference_scale_x = double(p_reference.color_width) / input_width;
     const double reference_scale_y = double(p_reference.color_height) / input_height;
     for (int index = 0; index < match_count; ++index) {
@@ -2033,8 +2039,13 @@ bool run_lightglue(
         if (target_keypoint < 0 || target_keypoint >= 1024 || reference_keypoint < 0 || reference_keypoint >= 1024) {
             continue;
         }
-        const double target_x = keypoints[(0 * 1024 + target_keypoint) * 2 + 0] * target_scale_x;
-        const double target_y = keypoints[(0 * 1024 + target_keypoint) * 2 + 1] * target_scale_y;
+        const auto target_pixel = calibration_original_pixel(
+            keypoints[(0 * 1024 + target_keypoint) * 2 + 0] * target_scale_x,
+            keypoints[(0 * 1024 + target_keypoint) * 2 + 1] * target_scale_y,
+            p_target.color_width, p_target.color_height, p_rotation_ccw_deg
+        );
+        const double target_x = target_pixel[0];
+        const double target_y = target_pixel[1];
         const double reference_x = keypoints[(1 * 1024 + reference_keypoint) * 2 + 0] * reference_scale_x;
         const double reference_y = keypoints[(1 * 1024 + reference_keypoint) * 2 + 1] * reference_scale_y;
         if (
@@ -2084,7 +2095,7 @@ bool run_lightglue(
         const std::filesystem::path debug_root(match_debug_dir);
         write_bgr_ppm(debug_root / "reference.ppm", p_reference.color_bgr);
         write_bgr_ppm(debug_root / "target.ppm", p_target.color_bgr);
-        std::ofstream matches_file(debug_root / "matches.csv");
+        std::ofstream matches_file(debug_root / ("matches_rotation_" + std::to_string(p_rotation_ccw_deg) + ".csv"));
         if (matches_file) {
             matches_file << "target_x,target_y,target_z,reference_x,reference_y,reference_z,score\n";
             matches_file << std::setprecision(12);
@@ -2224,7 +2235,7 @@ bool run_lightglue(
             conversion(2, 2) = -1.0;
             const cv::Matx44d godot = conversion * depth_transform * conversion;
             std::ostringstream diagnostic;
-            diagnostic << "NATIVE_MARKERLESS_CANDIDATE name=" << candidate.name
+            diagnostic << "NATIVE_MARKERLESS_CANDIDATE rotation=" << p_rotation_ccw_deg << " name=" << candidate.name
                        << " reproj=" << candidate.reprojection << " transform=";
             for (int row = 0; row < 3; ++row) {
                 for (int col = 0; col < 4; ++col) {
@@ -2256,6 +2267,60 @@ bool run_lightglue(
     r_target_depth_to_reference_depth =
         p_reference.depth_to_color.inv() * selected.transform * p_target.depth_to_color;
     return true;
+}
+
+bool run_lightglue(
+    const RealSensePairCalibrator::Options &p_options,
+    Capture &p_reference,
+    Capture &p_target,
+    cv::Matx44d &r_transform,
+    int &r_matches,
+    int &r_inliers,
+    double &r_median,
+    std::string &r_solver,
+    double &r_reprojection_px,
+    int &r_rotation_ccw_deg,
+    std::string &r_attempts,
+    std::string &r_error
+) {
+    // SuperPoint is sensitive to image orientation. A side camera can see the
+    // whole textured workspace yet fail with the original image orientation.
+    // Keep the fast, unchanged path for pairs that already pass. Only retry
+    // image orientations after rejection; all original 3D checks still apply.
+    for (int rotation : {0, 270, 90, 180}) {
+        cv::Matx44d transform;
+        int matches = 0, inliers = 0;
+        double median = 0.0, reprojection = 0.0;
+        std::string solver, error;
+        const bool accepted = run_lightglue_orientation(
+            p_options, p_reference, p_target, rotation, transform, matches,
+            inliers, median, solver, reprojection, error
+        );
+        std::ostringstream summary;
+        summary << "rotation=" << rotation << " matches=" << matches
+                << " inliers=" << inliers << " median=" << median << "m"
+                << (accepted ? " accepted" : " rejected: " + error);
+        if (!r_attempts.empty()) r_attempts += " | ";
+        r_attempts += summary.str();
+        if (const char *debug = std::getenv("REALSENSE_CALIBRATION_MATCH_DEBUG_DIR"); debug && debug[0]) {
+            UtilityFunctions::print(String(("NATIVE_MARKERLESS_ORIENTATION " + summary.str()).c_str()));
+        }
+        if (accepted || inliers > r_inliers || (inliers == r_inliers && matches >= r_matches)) {
+            r_matches = matches;
+            r_inliers = inliers;
+            r_median = median;
+            r_rotation_ccw_deg = rotation;
+            r_error = error;
+        }
+        if (accepted) {
+            r_transform = transform;
+            r_solver = solver;
+            r_reprojection_px = reprojection;
+            return true;
+        }
+    }
+    r_error = "No image orientation passed: " + r_attempts;
+    return false;
 }
 
 #endif
@@ -2438,6 +2503,8 @@ Dictionary RealSensePairCalibrator::get_result() const {
     details["inliers"] = result.inliers;
     details["match_median_m"] = result.match_median_m;
     details["markerless_solver"] = String(result.markerless_solver.c_str());
+    details["markerless_rotation_ccw_deg"] = result.markerless_rotation_ccw_deg;
+    details["markerless_attempts"] = String(result.markerless_attempts.c_str());
     details["markerless_reprojection_px"] = result.markerless_reprojection_px;
     details["icp_fitness"] = result.icp_fitness;
     details["icp_rmse_m"] = result.icp_rmse_m;
@@ -2579,6 +2646,8 @@ void RealSensePairCalibrator::run(Options p_options) {
             output.match_median_m,
             output.markerless_solver,
             output.markerless_reprojection_px,
+            output.markerless_rotation_ccw_deg,
+            output.markerless_attempts,
             error
         )) {
             output.status = "Native markerless alignment failed: " + error;
@@ -2762,6 +2831,7 @@ void RealSensePairCalibrator::run(Options p_options) {
     if (p_options.mode == "markerless") {
         message << " matches=" << output.inliers << "/" << output.matches
                 << " solver=" << output.markerless_solver
+                << " image_rotation=" << output.markerless_rotation_ccw_deg << "deg"
                 << " reproj=" << output.markerless_reprojection_px << "px";
     }
     output.status = message.str();
