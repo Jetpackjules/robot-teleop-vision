@@ -5417,11 +5417,31 @@ func _fail(message: String, confidence: float = 0.0) -> void:
 
 func _emit_status(force: bool) -> void:
 	var now := Time.get_ticks_msec()
-	var overlay := get_node_or_null(OVERLAY_PATH)
-	var manual_active := overlay != null and bool(overlay.get("manual_claw_calibration_enabled"))
-	if Engine.is_editor_hint() and not manual_active and _state not in ["capturing", "solving"] and now > _editor_status_until_msec:
-		return
+	var gateway := get_parent().get_node_or_null("RemoteControlGateway")
+	if gateway != null and gateway.has_method("owns_robot_control") and not bool(gateway.call("owns_robot_control")): return
 	if not force and now - _last_status_send_msec < 200:
 		return
 	_last_status_send_msec = now
-	_status_udp.put_packet(JSON.stringify(get_calibration_status()).to_utf8_buffer())
+	var status := get_calibration_status()
+	_status_udp.put_packet(JSON.stringify(status).to_utf8_buffer())
+	var mirror := {"status": status, "updated": Time.get_unix_time_from_system(), "project_root": ProjectSettings.globalize_path("res://")}
+	_write_runtime_mirror("user://so101_runtime_calibration_status.json", mirror)
+	# The independent camera service has no robot module or telemetry socket.
+	# Mirror the control owner's world-space link poses alongside its status so
+	# camera-only RGB-D packets can carry the same registered overlay.
+	var robot := {"available": false}
+	var overlay := get_node_or_null(OVERLAY_PATH)
+	if overlay != null and overlay.has_method("get_hybrid_render_state"):
+		robot = overlay.call("get_hybrid_render_state")
+	mirror.erase("status")
+	mirror["robot"] = robot
+	_write_runtime_mirror("user://robot_overlay_render_state.json", mirror)
+
+
+func _write_runtime_mirror(file_path: String, payload: Dictionary) -> void:
+	var path := ProjectSettings.globalize_path(file_path)
+	var file := FileAccess.open(path + ".tmp", FileAccess.WRITE)
+	if file != null:
+		file.store_string(JSON.stringify(payload))
+		file.close()
+		DirAccess.rename_absolute(path + ".tmp", path)

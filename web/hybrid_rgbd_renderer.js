@@ -1730,7 +1730,7 @@ async function decodeCamera(payload) {
   let color, rawDepth, depthTiles=null;
   if (state.nativeDecoder && !state.nativeDecoder.disabled
       && state.socketOptions?.exactDepth === true && isIndependentNativeFrame(payload.metadata)) {
-    const decoded = await state.nativeDecoder.decode({...payload,workspaceTiles:state.settings.workspace_crop_enabled===true});
+    const decoded = await state.nativeDecoder.decode({...payload,workspaceTiles:state.settings.workspace_crop_enabled===true||state.settings.modeled_workspace_enabled===true});
     depthTiles=decoded.depthTiles;
     color = {bitmap: decoded.bitmap, pixels: null,rgbaPixels:decoded.rgbaPixels};rawDepth = decoded.depth;
     for(const key of ["workerMs","dispatchMs"])state.stats[key]=state.stats[key]>0?state.stats[key]*.8+decoded[key]*.2:decoded[key];

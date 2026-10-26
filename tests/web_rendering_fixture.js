@@ -409,6 +409,20 @@ export async function runRenderingChecks() {
   for(let i=0;i<maskedReference.length;i+=4)if([0,1,2,3].some(c=>Math.abs(maskedReference[i+c]-maskedBlend[i+c])>3))
     maskErrors.push({pixel:i/4,reference:Array.from(maskedReference.subarray(i,i+4)),blend:Array.from(maskedBlend.subarray(i,i+4))});
   check(maskErrors.length===0,'robot masking preserves the original per-triangle coverage: '+JSON.stringify({count:maskErrors.length,first:maskErrors.slice(0,5)}));
+  fixture([1000],[[128,128]]);draw('blendpcr');
+  Object.assign(state.settings,{workspace_crop_enabled:true,workspace_crop_min:[-.12,-.15,-1.01],workspace_crop_max:[.12,.15,-.99]});
+  const maskedView={...view,now:performance.now()};
+  state.blendPCR.indexedMetadata=false;
+  state.blendPCR.useWorkspaceCulling=false;
+  state.blendPCR.render(state.cameraFusion,state.cameras,maskedView,mask,state.settings);
+  const maskedCropReference=image();
+  state.blendPCR.indexedMetadata=true;
+  state.blendPCR.useWorkspaceCulling=true;
+  state.blendPCR.render(state.cameraFusion,state.cameras,maskedView,mask,state.settings);
+  const maskedCrop=image();
+  check(maskedCrop.every((v,i)=>Math.abs(v-maskedCropReference[i])<=3),'tiled arm-masked crop preserves original full-grid pixels');
+  check(state.blendPCR.cropStats.submittedCells<state.blendPCR.cropStats.sourceCells*.7,'arm masking retains workspace tile culling instead of submitting the full grid');
+  state.settings.workspace_crop_enabled=false;
   const maskedCompositions=state.blendPCR.compositions;
   state.blendPCR.render(state.cameraFusion,state.cameras,view,null,state.settings);
   check(state.blendPCR.compositions===maskedCompositions+1,'changing robot masks invalidates cached color and depth');

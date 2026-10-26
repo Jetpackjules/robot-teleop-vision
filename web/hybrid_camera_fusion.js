@@ -50,7 +50,7 @@ vec3 rig_color(vec3 fallback,bool source_has_color) {
     RigHit source;
     vec3 normal=vec3(0,0,1);
     if(rig_surface(u_rig_index,v_world_position,source))normal=rig_world_normal(u_rig_index,source.normal);
-    return rig_projected_color(v_world_position,normal,source_has_color&&rig_data(u_rig_index,12).z<0.5?fallback:vec3(0.34));
+    return rig_projected_color(v_world_position,normal,source_has_color&&rig_data(u_rig_index,12).z<0.5?fallback:vec3(0.34),u_rig_index);
   }
   #else
   if(u_rig_color_enabled==0&&source_has_color)return fallback;

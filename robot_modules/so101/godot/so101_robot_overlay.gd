@@ -263,6 +263,13 @@ var _udp_bind_error: int = OK
 var _next_udp_bind_msec := 0
 var _last_status: Dictionary = {}
 var _registration_status: Dictionary = {}
+var manual_base_calibration_enabled := false
+var _manual_base_session_id := ""
+var _manual_base_before := Transform3D.IDENTITY
+var _manual_base_before_status: Dictionary = {}
+var _manual_base_before_file: Dictionary = {}
+var _manual_base_offsets := Vector3.ZERO # world X, world Z, yaw in degrees
+var _manual_base_last_update_msec := 0
 var _registration_modified_time: int = 0
 var _next_registration_poll_msec: int = 0
 var _scene_fallback_transform := Transform3D.IDENTITY
@@ -296,6 +303,8 @@ func _exit_tree() -> void:
 	_udp_bound = false
 
 func _process(delta: float) -> void:
+	if manual_base_calibration_enabled and Time.get_ticks_msec() - _manual_base_last_update_msec > 15000:
+		_cancel_manual_base()
 	if not _udp_bound and Time.get_ticks_msec() >= _next_udp_bind_msec:
 		_bind_telemetry()
 	_poll_saved_registration()
@@ -519,6 +528,15 @@ func get_manual_calibration_status() -> Dictionary:
 		"registered": bool(_registration_status.get("registered", false)),
 		"reply": _manual_calibration_reply.duplicate(true),
 		"preview": get_manual_claw_calibration_state(),
+		"base_adjustment": {
+			"supported": true,
+			"enabled": manual_base_calibration_enabled,
+			"session_id": _manual_base_session_id,
+			"origin": [global_transform.origin.x, global_transform.origin.y, global_transform.origin.z] if is_inside_tree() else [position.x, position.y, position.z],
+			"offset_x": _manual_base_offsets.x,
+			"offset_z": _manual_base_offsets.y,
+			"yaw_degrees": _manual_base_offsets.z,
+		},
 	}
 
 
@@ -535,6 +553,10 @@ func handle_manual_calibration_action(action: Dictionary, settings: Dictionary =
 	var reply := {"request_id": request_id, "operation": operation, "ok": false, "message": ""}
 	if busy:
 		reply.message = "Wait for automatic calibration to finish, or cancel it first."
+	elif operation.begins_with("base_"):
+		reply.merge(_handle_manual_base_action(action), true)
+	elif manual_base_calibration_enabled:
+		reply.message = "Save or cancel base placement before joint tuning or importing."
 	elif operation == "export":
 		if not bool(_registration_status.get("registered", false)):
 			reply.message = "Align and save the robot base before exporting."
@@ -572,12 +594,82 @@ func handle_manual_calibration_action(action: Dictionary, settings: Dictionary =
 	else:
 		reply.message = "Open manual joint tuning before editing or saving."
 	# Preview acknowledgements must not overwrite an in-flight Save/Export reply.
-	if operation != "preview":
+	if operation not in ["preview", "base_preview"]:
 		_manual_calibration_reply = reply.duplicate(true)
 		_manual_calibration_replies[request_id] = reply.duplicate(true)
 	while _manual_calibration_replies.size() > 32:
 		_manual_calibration_replies.erase(_manual_calibration_replies.keys()[0])
 	return reply
+
+
+func _cancel_manual_base() -> void:
+	if not manual_base_calibration_enabled:
+		return
+	transform = _manual_base_before
+	_registration_status = _manual_base_before_status.duplicate(true)
+	manual_base_calibration_enabled = false
+	_manual_base_session_id = ""
+	_manual_base_offsets = Vector3.ZERO
+
+
+func _handle_manual_base_action(action: Dictionary) -> Dictionary:
+	var operation := str(action.get("operation", ""))
+	if operation == "base_begin":
+		if manual_claw_calibration_enabled or manual_base_calibration_enabled:
+			return {"ok": false, "message": "Save or cancel the current calibration preview first."}
+		_manual_base_before = transform
+		_manual_base_before_status = _registration_status.duplicate(true)
+		_manual_base_before_file = _read_registration_payload().duplicate(true)
+		_manual_base_session_id = str(action.request_id)
+		_manual_base_offsets = Vector3.ZERO
+		manual_base_calibration_enabled = true
+		_manual_base_last_update_msec = Time.get_ticks_msec()
+		var origin := global_transform.origin if is_inside_tree() else position
+		return {"ok": true, "message": "Drag the base across the table, or turn it with Yaw.", "session_id": _manual_base_session_id, "origin": [origin.x, origin.y, origin.z]}
+	if not manual_base_calibration_enabled or str(action.get("session_id", "")) != _manual_base_session_id:
+		return {"ok": false, "message": "Base preview expired. Open Adjust Base again."}
+	_manual_base_last_update_msec = Time.get_ticks_msec()
+	if operation == "base_cancel":
+		_cancel_manual_base()
+		return {"ok": true, "message": "Base placement restored."}
+	if operation == "base_reset":
+		transform = _manual_base_before
+		_manual_base_offsets = Vector3.ZERO
+		return {"ok": true, "message": "Base preview reset."}
+	if operation not in ["base_preview", "base_save"]:
+		return {"ok": false, "message": "Unsupported base adjustment."}
+	var offsets := Vector3.ZERO
+	var names := ["offset_x", "offset_z", "yaw_degrees"]
+	for index in range(3):
+		var raw = action.get(names[index])
+		if (not raw is float and not raw is int) or not is_finite(float(raw)) or absf(float(raw)) > (180.0 if index == 2 else 2.0):
+			return {"ok": false, "message": "Base adjustment is out of range."}
+		offsets[index] = float(raw)
+	# Apply only a world/table-plane translation and world-up rotation. Preserve
+	# the original height, scale, and tilt, including under a transformed parent.
+	var parent := get_parent_node_3d()
+	var parent_frame := parent.global_transform if is_inside_tree() and parent != null else Transform3D.IDENTITY
+	var original := parent_frame * _manual_base_before
+	var desired := Transform3D(Basis(Vector3.UP, deg_to_rad(offsets.z)) * original.basis, original.origin + Vector3(offsets.x, 0.0, offsets.y))
+	transform = parent_frame.affine_inverse() * desired
+	_manual_base_offsets = offsets
+	if operation == "base_preview":
+		return {"ok": true}
+	if _read_registration_payload() != _manual_base_before_file:
+		return {"ok": false, "message": "Saved calibration changed during this preview. Cancel and reopen Adjust Base."}
+	var previous_status := _registration_status.duplicate(true)
+	_registration_status["registered"] = true
+	_registration_status["confidence"] = 0.0 # user alignment, not automatic validation
+	_registration_status["registration_source"] = "manual_base_placement"
+	_registration_status["saved_unix_ms"] = Time.get_unix_time_from_system() * 1000.0
+	var payload := _build_registration_payload()
+	payload["manual_base_adjustment"] = {"offset_x": offsets.x, "offset_z": offsets.y, "yaw_degrees": offsets.z, "previous_source": str(previous_status.get("registration_source", "scene"))}
+	if not _write_registration_payload(payload):
+		_registration_status = previous_status
+		return {"ok": false, "message": "Could not save base placement. The preview remains open; retry or cancel."}
+	manual_base_calibration_enabled = false
+	_manual_base_session_id = ""
+	return {"ok": true, "message": "Base placement saved. Joint calibration kept."}
 
 
 func _validate_portable_mapping(file: Variant) -> String:
@@ -2035,7 +2127,7 @@ func _registration_file_modified_time() -> int:
 	return int(FileAccess.get_modified_time(_registration_path))
 
 func _poll_saved_registration() -> void:
-	if not load_saved_registration:
+	if not load_saved_registration or manual_base_calibration_enabled:
 		return
 	var now := Time.get_ticks_msec()
 	if now < _next_registration_poll_msec:

@@ -14,18 +14,16 @@ var _last_tracking_transport_age_ms := -1.0
 var _tracking_packets := 0
 var _tracking_window_started_msec := 0
 var _tracking_hz := 0.0
+var _next_bind_msec := 0
+
+func _active_context() -> bool:
+	return not Engine.is_editor_hint() or (is_inside_tree() and get_tree().edited_scene_root == get_parent())
+
+func owns_robot_control() -> bool:
+	return _active_context() and _udp.is_bound()
 
 
 func _ready() -> void:
-	# The opt-in live editor preview owns camera settings when a separate
-	# sensor process is running. Ordinary project editing opens no listener.
-	if Engine.is_editor_hint() and OS.get_environment("ROBOT_TELEOP_EDITOR_STREAM") != "1":
-		set_process(false)
-		return
-	var error := _udp.bind(listen_port, "127.0.0.1")
-	if error != OK:
-		push_error("Remote control gateway could not bind 127.0.0.1:%d (error %d)" % [listen_port, error])
-		return
 	_tracking_window_started_msec = Time.get_ticks_msec()
 	set_process(true)
 
@@ -35,6 +33,13 @@ func _exit_tree() -> void:
 
 
 func _process(_delta: float) -> void:
+	if not _active_context():
+		if _udp.is_bound(): _udp.close()
+		return
+	if not _udp.is_bound():
+		if Time.get_ticks_msec() < _next_bind_msec: return
+		_next_bind_msec = Time.get_ticks_msec() + 1000
+		if _udp.bind(listen_port, "127.0.0.1") != OK: return
 	while _udp.get_available_packet_count() > 0:
 		var packet := _udp.get_packet()
 		var value = JSON.parse_string(packet.get_string_from_utf8())
@@ -50,6 +55,8 @@ func _process(_delta: float) -> void:
 
 
 func _apply_view_settings(payload: Dictionary) -> void:
+	if payload.has("project_root") and str(payload.project_root) != ProjectSettings.globalize_path("res://"):
+		return
 	if payload.has("workspace_crop_rotation") or payload.has("workspace_crop_enabled") or payload.has("workspace_crop_min") or payload.has("workspace_crop_max") or payload.has("workspace_crop_show_box"):
 		get_tree().call_group("unified_point_cloud_view", "apply_remote_workspace_crop", payload)
 	if payload.has("stream_preset"):
@@ -59,8 +66,9 @@ func _apply_view_settings(payload: Dictionary) -> void:
 			Color.WHITE if bool(payload.white_background_enabled)
 			else Color(0.03, 0.035, 0.04, 1.0)
 		)
-	if not Engine.is_editor_hint():
-		get_tree().call_group("robot_module", "apply_remote_settings", payload)
+	# The authenticated operator gateway uses the same module in the editor
+	# and in a headless runtime. The module's resolved enabled flag gates it.
+	get_tree().call_group("robot_module", "apply_remote_settings", payload)
 
 
 func _record_tracking(payload: Dictionary) -> void:

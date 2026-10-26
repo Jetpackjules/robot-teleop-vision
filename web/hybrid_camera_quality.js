@@ -236,6 +236,23 @@ bool rig_color_agrees(int camera,vec3 world,vec3 normal,RigHit peer) {
   return abs(-peer.local.z-expected)<=max(rig_tolerance(expected),0.012)
     &&abs(dot(normal,rig_world_normal(camera,peer.normal)))>=0.985;
 }
+float rig_rgb_visible_depth(ivec2 q,ivec2 end,int layer) {
+  float observed=min(min(texelFetch(u_rig_visibility,ivec3(q,layer),0).r,
+      texelFetch(u_rig_visibility,ivec3(min(q+ivec2(1,0),end),layer),0).r),
+    min(texelFetch(u_rig_visibility,ivec3(min(q+ivec2(0,1),end),layer),0).r,
+      texelFetch(u_rig_visibility,ivec3(min(q+ivec2(1),end),layer),0).r));
+  return (0.01*65.535)/(65.535-observed*(65.535-0.01));
+}
+bool rig_rgb_same_surface(int camera,vec3 world,vec3 normal) {
+  RigHit measured;
+  if(!rig_surface(camera,world,measured)||measured.confidence<0.95)return false;
+  vec3 measured_normal=rig_world_normal(camera,measured.normal);
+  // Require supported, parallel local geometry as well as a small normal
+  // separation. This allowance is for uncertain depth, never geometry fusion.
+  return abs(dot(normal,measured_normal))>=0.985
+    &&abs(dot(world-measured.world,measured_normal))<=0.012
+    &&abs(rig_local(camera,world).z-measured.local.z)<=0.012;
+}
 // Color projects the *same world point* into the independent RGB sensor.
 // Visibility is rendered from ALL measured cameras, so a peer depth hole or
 // a different triangulation cannot suppress an otherwise visible RGB image.
@@ -249,13 +266,24 @@ bool rig_rgb_sample(int camera,vec3 world,vec3 normal,out vec3 color,out float s
   vec2 pixel=p.xy/p.z*k.xy+k.zw;
   if(any(lessThan(pixel,vec2(0)))||any(greaterThan(pixel,size-vec2(1))))return false;
   ivec2 q=ivec2(floor(pixel)),end=ivec2(size)-1;
-  // Bilinear RGB touches four pixels; guard all four against nearer geometry.
-  float observed=min(min(texelFetch(u_rig_visibility,ivec3(q,camera),0).r,
-      texelFetch(u_rig_visibility,ivec3(min(q+ivec2(1,0),end),camera),0).r),
-    min(texelFetch(u_rig_visibility,ivec3(min(q+ivec2(0,1),end),camera),0).r,
-      texelFetch(u_rig_visibility,ivec3(min(q+ivec2(1),end),camera),0).r));
-  float visible_z=(0.01*65.535)/(65.535-observed*(65.535-0.01));
-  if(visible_z<p.z-max(0.004,0.004*p.z*p.z))return false;
+  // Bilinear RGB touches four pixels. Actual self-occlusion is always tested
+  // against this camera's native surface, before considering peer uncertainty.
+  float strict_margin=max(0.004,0.004*p.z*p.z);
+  float own_z=rig_rgb_visible_depth(q,end,u_rig_count+camera);
+  if(own_z<p.z-strict_margin)return false;
+  float visible_z=rig_rgb_visible_depth(q,end,camera);
+  float gap=p.z-visible_z;
+  if(gap>strict_margin) {
+    if(!rig_rgb_same_surface(camera,world,normal))return false;
+    // Retain measured color through small disagreement between coincident
+    // planes. One previous observation may bridge only the narrow 12-16 mm
+    // boundary band; a clear occluder is rejected on its first frame.
+    if(gap>0.012) {
+      if(gap>0.016)return false;
+      float previous_z=rig_rgb_visible_depth(q,end,u_rig_count*2+camera);
+      if(p.z-previous_z>0.012)return false;
+    }
+  }
   vec3 origin=rig_world(camera,vec3(0));vec3 ray=world-origin;
   float range_sq=max(dot(ray,ray),0.0001);
   float incidence=abs(dot(normal,ray*inversesqrt(range_sq)));
@@ -267,18 +295,25 @@ bool rig_rgb_sample(int camera,vec3 world,vec3 normal,out vec3 color,out float s
 }
 vec3 rig_rgb_linear(vec3 c){return mix(c/12.92,pow(max((c+.055)/1.055,vec3(0)),vec3(2.4)),step(vec3(.04045),c));}
 vec3 rig_rgb_srgb(vec3 c){return mix(c*12.92,1.055*pow(max(c,vec3(0)),vec3(1.0/2.4))-.055,step(vec3(.0031308),c));}
-vec3 rig_projected_color(vec3 world,vec3 normal,vec3 fallback) {
-  vec3 color=vec3(0);float total=0.0;
+vec3 rig_projected_color(vec3 world,vec3 normal,vec3 fallback,int source_camera) {
+  vec3 color=vec3(0),source_color=fallback;float total=0.0;
+  bool source_verified=false;
   for(int camera=0;camera<u_rig_count;camera++) {
     vec3 rgb;float score;
     bool valid=rig_rgb_sample(camera,world,normal,rgb,score);
     if(!valid)continue;
+    if(camera==source_camera){source_color=rgb;source_verified=true;}
     // Squared projected pixel density favors close, detailed views while
     // continuously blending their calibrated coverage edges in linear light.
     float weight=score*score;
     color+=rig_rgb_linear(rgb)*weight;total+=weight;
   }
-  return total>1e-12?rig_rgb_srgb(color/total):fallback;
+  // A verified native source must survive tiny projected weights (far range,
+  // grazing view or coverage edge), rather than unexpectedly turning gray.
+  return total>1e-12?rig_rgb_srgb(color/total):source_verified?source_color:fallback;
+}
+vec3 rig_projected_color(vec3 world,vec3 normal,vec3 fallback) {
+  return rig_projected_color(world,normal,fallback,-1);
 }
 float rig_free_space_margin(float confidence,float expected) {
   bool strong_support=confidence>=0.95;

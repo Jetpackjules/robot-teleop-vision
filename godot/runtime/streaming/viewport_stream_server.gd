@@ -71,9 +71,23 @@ var _renderers_cache_root := 0
 var _model_property_cache: Dictionary = {}
 
 func _runs_in_current_context() -> bool:
-	# Opt in only for a dedicated remote editor session. Normal editors must
-	# leave the runtime's streaming port and camera ownership alone.
-	return not Engine.is_editor_hint() or OS.get_environment("ROBOT_TELEOP_EDITOR_STREAM") == "1"
+	return not Engine.is_editor_hint() or (is_inside_tree() and get_tree().edited_scene_root == get_parent())
+
+func _runtime_details() -> Dictionary:
+	var configuration = JSON.parse_string(OS.get_environment("ROBOT_TELEOP_RUNTIME_CONFIG"))
+	if Engine.is_editor_hint() or not configuration is Dictionary:
+		if FileAccess.file_exists("res://.teleop/runtime_config.json"):
+			configuration = JSON.parse_string(FileAccess.get_file_as_string("res://.teleop/runtime_config.json"))
+	if not configuration is Dictionary:
+		configuration = {}
+	var robot := {}
+	for key in ["schema_version", "module", "enabled", "module_settings", "calibration_status_port"]:
+		if configuration.has(key): robot[key] = configuration[key]
+	var capture: Dictionary = configuration.get("capture", {}).duplicate()
+	if OS.get_environment("ROBOT_TELEOP_CAPTURE_PUBLISH") == "1" and not capture.is_empty():
+		capture["pid"] = OS.get_process_id()
+	return {"pid": OS.get_process_id(), "project_root": ProjectSettings.globalize_path("res://").trim_suffix("/"),
+		"editor": Engine.is_editor_hint(), "robot_configuration": robot, "capture": capture}
 
 func _ready() -> void:
 	if OS.get_environment("ROBOT_TELEOP_CAPTURE_ONLY") == "1":
@@ -82,10 +96,7 @@ func _ready() -> void:
 		var capture_port := OS.get_environment("ROBOT_TELEOP_CAPTURE_PORT")
 		port = 8781 if capture_port.is_empty() else clampi(int(capture_port), 1024, 65535)
 		process_priority = 10
-	if not _runs_in_current_context():
-		set_process(false)
-		return
-	if stream_enabled:
+	if stream_enabled and _runs_in_current_context():
 		_start_server()
 	set_process(true)
 	if RenderingServer.has_signal("frame_post_draw") and not RenderingServer.frame_post_draw.is_connected(_on_frame_post_draw):
@@ -103,7 +114,7 @@ func _start_server() -> void:
 	if err != OK:
 		stream_status = "Viewport stream failed on %s:%d error=%d" % [listen_host, port, err]
 		_next_listen_retry_msec = Time.get_ticks_msec() + 1000
-		push_warning(stream_status)
+		if not Engine.is_editor_hint(): push_warning(stream_status)
 		return
 	stream_status = "Viewport stream listening at http://%s:%d/stream" % [listen_host, port]
 	print(stream_status)
@@ -120,6 +131,7 @@ func _stop_server() -> void:
 
 func _process(delta: float) -> void:
 	if not _runs_in_current_context() or not stream_enabled:
+		if _server.is_listening(): _stop_server()
 		return
 	if not _server.is_listening():
 		if Time.get_ticks_msec() < _next_listen_retry_msec:
@@ -270,7 +282,7 @@ func _handle_http_request(client: Dictionary) -> void:
 				"render_fps":float(renderer.call("get_render_fps")),
 				"age_ms":float(renderer.call("get_display_frame_age_ms"))})
 		var root_node := get_node_or_null(rgbd_root_path)
-		var body := JSON.stringify({"scene_fps":Engine.get_frames_per_second(),"cameras":cameras,
+		var body := JSON.stringify({"runtime":_runtime_details(),"scene_fps":Engine.get_frames_per_second(),"cameras":cameras,
 			"stream_preset":root_node.call("get_remote_stream_preset") if root_node!=null and root_node.has_method("get_remote_stream_preset") else "custom",
 			"stream_cpu":_cpu_profile,"frame_cpu_ms":Performance.get_monitor(Performance.TIME_PROCESS)*1000.0,
 			"view_cpu_ms":root_node.get("_capture_view_cpu_ms") if root_node!=null else 0}).to_utf8_buffer()
@@ -838,6 +850,21 @@ func _robot_overlay_metadata() -> Dictionary:
 			var state = node.call("get_hybrid_render_state")
 			if state is Dictionary:
 				return state
+	if OS.get_environment("ROBOT_TELEOP_CAPTURE_ONLY") == "1":
+		# Capture deliberately runs without a robot module. The active control
+		# owner publishes these poses atomically; never open a second servo or
+		# telemetry connection just to decorate the camera stream.
+		var mirror_path := "user://robot_overlay_render_state.json"
+		if FileAccess.file_exists(mirror_path):
+			var mirror = JSON.parse_string(FileAccess.get_file_as_string(mirror_path))
+			if mirror is Dictionary and mirror.get("project_root") == ProjectSettings.globalize_path("res://"):
+				var age := Time.get_unix_time_from_system() - float(mirror.get("updated", 0.0))
+				var robot = mirror.get("robot")
+				if age >= 0.0 and age < 2.0 and robot is Dictionary:
+					return robot
+		# Explicit unavailability lets the browser retire old transforms when
+		# the owner exits, changes project, or has not published an overlay yet.
+		return {"available": false}
 	return {}
 
 func _find_rgbd_renderers() -> Array[Node]:

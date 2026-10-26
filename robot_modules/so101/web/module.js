@@ -204,6 +204,8 @@ class So101WebModule {
     this.manualReady = false;
     this.manualPreviewTimer = null;
     this.importFile = null;
+    this.calibrationRequest = null;
+    this.calibrationError = "";
   }
 
   async mount({ settingsRoot, setupRoot, viewRoot, statusRoot, floatingRoot }) {
@@ -292,7 +294,7 @@ class So101WebModule {
     const action = { operation, request_id, ...extra };
     const settings = ["save", "preview"].includes(operation) ? this.manualPayload() : {};
     if (operation === "preview") {
-      return this.sendViewSettings({ ...settings, robot_visual_calibration_action: action });
+      return window.so101ArmController.requestViewSettings({ ...settings, robot_visual_calibration_action: action });
     }
     if (this.manualPending) return Promise.reject(new Error("Wait for the previous calibration action."));
     return new Promise((resolve, reject) => {
@@ -303,11 +305,12 @@ class So101WebModule {
       }, 12000);
       this.manualPending = { request_id, resolve, reject, timer };
       this.manualMessage("Waiting for Godot…");
-      if (!this.sendViewSettings({ ...settings, robot_visual_calibration_action: action })) {
+      window.so101ArmController.requestViewSettings({ ...settings, robot_visual_calibration_action: action }).catch(error => {
+        if (this.manualPending?.request_id !== request_id) return;
         window.clearTimeout(timer);
         this.manualPending = null;
-        reject(new Error("Connect the controller to Godot before changing calibration."));
-      }
+        reject(error);
+      });
     });
   }
 
@@ -316,7 +319,7 @@ class So101WebModule {
     window.clearTimeout(this.manualPreviewTimer);
     this.manualPreviewTimer = window.setTimeout(() => {
       if (!this.manualReady || this.manualPending) return;
-      if (!this.calibrationAction("preview")) this.manualMessage("Preview could not reach Godot; check the connection.");
+      this.calibrationAction("preview").catch(error => this.manualMessage(error.message));
     }, 60);
   }
 
@@ -376,6 +379,24 @@ class So101WebModule {
   calibrationStatus() {
     const arm = this.controllerStatus();
     return arm.status?.robot_calibration || {};
+  }
+
+  calibrationUnavailable() {
+    const arm = this.controllerStatus(), calibration = this.calibrationStatus();
+    if (!arm.serverConnected) return "Robot server disconnected. Reconnect before calibration.";
+    if (!arm.followerConnected) return "Robot offline. Start the follower service before calibration.";
+    if (!arm.status?.measured_feedback_fresh) return "Waiting for fresh robot joint feedback.";
+    if (!calibration.state || ["offline", "loading"].includes(calibration.state)) return "Godot calibration is offline. Open the robot scene or start the runtime.";
+    return "";
+  }
+
+  async requestCalibration(settings) {
+    this.calibrationError = "";
+    this.calibrationRequest = {before:JSON.stringify(this.calibrationStatus()), deadline:Date.now()+10000};
+    this.updateStatus();
+    try { await window.so101ArmController.requestViewSettings(settings); }
+    catch (error) { this.calibrationRequest = null; this.calibrationError = error.message; }
+    this.updateStatus();
   }
 
   statusSummary() {
@@ -445,14 +466,25 @@ class So101WebModule {
     const solving = calibration.state === "solving";
     const offline = calibration.state === "offline";
     const mode = calibration.calibration_mode || "base";
+    const unavailable = this.calibrationUnavailable();
+    if (this.calibrationRequest) {
+      if (JSON.stringify(calibration) !== this.calibrationRequest.before && ["capturing","solving","failed"].includes(calibration.state)) {
+        this.calibrationRequest = null;
+      } else if (Date.now() > this.calibrationRequest.deadline) {
+        this.calibrationRequest = null;
+        this.calibrationError = "Godot did not start calibration. Check the runtime connection before retrying.";
+      }
+    }
+    if (capturing || solving) this.calibrationError = "";
     const progress = Math.max(0, Math.min(1, Number(calibration.progress || 0)));
     element("so101-calibration-progress").value = progress;
     element("so101-calibration-progress-value").textContent = `${Math.round(progress * 100)}%`;
     element("so101-calibrate").textContent = capturing && mode === "base" ? "Cancel Full Arm Calibration" : solving && mode === "base" ? "Fitting Full Arm" : offline ? "Godot Calibration Offline" : "Calibrate Full Arm";
-    element("so101-calibrate").disabled = manual.enabled === true || solving || offline || (capturing && mode !== "base");
+    element("so101-calibrate").disabled = manual.enabled === true || solving || Boolean(this.calibrationRequest) || (!capturing && Boolean(unavailable)) || (capturing && mode !== "base");
     element("so101-refine").textContent = capturing && mode === "joints" ? "Cancel Servo Refinement" : solving && mode === "joints" ? "Fitting Arm Servos" : offline ? "Godot Calibration Offline" : "Refine Arm Servos";
-    element("so101-refine").disabled = manual.enabled === true || solving || offline || (capturing && mode !== "joints");
-    element("so101-calibration-status").textContent = `${calibration.message || "Arm position calibration idle"}\nFrames ${calibration.frames || 0} | confidence ${Math.round((calibration.confidence || 0) * 100)}%`;
+    element("so101-refine").disabled = manual.enabled === true || solving || Boolean(this.calibrationRequest) || (!capturing && Boolean(unavailable)) || (capturing && mode !== "joints");
+    const message = this.calibrationError || (this.calibrationRequest ? "Request sent. Waiting for Godot calibration…" : !capturing && !solving && unavailable ? unavailable : calibration.message || "Arm position calibration ready");
+    element("so101-calibration-status").textContent = `${message}\nFrames ${calibration.frames || 0} | confidence ${Math.round((calibration.confidence || 0) * 100)}%`;
   }
 
   sendFeedbackSettings() {
@@ -508,16 +540,16 @@ class So101WebModule {
     element("so101-calibrate").addEventListener("click", () => {
       const calibration = this.calibrationStatus();
       const capturing = calibration.state === "capturing";
-      if (!capturing && calibration.state === "offline") return void (element("so101-calibration-status").textContent = "Godot calibration module is offline. Start the runtime and retry.");
+      if (!capturing && this.calibrationUnavailable()) return;
       if (!capturing && !window.confirm("The follower will locate its base, calibrate outward through the arm, and sample claw openings.\n\nClear its workspace and stay ready to remove physical power.")) return;
-      if (!sendViewSettings(capturing ? { cancel_robot_position_calibration: true } : { calibrate_robot_position: true })) element("so101-calibration-status").textContent = "Start the controller so Godot can receive calibration commands.";
+      this.requestCalibration(capturing ? { cancel_robot_position_calibration: true } : { calibrate_robot_position: true });
     });
     element("so101-refine").addEventListener("click", () => {
       const calibration = this.calibrationStatus();
       const capturing = calibration.state === "capturing" && calibration.calibration_mode === "joints";
-      if (!capturing && calibration.state === "offline") return void (element("so101-calibration-status").textContent = "Godot calibration module is offline. Start the runtime and retry.");
+      if (!capturing && this.calibrationUnavailable()) return;
       if (!capturing && !window.confirm("Refine shoulder, elbow, and wrist servos now? Clear the workspace and stay ready to remove power.")) return;
-      if (!sendViewSettings(capturing ? { cancel_robot_position_calibration: true } : { refine_robot_joint_alignment: true })) element("so101-calibration-status").textContent = "Start the controller so Godot can receive calibration commands.";
+      this.requestCalibration(capturing ? { cancel_robot_position_calibration: true } : { refine_robot_joint_alignment: true });
     });
     element("so101-manual-open").addEventListener("click", async () => {
       if (await this.performManualAction("begin")) {
@@ -553,7 +585,7 @@ class So101WebModule {
     });
     window.addEventListener("so101-arm-status", updateStatus);
     window.addEventListener("pagehide", () => {
-      if (this.manualReady) sendViewSettings({ robot_visual_calibration_action: { operation: "cancel", request_id: `close-${Date.now()}` } });
+      if (this.manualReady) window.so101ArmController.requestViewSettings({ robot_visual_calibration_action: { operation: "cancel", request_id: `close-${Date.now()}` } }).catch(() => {});
     });
   }
 

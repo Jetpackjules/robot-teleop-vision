@@ -50,14 +50,19 @@ export class RgbVisibility {
   clear(){const gl=this.gl;if(this.texture)gl.deleteTexture(this.texture);if(this.framebuffer)gl.deleteFramebuffer(this.framebuffer);
     if(this.program)gl.deleteProgram(this.program);if(this.vao)gl.deleteVertexArray(this.vao);
     for(const b of this.buffers.values())gl.deleteBuffer(b.buffer);this.buffers.clear();
-    this.texture=this.framebuffer=this.program=this.vao=null;this.signature='';}
+    if(this.copyFramebuffer)gl.deleteFramebuffer(this.copyFramebuffer);
+    this.texture=this.framebuffer=this.copyFramebuffer=this.program=this.vao=null;
+    this.signature='';this.historyKey='';}
   update(cameras,quality,inverse,enabled,now,active=true){
     const gl=this.gl,width=enabled?Math.max(...cameras.map(c=>c.colorWidth||c.width)):1,
       height=enabled?Math.max(...cameras.map(c=>c.colorHeight||c.height)):1;
     const signature=`${width}:${height}:${cameras.length}`;
     if(signature!==this.signature){this.clear();
-      this.texture=this.allocate(gl,gl.TEXTURE_2D_ARRAY,15,gl.DEPTH_COMPONENT24,width,height,cameras.length);
-      this.framebuffer=gl.createFramebuffer();this.vao=gl.createVertexArray();
+      // One sampler contains rig-wide depth, source-camera-only depth and the
+      // previous rig-wide observation. No additional fragment sampler is needed.
+      if(cameras.length*3>gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS))throw new Error('RGB visibility exceeds GPU layer limits');
+      this.texture=this.allocate(gl,gl.TEXTURE_2D_ARRAY,15,gl.DEPTH_COMPONENT24,width,height,cameras.length*3);
+      this.framebuffer=gl.createFramebuffer();this.copyFramebuffer=gl.createFramebuffer();this.vao=gl.createVertexArray();
       this.program=this.compile(gl,VERTEX,FRAGMENT);this.u={};
       for(const name of ['u_depth','u_quality','u_source_index','u_size','u_intrinsics','u_to_rgb_clip'])this.u[name]=gl.getUniformLocation(this.program,name);
       gl.bindFramebuffer(gl.FRAMEBUFFER,this.framebuffer);
@@ -72,13 +77,35 @@ export class RgbVisibility {
     gl.uniform1i(this.u.u_depth,0);gl.uniform1i(this.u.u_quality,6);
     gl.activeTexture(gl.TEXTURE6);gl.bindTexture(gl.TEXTURE_2D_ARRAY,quality);
     gl.bindFramebuffer(gl.FRAMEBUFFER,this.framebuffer);gl.drawBuffers([gl.NONE]);gl.readBuffer(gl.NONE);
+    // A calibration/profile change invalidates temporal evidence immediately.
+    const historyKey=JSON.stringify(cameras.map(c=>[c.metadata.id,Array.from(c.modelMatrix),
+      c.metadata.color_projection,now-c.lastUpdateMs<1000]));
+    const hasHistory=this.historyKey===historyKey;
+    const copyLayer=(from,to,w,h)=>{
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER,this.framebuffer);
+      gl.framebufferTextureLayer(gl.READ_FRAMEBUFFER,gl.DEPTH_ATTACHMENT,this.texture,0,from);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,this.copyFramebuffer);
+      gl.framebufferTextureLayer(gl.DRAW_FRAMEBUFFER,gl.DEPTH_ATTACHMENT,this.texture,0,to);
+      gl.drawBuffers([gl.NONE]);gl.readBuffer(gl.NONE);
+      gl.blitFramebuffer(0,0,w,h,0,0,w,h,gl.DEPTH_BUFFER_BIT,gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER,this.framebuffer);
+      gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,this.texture,0,from);
+    };
     for(let target=0;target<cameras.length;target++){
       const camera=cameras[target];if(camera.metadata.color_space!=='original_rgb')continue;
       gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,this.texture,0,target);
+      if(hasHistory)copyLayer(target,cameras.length*2+target,camera.colorWidth,camera.colorHeight);
       gl.viewport(0,0,camera.colorWidth,camera.colorHeight);gl.clearDepth(1);gl.clear(gl.DEPTH_BUFFER_BIT);
       const targetProjection=multiply(projection(camera.metadata.color_projection),inverse(camera.modelMatrix));
-      for(let source=0;source<cameras.length;source++){
-        const c=cameras[source];if(now-c.lastUpdateMs>=1000)continue;
+      // Draw the RGB camera's own depth first, retaining its self-occlusion
+      // evidence before peers contribute. The total triangle draw count is unchanged.
+      for(let step=0;step<cameras.length;step++){
+        const source=step===0?target:step<=target?step-1:step;
+        const c=cameras[source];
+        if(now-c.lastUpdateMs>=1000){
+          if(step===0)copyLayer(target,cameras.length+target,camera.colorWidth,camera.colorHeight);
+          continue;
+        }
         let index=this.buffers.get(c.width);
         if(!index){const values=[];for(let x=0;x<c.width-1;x++){
           const a=x,b=x+1,d=c.width+x+1;values.push(a,b,c.width*2+x*2,b,d,c.width*2+x*2+1);
@@ -93,8 +120,13 @@ export class RgbVisibility {
         gl.uniform4fv(this.u.u_intrinsics,c.intrinsicsArray);
         gl.uniformMatrix4fv(this.u.u_to_rgb_clip,false,multiply(targetProjection,c.modelMatrix));
         gl.drawElementsInstanced(gl.TRIANGLES,index.count,index.type,0,c.height-1);this.passes++;
+        if(step===0)copyLayer(target,cameras.length+target,camera.colorWidth,camera.colorHeight);
       }
+      // On first use, previous=current; a new rig must not inherit a clear
+      // history layer that could falsely authorize color behind an occluder.
+      if(!hasHistory)copyLayer(target,cameras.length*2+target,camera.colorWidth,camera.colorHeight);
     }
+    this.historyKey=historyKey;
     gl.depthFunc(gl.LEQUAL);
   }
 }

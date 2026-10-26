@@ -22,6 +22,12 @@ function createTestServer() {
       res.setHeader('Content-Type','application/json');res.end('{}');
     } else if(path.startsWith('/api/')||path.startsWith('/capture-')) {
       res.setHeader('Content-Type','application/json');res.writeHead(404);res.end('{}');
+    } else if(path==='/rgb-visibility') {
+      res.setHeader('Content-Type','text/html');res.end(readFileSync(resolve(__dirname,'browser_rgb_visibility_probe.html')));
+    } else if(path==='/renderer.js') {
+      res.setHeader('Content-Type','text/javascript');
+      res.end(readFileSync(resolve(root,'web/hybrid_rgbd_renderer.js'),'utf8')+
+        '\nexport {state,uploadCamera,identityMatrix,inverseRigidTransform};');
     } else if(path==='/controller.html') {
       res.setHeader('Content-Type','text/html');res.end(readFileSync(resolve(root,'web/controller.html')));
     } else if(modules.has(path.slice(1))||(/^\/[\w-]+\.js$/.test(path)&&existsSync(resolve(root,'web',path.slice(1))))) {

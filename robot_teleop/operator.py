@@ -207,6 +207,10 @@ class GenericRobotOperator:
         """Validate module-owned structured actions; never installation defaults."""
         return {}
 
+    def view_settings_error(self, settings: Mapping[str, Any], status: Mapping[str, Any]) -> str:
+        """Module-owned preflight for explicit settings/actions on its control socket."""
+        return ""
+
     def resolve_auxiliary_device(self, view_id: str, configured: str = "") -> str:
         return str(configured or "")
 

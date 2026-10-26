@@ -9,8 +9,42 @@ var _view: Node = null
 var _overlay: Node3D = null
 var _calibrator: Node = null
 var _configuration_error := ""
-var _hardware_enabled := true
+var _hardware_enabled := false
 var _manual_panel: Window
+var _resolved_configuration := {}
+var _configuration_check_msec := -1000
+
+func _resolve_configuration() -> Dictionary:
+	# A running editor adopts the launcher's current profile without reopening.
+	var environment := "" if Engine.is_editor_hint() and FileAccess.file_exists(TRANSPORT_CONFIG.SETTINGS_PATH) else OS.get_environment(TRANSPORT_CONFIG.ENVIRONMENT_NAME)
+	return TRANSPORT_CONFIG.resolve(environment)
+
+func _process(_delta: float) -> void:
+	if not Engine.is_editor_hint() or Time.get_ticks_msec() - _configuration_check_msec < 500: return
+	_configuration_check_msec = Time.get_ticks_msec()
+	var configuration := _resolve_configuration()
+	if configuration == _resolved_configuration: return
+	if is_instance_valid(_calibrator) and str(_calibrator.call("get_calibration_status").get("state", "")) in ["capturing", "solving"]: return
+	if is_instance_valid(_overlay) and bool(_overlay.get("manual_claw_calibration_enabled")): return
+	for node in [_calibrator, _overlay]:
+		if is_instance_valid(node):
+			node.get_parent().remove_child(node)
+			node.queue_free()
+	_calibrator = null
+	_overlay = null
+	_install()
+
+func _forward_to_owner(settings: Dictionary) -> bool:
+	if not Engine.is_editor_hint() or not is_instance_valid(_view): return false
+	var gateway := _view.get_node_or_null("RemoteControlGateway")
+	if gateway == null or bool(gateway.call("owns_robot_control")): return false
+	var payload := settings.duplicate(true)
+	payload["type"] = "view_settings"
+	payload["project_root"] = ProjectSettings.globalize_path("res://")
+	var udp := PacketPeerUDP.new()
+	udp.connect_to_host("127.0.0.1", 4247)
+	udp.put_packet(JSON.stringify(payload).to_utf8_buffer())
+	return true
 
 
 func _ready() -> void:
@@ -28,7 +62,9 @@ func _exit_tree() -> void:
 
 
 func _install() -> void:
-	var configuration := TRANSPORT_CONFIG.resolve(OS.get_environment(TRANSPORT_CONFIG.ENVIRONMENT_NAME))
+	_view = get_parent().get_parent()
+	var configuration := _resolve_configuration()
+	_resolved_configuration = configuration.duplicate(true)
 	_configuration_error = str(configuration.get("error", ""))
 	if not _configuration_error.is_empty():
 		push_error(_configuration_error)
@@ -107,13 +143,16 @@ func apply_remote_settings(payload: Dictionary) -> void:
 
 
 func manual_calibration_action(action: Dictionary, settings: Dictionary = {}) -> Dictionary:
+	var forwarded := settings.duplicate(true)
+	forwarded["robot_visual_calibration_action"] = action
+	if _forward_to_owner(forwarded): return {"ok": true, "message": "Sent to the active Godot runtime."}
 	if not is_instance_valid(_overlay) or not is_instance_valid(_calibrator):
 		return {"ok": false, "message": "Robot calibration is unavailable."}
 	var status: Dictionary = _calibrator.call("get_calibration_status")
 	var busy := str(status.get("state", "")) in ["capturing", "solving"] or bool(_calibrator.get("_automation_active"))
 	var result: Dictionary = _overlay.call("handle_manual_calibration_action", action, settings, busy)
 	_calibrator.set("_editor_status_until_msec", Time.get_ticks_msec() + 30000)
-	if not busy and bool(result.get("ok", false)) and str(action.get("operation", "")) in ["save", "import"]:
+	if not busy and bool(result.get("ok", false)) and str(action.get("operation", "")) in ["save", "import", "base_save"]:
 		_calibrator.call("report_external_registration", str(result.message), 0.0)
 	_calibrator.call("_emit_status", true)
 	return result
@@ -165,14 +204,16 @@ func _apply_manual_claw_settings(payload: Dictionary) -> void:
 
 
 func start_full_calibration(from_editor: bool = false) -> void:
-	if is_instance_valid(_overlay) and bool(_overlay.get("manual_claw_calibration_enabled")):
+	if _forward_to_owner({"calibrate_robot_position": true}): return
+	if is_instance_valid(_overlay) and (bool(_overlay.get("manual_claw_calibration_enabled")) or bool(_overlay.get("manual_base_calibration_enabled"))):
 		return
 	if _hardware_enabled and is_instance_valid(_calibrator):
 		_calibrator.call("start_automated_arm_calibration", from_editor)
 
 
 func refine_calibration(from_editor: bool = false) -> void:
-	if is_instance_valid(_overlay) and bool(_overlay.get("manual_claw_calibration_enabled")):
+	if _forward_to_owner({"refine_robot_joint_alignment": true}): return
+	if is_instance_valid(_overlay) and (bool(_overlay.get("manual_claw_calibration_enabled")) or bool(_overlay.get("manual_base_calibration_enabled"))):
 		return
 	if _hardware_enabled and is_instance_valid(_calibrator):
 		_calibrator.call("start_joint_alignment_calibration", from_editor)
@@ -218,6 +259,12 @@ func restore_calibration_checkpoint() -> bool:
 
 
 func get_calibration_status() -> Dictionary:
+	if Engine.is_editor_hint() and is_instance_valid(_view):
+		var gateway := _view.get_node_or_null("RemoteControlGateway")
+		if gateway != null and not bool(gateway.call("owns_robot_control")) and FileAccess.file_exists("user://so101_runtime_calibration_status.json"):
+			var mirror = JSON.parse_string(FileAccess.get_file_as_string("user://so101_runtime_calibration_status.json"))
+			if mirror is Dictionary and mirror.get("project_root") == ProjectSettings.globalize_path("res://") and Time.get_unix_time_from_system() - float(mirror.get("updated", 0)) < 2.0:
+				return mirror.get("status", {})
 	if not _configuration_error.is_empty() or not _hardware_enabled:
 		return {
 			"state": "failed",

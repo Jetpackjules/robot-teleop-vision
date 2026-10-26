@@ -72,6 +72,7 @@ export class So101ArmController extends EventTarget {
     this.socket = null;
     this.socketReconnectTimer = 0;
     this.socketHeartbeatTimer = 0;
+    this.viewSettingsPending = new Map();
     this.serialReconnectTimer = 0;
     this.loopTimer = 0;
     this.keyboardTimer = 0;
@@ -171,6 +172,14 @@ export class So101ArmController extends EventTarget {
       try {
         const status = JSON.parse(event.data);
         if (status.type !== "arm_status") return;
+        const reply = status.view_settings_reply;
+        const pending = reply && this.viewSettingsPending.get(reply.request_id);
+        if (pending) {
+          window.clearTimeout(pending.timer);
+          this.viewSettingsPending.delete(reply.request_id);
+          if (reply.ok === true) pending.resolve(true);
+          else pending.reject(new Error(reply.error || "Robot settings were rejected."));
+        }
         if (
           this.latest.keyboardConnected
           && String(status.fault || "").includes("arm command transport delay is older than 250 ms")
@@ -248,6 +257,11 @@ export class So101ArmController extends EventTarget {
       window.clearInterval(this.socketHeartbeatTimer);
       this.socketHeartbeatTimer = 0;
       this.latest.serverConnected = false;
+      for (const pending of this.viewSettingsPending.values()) {
+        window.clearTimeout(pending.timer);
+        pending.reject(new Error("Robot connection closed. The request was not retried; check its status before retrying."));
+      }
+      this.viewSettingsPending.clear();
       this.latest.armed = false;
       this.latest.state = "disconnected";
       if (event instanceof CloseEvent && event.code === 4001) {
@@ -282,6 +296,26 @@ export class So101ArmController extends EventTarget {
       if (typeof settings[key] === "boolean") this.feedbackSettings[key] = settings[key];
     }
     return this.sendFeedbackSettings();
+  }
+
+  requestViewSettings(settings) {
+    if (!this.latest.serverConnected || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("Robot server disconnected. Reconnect before changing calibration."));
+    }
+    if (this.viewSettingsPending.size >= 8) return Promise.reject(new Error("Wait for the pending robot settings."));
+    const request_id = globalThis.crypto?.randomUUID?.() || `view-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        this.viewSettingsPending.delete(request_id);
+        reject(new Error("Robot settings acknowledgement timed out. The request was not retried; check its status before retrying."));
+      }, 5000);
+      this.viewSettingsPending.set(request_id, {resolve, reject, timer});
+      if (!this.send({type:"robot_view_settings", request_id, settings})) {
+        window.clearTimeout(timer);
+        this.viewSettingsPending.delete(request_id);
+        reject(new Error("Robot settings could not be sent. Check the connection and retry."));
+      }
+    });
   }
 
   sendFeedbackSettings() {

@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -79,6 +80,18 @@ def write_runtime_configuration(project_root: Path, payload: dict) -> None:
         temporary.replace(destination)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def existing_godot_runtime(port: int, project_root: Path) -> dict:
+    """Identify this project's existing editor/runtime before reusing its port."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/diagnostics", timeout=1) as response:
+            runtime = json.load(response).get("runtime", {})
+        if Path(runtime.get("project_root", "")).resolve() != project_root.resolve():
+            return {}
+        return runtime if int(runtime.get("pid", 0)) > 0 else {}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
 
 
 class Supervisor:
@@ -212,16 +225,28 @@ class Supervisor:
         }
         # Resolve everything before starting hardware so a bad port/profile
         # cannot leave a partially started follower behind.
-        runtime_configuration_json = json.dumps(runtime_configuration)
         robot_spec = self.robot.launch_spec()
         operator_environment = getattr(
             self.robot,
             "operator_environment",
             dict,
         )()
+        existing = {}
+        if not _port_available(self.config.stack.stream_port):
+            if not self.config.godot.packaged_runtime:
+                existing = existing_godot_runtime(self.config.stack.stream_port, self.config.project_root)
+            if not existing:
+                raise RuntimeError(f"Godot RGB-D stream port {self.config.stack.stream_port} is already in use by an unidentified process")
+        capture_port = self.config.stack.stream_port
+        if not self.config.godot.packaged_runtime and (existing or self.config.godot.launch_runtime):
+            capture = existing.get("capture", {})
+            if not capture.get("prefix"):
+                capture = {"prefix": "teleop_" + uuid.uuid4().hex[:20], "pid": existing.get("pid", 0), "port": capture_port}
+            runtime_configuration["capture"] = capture
+            capture_port = int(capture.get("port", capture_port))
+        runtime_configuration_json = json.dumps(runtime_configuration)
         for port, label in (
             (self.config.stack.https_port, "HTTPS UI"),
-            (self.config.stack.stream_port, "Godot RGB-D stream"),
             (self.config.stack.calibration_status_port, "calibration status"),
         ):
             if not _port_available(port):
@@ -230,7 +255,17 @@ class Supervisor:
         write_runtime_configuration(self.config.project_root, runtime_configuration)
         if robot_spec:
             self._spawn(robot_spec)
-        if self.config.godot.launch_runtime:
+        if existing:
+            deadline = time.monotonic() + 8
+            while True:
+                resolved = existing_godot_runtime(self.config.stack.stream_port, self.config.project_root)
+                if resolved.get("robot_configuration") == {k: v for k, v in runtime_configuration.items() if k != "capture"}:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("The open Godot scene did not adopt the resolved robot settings")
+                time.sleep(0.2)
+            self._log("Using this project's already open Godot scene")
+        elif self.config.godot.launch_runtime:
             godot = find_godot(self.config.godot.executable)
             if not godot:
                 raise RuntimeError("Godot 4.6+ was not found; set godot.executable in config/local.toml")
@@ -246,16 +281,21 @@ class Supervisor:
                         f"Godot native RGB-D extension check failed: {extension_detail}"
                     )
                 godot_command.extend(("--path", str(self.config.project_root)))
-            self._spawn(
+            process = self._spawn(
                 LaunchSpec(
                     "Godot runtime",
                     tuple(godot_command),
                     {
                         "ROBOT_TELEOP_MODULE": self.config.robot.adapter,
                         "ROBOT_TELEOP_RUNTIME_CONFIG": runtime_configuration_json,
+                        **({"ROBOT_TELEOP_CAPTURE_SHM_PREFIX": runtime_configuration["capture"]["prefix"],
+                            "ROBOT_TELEOP_CAPTURE_PUBLISH": "1"} if "capture" in runtime_configuration else {}),
                     },
                 )
             )
+            if "capture" in runtime_configuration:
+                runtime_configuration["capture"]["pid"] = process.pid
+                write_runtime_configuration(self.config.project_root, runtime_configuration)
         password = os.environ.get(
             self.config.stack.password_env,
             self.config.stack.password_default,
@@ -268,6 +308,7 @@ class Supervisor:
             "--root", str(REPO_ROOT / "web"),
             "--udp-port", str(self.config.stack.tracking_port),
             "--stream-port", str(self.config.stack.stream_port),
+            "--capture-port", str(capture_port),
             "--robot-calibration-status-port", str(self.config.stack.calibration_status_port),
             f"--password={password}",
         ]

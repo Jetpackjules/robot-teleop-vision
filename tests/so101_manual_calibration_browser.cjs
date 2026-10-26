@@ -17,10 +17,10 @@ import {createRobotModule} from '/module.js';
 const module = createRobotModule({});
 await module.mount(Object.fromEntries(['settings','setup','view','status','floating'].map(id=>[id+'Root',document.getElementById(id)])));
 window.calibration = {state:'failed',manual_calibration:{supported:true,registered:true,enabled:false,reply:{}}};
-window.getSo101ArmStatus = () => ({state:'hold',serverConnected:true,followerConnected:true,status:{robot_calibration:window.calibration}});
+window.getSo101ArmStatus = () => ({state:'hold',serverConnected:true,followerConnected:true,status:{measured_feedback_fresh:true,robot_calibration:window.calibration}});
 window.sent=[]; window.failSave=false; window.failImport=false; window.connected=true;
 window.fixture={type:'so101_visual_calibration',schema_version:1,robot:'so101',registration:{joint_angle_offsets_degrees:[40,80,0,-70,0,0]}};
-module.bind({sendViewSettings(payload){
+function sendFixtureSettings(payload){
   if(!window.connected)return false;
   window.sent.push(payload);
   const a=payload.robot_visual_calibration_action;
@@ -34,7 +34,9 @@ module.bind({sendViewSettings(payload){
     module.renderStatus();
   },50);
   return true;
-},updateStatus(){module.renderStatus();}});
+}
+window.so101ArmController={requestViewSettings(payload){return sendFixtureSettings(payload)?Promise.resolve(true):Promise.reject(new Error('Robot server disconnected'));}};
+module.bind({sendViewSettings:sendFixtureSettings,updateStatus(){module.renderStatus();}});
 setInterval(()=>module.renderStatus(),100);
 module.renderStatus(); window.testModule=module;
 </script>`;
@@ -113,7 +115,7 @@ const server = http.createServer((req, res) => {
     await panel.waitFor({state:'hidden'});
     await page.evaluate(()=>window.connected=false);
     await page.getByRole('button',{name:'Manual Joint Tuning',exact:true}).click();
-    await page.waitForFunction(()=>document.getElementById('so101-calibration-file-status').textContent.includes('Connect the controller'));
+    await page.waitForFunction(()=>document.getElementById('so101-calibration-file-status').textContent.includes('Robot server disconnected'));
     assert.equal(await panel.isVisible(),false,'offline begin cannot show working preview');
     assert.deepEqual(errors,[]);
     console.log('Manual calibration browser checks passed: preview, numeric/slider sync, save failure/success, JSON download/upload, base opt-in, reset/cancel, disconnected state, desktop/mobile layout.');

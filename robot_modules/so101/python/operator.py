@@ -275,6 +275,19 @@ class So101Operator(GenericRobotOperator):
             "arm_idle_return_enabled",
         )
 
+    def view_settings_error(self, settings: Mapping[str, Any], status: Mapping[str, Any]) -> str:
+        starting = settings.get("calibrate_robot_position") is True or settings.get("refine_robot_joint_alignment") is True
+        if not starting:
+            return ""
+        if status.get("follower_connected") is not True or status.get("measured_feedback_fresh") is not True:
+            return "Robot feedback is offline. Start the follower service and wait for fresh joint feedback."
+        calibration = status.get("robot_calibration", {})
+        if not calibration.get("state") or calibration.get("state") in ("offline", "loading"):
+            return "Godot calibration is offline. Open the robot scene or start the runtime."
+        if calibration.get("state") in ("capturing", "solving"):
+            return "An arm calibration is already running."
+        return ""
+
     def structured_view_settings(self, data: Mapping[str, Any]) -> dict[str, Any]:
         key = "robot_visual_calibration_action"
         if key not in data:
@@ -283,12 +296,24 @@ class So101Operator(GenericRobotOperator):
         if not isinstance(action, dict):
             raise ValueError("visual calibration action must be an object")  # noqa: TRY004 - HTTP validation contract
         operation = action.get("operation")
-        if operation not in ("begin", "preview", "reset", "cancel", "save", "export", "import"):
+        if operation not in ("begin", "preview", "reset", "cancel", "save", "export", "import",
+                             "base_begin", "base_preview", "base_reset", "base_cancel", "base_save"):
             raise ValueError("unsupported visual calibration operation")
         request_id = action.get("request_id")
         if not isinstance(request_id, str) or not 1 <= len(request_id) <= 80:
             raise ValueError("visual calibration request_id is required (maximum 80 characters)")
         result = {"request_id": request_id, "operation": operation}
+        if operation.startswith("base_") and operation != "base_begin":
+            session_id = action.get("session_id")
+            if not isinstance(session_id, str) or not 1 <= len(session_id) <= 80:
+                raise ValueError("base adjustment session_id is required")
+            result["session_id"] = session_id
+            if operation in ("base_preview", "base_save"):
+                for name, limit in (("offset_x", 2.0), ("offset_z", 2.0), ("yaw_degrees", 180.0)):
+                    value = action.get(name)
+                    if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or abs(value) > limit:
+                        raise ValueError(f"base adjustment {name} must be finite and within +/-{limit}")
+                    result[name] = float(value)
         if operation == "import":
             file = action.get("file")
             if not isinstance(file, dict):

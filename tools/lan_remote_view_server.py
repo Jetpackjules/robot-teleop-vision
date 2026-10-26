@@ -10,6 +10,7 @@ import http.client
 import ipaddress
 import json
 import os
+import re
 import socket
 import ssl
 import struct
@@ -2213,7 +2214,7 @@ class LanRemoteServer(ThreadingHTTPServer):
         with self.robot_calibration_lock:
             calibration = dict(self.robot_calibration_status)
             calibration_received_at = self.robot_calibration_received_at
-        if calibration_received_at and time.monotonic() - calibration_received_at > 2.0:
+        if not calibration_received_at or time.monotonic() - calibration_received_at > 2.0:
             calibration["state"] = "offline"
             calibration["message"] = "Godot robot calibration module is not responding."
         status["robot_calibration"] = calibration
@@ -4031,8 +4032,12 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     continue
                 try:
                     self.check_websocket_rate(rate_window, 75)
+                    data = json.loads(payload.decode("utf-8"))
+                    if isinstance(data, dict) and data.get("type") == "robot_view_settings":
+                        self.handle_robot_view_settings(data, controller_id)
+                        continue
                     message = self.server.robot_operator.validate_command(
-                        json.loads(payload.decode("utf-8"))
+                        data
                     )
                     if self.server.robot_operator.needs_transport_timing(message):
                         accepted, _transport_age_ms = (
@@ -4087,8 +4092,39 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-    def send_robot_status(self, controller_id: str) -> None:
+    def handle_robot_view_settings(self, data: dict, controller_id: str) -> None:
+        request = data.get("request_id")
+        if not isinstance(request, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", request):
+            raise ValueError("Invalid robot settings request ID")
+        reply = {"request_id": request, "ok": False}
+        try:
+            if set(data) - {"type", "request_id", "settings"} or not isinstance(data.get("settings"), dict):
+                raise ValueError("Invalid robot settings request")
+            packet = self.validate_view_settings({**data["settings"], "type": "view_settings"})
+            with self.server.robot_controller_lock:
+                if controller_id != self.server.robot_controller_id:
+                    raise ValueError("This page no longer controls the robot. Reconnect before retrying.")
+            with self.server.trial_control_lock:
+                with self.server.episode_recorder.lock:
+                    paused = self.server.episode_recorder.state == "paused"
+                cancelling = packet.get("cancel_robot_position_calibration") is True
+                if paused and not cancelling:
+                    raise ValueError("Trial is paused. Resume before changing robot calibration.")
+                error = self.server.robot_operator.view_settings_error(packet, self.server.latest_robot_status(controller_id))
+                if error:
+                    raise ValueError(error)
+                # This channel is independent of head tracking and video. Actions
+                # are sent once, never replayed after a transport reconnect.
+                self.server.forward_tracking(json.dumps(packet, separators=(",", ":")).encode("utf-8"))
+            reply["ok"] = True
+        except (ValueError, TypeError, OSError) as error:
+            reply["error"] = str(error)[:240]
+        self.send_robot_status(controller_id, reply)
+
+    def send_robot_status(self, controller_id: str, view_reply: dict | None = None) -> None:
         status = self.server.latest_robot_status(controller_id)
+        if view_reply is not None:
+            status["view_settings_reply"] = view_reply
         payload = json.dumps(status, separators=(",", ":")).encode("utf-8")
         send_lock = getattr(self, "robot_send_lock", None)
         if send_lock is None:

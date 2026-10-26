@@ -906,8 +906,11 @@ var _capture_recovery_at: Dictionary = {}
 var _capture_view_cpu_ms := 0.0
 var _remote_capture_profile := ""
 var _requested_capture_profile := ""
+var _capture_config_check_msec := -1000
+var _capture_prefix_from_config := false
 
 func _ready() -> void:
+	_sync_shared_capture_configuration(false)
 	if _capture_only():
 		if OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX").is_empty() or DisplayServer.get_name() != "headless":
 			push_error("Independent capture requires --headless and a unique ROBOT_TELEOP_CAPTURE_SHM_PREFIX.")
@@ -986,6 +989,7 @@ func _exit_tree() -> void:
 
 func _process(_delta: float) -> void:
 	var started := Time.get_ticks_usec()
+	_sync_shared_capture_configuration()
 	_apply_pending_capture_profile()
 	_sync_capture_control()
 	_update_runtime_stream_owner_state()
@@ -1583,7 +1587,7 @@ func _realsense_settings(camera_id: String) -> Dictionary:
 func _realsense_setting(camera_id: String, key: String, fallback):
 	if key == "stream_profile" and not _remote_capture_profile.is_empty():
 		return _remote_capture_profile
-	if _capture_only() and _capture_control_settings.has(camera_id):
+	if _capture_publisher() and _capture_control_settings.has(camera_id):
 		return (_capture_control_settings[camera_id] as Dictionary).get(key,fallback)
 	var node_settings := _realsense_camera_node_settings(camera_id)
 	if node_settings.has(key):
@@ -1890,12 +1894,12 @@ func _camera_uses_custom_depth_range(camera_id: String) -> bool:
 	return not is_equal_approx(camera_max, max_depth_m)
 
 func _camera_min_depth(camera_id: String) -> float:
-	if _capture_only() and _capture_control_settings.has(camera_id):
+	if _capture_publisher() and _capture_control_settings.has(camera_id):
 		return float(_capture_control_settings[camera_id].get("_capture_min_depth",min_depth_m))
 	return min_depth_m
 
 func _camera_max_depth(camera_id: String) -> float:
-	if _capture_only() and _capture_control_settings.has(camera_id):
+	if _capture_publisher() and _capture_control_settings.has(camera_id):
 		return float(_capture_control_settings[camera_id].get("_capture_max_depth",max_depth_m))
 	if _camera_uses_custom_depth_range(camera_id):
 		return maxf(float(_realsense_setting(camera_id, "max_depth_m", max_depth_m)), 0.25)
@@ -1937,6 +1941,29 @@ func _camera_shm_name(camera_id: String) -> String:
 func _capture_only() -> bool:
 	return OS.get_environment("ROBOT_TELEOP_CAPTURE_ONLY") == "1"
 
+func _capture_publisher() -> bool:
+	return _capture_only() or OS.get_environment("ROBOT_TELEOP_CAPTURE_PUBLISH") == "1"
+
+func _sync_shared_capture_configuration(restart: bool = true) -> void:
+	if _capture_only(): return
+	if not _capture_prefix_from_config and not OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX").is_empty(): return
+	var now := Time.get_ticks_msec()
+	if now - _capture_config_check_msec < 500: return
+	_capture_config_check_msec = now
+	var configuration = JSON.parse_string(FileAccess.get_file_as_string("res://.teleop/runtime_config.json")) if FileAccess.file_exists("res://.teleop/runtime_config.json") else {}
+	var capture: Dictionary = configuration.get("capture", {}) if configuration is Dictionary else {}
+	var prefix := str(capture.get("prefix", ""))
+	var pid := int(capture.get("pid", 0))
+	if not prefix.is_valid_identifier() or not _capture_lease_process_alive(pid): prefix = ""
+	var publish := "1" if pid == OS.get_process_id() and not prefix.is_empty() else ""
+	if prefix == OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX") and publish == OS.get_environment("ROBOT_TELEOP_CAPTURE_PUBLISH"): return
+	_capture_prefix_from_config = true
+	OS.set_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX", prefix)
+	OS.set_environment("ROBOT_TELEOP_CAPTURE_PUBLISH", publish)
+	if restart:
+		_restart_realsense_direct_renderers()
+		_update_camera_renderers()
+
 func apply_remote_stream_preset(preset: String) -> void:
 	if preset not in ["quality", "latency"]:
 		return
@@ -1957,7 +1984,7 @@ func get_remote_stream_preset() -> String:
 	return "custom"
 
 func _shared_capture_preview() -> bool:
-	return not _capture_only() and not OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX").is_empty()
+	return not _capture_publisher() and not OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX").is_empty()
 
 func _direct_capture_enabled() -> bool:
 	return not _shared_capture_preview() and not _capture_paused
@@ -1970,7 +1997,7 @@ func _capture_lease_process_alive(pid: int) -> bool:
 	return OS.is_process_running(pid)
 
 func _sync_capture_control() -> void:
-	if not _capture_only() and not _shared_capture_preview(): return
+	if not _capture_publisher() and not _shared_capture_preview(): return
 	var now := Time.get_ticks_msec()
 	if now-_capture_control_last_check < 100: return
 	_capture_control_last_check=now
@@ -1978,6 +2005,11 @@ func _sync_capture_control() -> void:
 	if not prefix.is_valid_identifier(): return
 	var path := ProjectSettings.globalize_path("user://capture_control_%s.bin" % prefix)
 	if _shared_capture_preview():
+		if FileAccess.file_exists(path):
+			var lease_file := FileAccess.open(path, FileAccess.READ)
+			if lease_file != null and lease_file.get_length() <= 1048576:
+				var lease = lease_file.get_var(false)
+				if lease is Dictionary and bool(lease.get("paused", false)) and int(lease.get("pid", 0)) != OS.get_process_id() and _capture_lease_process_alive(int(lease.get("pid", 0))) and Time.get_unix_time_from_system() - float(lease.get("updated", 0)) < 3.0: return
 		var cameras: Dictionary={}
 		for id in _realsense_camera_ids():
 			var settings := _realsense_settings(id).duplicate(true)
@@ -3536,6 +3568,8 @@ func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) ->
 	node.visible = _streams_enabled() and _camera_enabled(camera_id) and _camera_diagnostic_visible(camera_id)
 	node.transform = _camera_transform(camera_id)
 	node.call("set_shared_memory_name", _camera_shm_name(camera_id))
+	if _capture_publisher() and node.has_method("set_publish_shared_memory_name"):
+		node.call("set_publish_shared_memory_name", _camera_shm_name(camera_id))
 	if _capture_only() and node.has_method("set_capture_only"):
 		node.call("set_capture_only", true)
 		node.call("set_publish_shared_memory_name", _camera_shm_name(camera_id))

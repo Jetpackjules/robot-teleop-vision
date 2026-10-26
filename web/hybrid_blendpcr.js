@@ -24,7 +24,7 @@ void main() {
 
 // Keep one unique provoking vertex per triangle for its exact integer ID and
 // validity. The other corners use shared grid vertices. No samples, triangles
-// or output pixels are removed. Masked robot triangles retain the old path.
+// or output pixels are removed. The provoking vertex also validates arm masks.
 const INDEXED_METADATA_VERTEX_SHADER = `#version 300 es
 precision highp float;
 precision highp int;
@@ -36,6 +36,9 @@ uniform ivec2 u_size;
 uniform vec4 u_intrinsics;
 uniform mat4 u_model;
 uniform mat4 u_view_projection;
+uniform highp int u_robot_mask_enabled;
+uniform vec4 u_mask_capsule_a[6];
+uniform vec4 u_mask_capsule_b[6];
 #ifdef INSTANCED_GRID
 uniform ivec2 u_tile_size;
 uniform int u_tile_columns;
@@ -47,6 +50,22 @@ layout(location=1) in uint a_source_vertex;
 out vec3 v_world_position;
 flat out float v_valid;
 flat out uint v_triangle_id;
+vec3 source_world(ivec2 pixel) {
+  float z=float(texelFetch(u_depth,pixel,0).r)*0.001;
+  return (u_model*vec4((float(pixel.x)-u_intrinsics.z)*z/u_intrinsics.x,
+    -(float(pixel.y)-u_intrinsics.w)*z/u_intrinsics.y,-z,1.0)).xyz;
+}
+bool robot_masked(vec3 world) {
+  for(int index=0;index<6;index++) {
+    vec3 segment=u_mask_capsule_b[index].xyz-u_mask_capsule_a[index].xyz;
+    float length_squared=dot(segment,segment);
+    float along=length_squared>0.000001
+      ?clamp(dot(world-u_mask_capsule_a[index].xyz,segment)/length_squared,0.0,1.0):0.0;
+    vec3 offset=world-u_mask_capsule_a[index].xyz-segment*along;
+    if(dot(offset,offset)<=u_mask_capsule_a[index].w*u_mask_capsule_a[index].w)return true;
+  }
+  return false;
+}
 void main() {
   int vertex_id=gl_VertexID;
   ivec2 grid_size=u_size,tile_origin=ivec2(0);
@@ -67,6 +86,15 @@ void main() {
     vec4 quality=inside?texelFetch(u_rig_quality,ivec3(top_left,u_rig_index),0):vec4(0);
     v_valid=((primitive%2)==0?quality.r:quality.g)>0.5?1.0:0.0;
     v_triangle_id=uint((top_left.y*(u_size.x-1)+top_left.x)*2+primitive%2+1);
+    // Match the original mask's rejection of a complete native triangle
+    // whenever any of its three measured corners belongs to the scanned arm.
+    if(inside&&v_valid>0.5&&u_robot_mask_enabled==1) {
+      bool second=(primitive%2)==1;
+      ivec2 a=top_left+ivec2(second?1:0,0),b=top_left+ivec2(1,second?1:0),c=top_left+ivec2(0,1);
+      if(robot_masked(source_world(a))||robot_masked(source_world(b))||robot_masked(source_world(c))) {
+        v_valid=0.0;v_triangle_id=0u;
+      }
+    }
     // Invalid triangles must be degenerate before rasterization. Moving only
     // their provoking corner off-screen makes enormous discarded triangles
     // around depth holes, wasting fill rate despite identical final pixels.
@@ -226,7 +254,7 @@ void main() {
   // Thin surfaces can disappear from the small dominance grid. They still
   // retain their full-resolution coverage and their best local source color.
   out_color=vec4(u_depth_only_enabled==1?depth_surface_gray(best_normal)
-    :u_rig_original_rgb_enabled==1?rig_projected_color(best_world,normalize(best_normal),color_owner>=0?best_color:vec3(0.34))
+    :u_rig_original_rgb_enabled==1?rig_projected_color(best_world,normalize(best_normal),color_owner>=0?best_color:vec3(0.34),owner)
     :total>0.00001?to_srgb(color/total):color_owner>=0?best_color:vec3(0.34),1.0);
   vec4 clip=u_projection*u_view*vec4(best_world,1.0);
   gl_FragDepth=(clip.z/clip.w)*0.5+0.5;
@@ -434,9 +462,9 @@ export class BrowserBlendPCR {
       const columns=source.width>1?Math.ceil((source.x+source.width-1-x)/32):0;
       const rows=source.height>1?Math.ceil((source.y+source.height-1-y)/8):0;
       this.cropStats.sourceCells+=(camera.width-1)*(camera.height-1);
-      const tiles=this.indexedMetadata&&this.instancedMetadata&&!maskCapsules&&this.useWorkspaceCulling!==false
+      const tiles=this.indexedMetadata&&this.instancedMetadata&&this.useWorkspaceCulling!==false
         ?workspaceVisibleTiles(camera,contextCrop):null;
-      this.cropStats.submittedCells+=tiles?tiles.cellCount:this.indexedMetadata&&this.instancedMetadata&&!maskCapsules
+      this.cropStats.submittedCells+=tiles?tiles.cellCount:this.indexedMetadata&&this.instancedMetadata
         ? Math.max(0,Math.min(camera.width-1-x,columns*32))*Math.max(0,Math.min(camera.height-1-y,rows*8))
         : (camera.width-1)*(camera.height-1);
     }
@@ -448,7 +476,7 @@ export class BrowserBlendPCR {
       const key=`${rig.version}:${view.viewProjection}:${maskCapsules?.starts}:${maskCapsules?.ends}:${settings.white_background_enabled}:${settings.depth_only_enabled===true}:${crop?.key}:${this.useWorkspaceCulling!==false}`;
       if(this.cacheKey!==key) {
         // One dense native mesh pass per camera; no second color rasterization.
-        const indexed=this.indexedMetadata&&!maskCapsules;
+        const indexed=this.indexedMetadata;
         const instanced=indexed&&this.instancedMetadata;
         const u=this.use(instanced?"metadataInstanced":indexed?"metadataIndexed":"metadata",rig,view);
         bindWorkspaceCrop(gl,this.programs[instanced?'metadataInstanced':indexed?'metadataIndexed':'metadata'].program,workspaceCropBounds(settings,WORKSPACE_CROP_CONTEXT));
