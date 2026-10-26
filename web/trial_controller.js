@@ -18,6 +18,7 @@ export class TrialController {
     this.head = byId('head-tracking-enabled');
     this.cameras = byId('rgb-camera-select');
     this.duration = byId('trial-duration');
+    this.taskInput = byId('trial-task-input');
     this.panel = byId('advanced-setup');
     this.state = this.restore();
     this.pending = false;
@@ -44,6 +45,12 @@ export class TrialController {
     recording.outcome.addEventListener('change', () => this.render());
     byId('trial-outcome').addEventListener('change', event => {recording.outcome.value = event.target.value;});
     byId('trial-action').addEventListener('click', () => this.act());
+    byId('trial-task-cancel').addEventListener('click', () => this.cancelTaskEdit());
+    this.taskInput.addEventListener('keydown', event => {
+      if (event.isComposing) return;
+      if (event.key === 'Enter') { event.preventDefault(); this.saveTask(); }
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); this.cancelTaskEdit(); }
+    });
     byId('guided-trials').addEventListener('change', event => {
       this.state.guided = event.target.checked;
       this.persist();
@@ -127,6 +134,7 @@ export class TrialController {
   }
   async act() {
     if (this.recording.busy || this.pending) return;
+    if (this.taskEditing) { this.saveTask(); return; }
     if (this.active) {
       if (this.recording.status?.state !== 'saving' && this.recording.status?.is_owner !== false)
         await this.recording.command('stop');
@@ -141,10 +149,35 @@ export class TrialController {
       if (!this.state.finished) await this.apply(); else this.render();
       return;
     }
-    if (!this.recording.task.value.trim()) { this.openSettings('session'); this.recording.task.focus(); return; }
+    if (!this.recording.task.value.trim()) { this.editTask(); return; }
     if (this.state.guided && (!this.matchesView || this.state.finished)) return;
     if (this.condition === 'head_3d' && this.state.guided && !window.godotWebcamTrackerLatest?.active) return;
     await this.recording.command('start');
+  }
+
+  editTask() {
+    if (this.active || this.recording.busy || this.pending) return;
+    if (!this.panel.hidden) this.closeSettings();
+    this.taskEditing = true;
+    this.taskInput.value = this.recording.task.value;
+    this.render(); this.taskInput.focus(); this.taskInput.select();
+  }
+  saveTask() {
+    if (!this.taskEditing || this.active || this.recording.busy || this.pending) return;
+    this.taskInput.value = this.taskInput.value.trim();
+    if (!this.taskInput.reportValidity()) return;
+    this.taskEditing = false;
+    this.recording.task.value = this.taskInput.value;
+    this.recording.task.dispatchEvent(new Event('input', {bubbles: true}));
+    this.render();
+    const action = byId('trial-action');
+    (action.disabled ? byId('open-advanced') : action).focus();
+  }
+  cancelTaskEdit(focus = true) {
+    if (!this.taskEditing) return;
+    this.taskEditing = false;
+    this.render();
+    if (focus) byId('trial-action').focus();
   }
 
   switchCamera(direction) {
@@ -166,13 +199,17 @@ export class TrialController {
     const mismatch = guided && !this.matchesView;
     const needsTracking = this.head.checked && this.display.value !== 'rgb_camera' && !window.godotWebcamTrackerLatest?.active;
     const needsView = guided && !this.viewReady();
+    if (locked) this.taskEditing = false;
+    const editing = !!this.taskEditing;
+    byId('trial-task-editor').hidden = !editing;
+    byId('trial-task').hidden = editing;
     const action = byId('trial-action');
     byId('trial-hud').dataset.state = status.state;
     byId('trial-position').textContent = guided ? `${this.state.index + 1}/${this.state.order.length}` : 'Free session';
     byId('trial-position').setAttribute('aria-label', guided ? `Trial ${this.state.index + 1} of ${this.state.order.length}` : 'Free session');
     byId('trial-condition').textContent = guided ? CONDITIONS[this.condition]
       : this.display.value === 'rgb_camera' ? CONDITIONS.fixed_rgb : this.head.checked ? CONDITIONS.head_3d : CONDITIONS.mouse_3d;
-    const task = recorder.task.value.trim() || 'Add a task in Settings';
+    const task = recorder.task.value.trim() || 'Task not set';
     byId('trial-task').textContent = task; byId('trial-task').title = task;
     if (active) this.lastElapsed = Number(status.elapsed_seconds) || 0;
     else if (saved) this.lastElapsed = Number(saved.duration_seconds) || this.lastElapsed;
@@ -181,7 +218,7 @@ export class TrialController {
       : active ? 'Recording' : done ? 'Complete' : saved ? 'Saved' : status.state === 'error' ? 'Interrupted' : 'Ready';
     byId('trial-recording-state').textContent = label;
     byId('trial-recording-state').hidden = label === 'Ready';
-    action.textContent = this.pending ? 'Switching…' : recorder.busy ? 'Please wait…' : active ? status.state === 'saving' ? 'Saving…' : 'Finish trial'
+    action.textContent = editing ? 'Save task' : this.pending ? 'Switching…' : recorder.busy ? 'Please wait…' : active ? status.state === 'saving' ? 'Saving…' : 'Finish trial'
       : done ? 'Complete' : saved ? this.state.index === 2 ? 'End session' : 'Next trial' : needsTask ? 'Set task' : guided ? 'Start trial' : 'Start recording';
     action.disabled = this.pending || recorder.busy || status.state === 'saving' || done
       || (active ? status.is_owner === false : saved ? !!recorder.offline
@@ -281,6 +318,7 @@ export class TrialController {
     document.querySelector('.advanced-body').scrollTop = 0;
   }
   openSettings(tab) {
+    this.cancelTaskEdit(false);
     this.panel.hidden = false;
     if (tab) this.selectTab(tab);
     byId('open-advanced').setAttribute('aria-expanded', 'true');

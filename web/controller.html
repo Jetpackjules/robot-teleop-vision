@@ -320,7 +320,11 @@
 
     <section id="trial-hud" aria-label="Current trial">
       <div class="trial-copy">
-        <h1 id="trial-task">Add a task in Settings</h1>
+        <h1 id="trial-task">Task not set</h1>
+        <div id="trial-task-editor" hidden>
+          <input id="trial-task-input" type="text" aria-label="Task instruction" required maxlength="500" autocomplete="off">
+          <button id="trial-task-cancel" type="button" aria-label="Cancel task edit"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button>
+        </div>
         <div class="trial-meta"><span id="trial-position" aria-label="Trial 1 of 3">1/3</span><span class="meta-divider" aria-hidden="true">/</span><span id="trial-condition">Fixed cameras</span></div>
       </div>
       <div class="trial-clock"><output id="trial-timer" aria-label="Trial elapsed time" aria-live="off">00:00</output><span id="trial-recording-state" hidden></span></div>
