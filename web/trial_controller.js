@@ -3,18 +3,21 @@ const DEFAULT_ORDER = Object.keys(CONDITIONS);
 const DEFAULT_TASK = 'Place the block in the cup';
 const RENDERERS = new Set(['point_cloud', 'shader_mesh', 'independent_mesh', 'unified_mesh', 'blendpcr']);
 const STORAGE_KEY = 'robotTeleopTrialSession.v1';
-const ACTIVE = new Set(['preparing', 'recording', 'saving']);
+const ACTIVE = new Set(['preparing', 'recording', 'paused', 'saving']);
 const byId = id => document.getElementById(id);
 const formatTime = seconds => `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
 
 /** A small facilitator layer over the existing view and host-recording controls. */
 export class TrialController {
-  constructor({recording, applyCondition, resetView, resetTracking, viewReady = () => true}) {
+  constructor({recording, applyCondition, resetView, resetTracking, pauseRobot, resumeRobot, finishRobotPause, viewReady = () => true}) {
     this.recording = recording;
     this.applyView = applyCondition;
     this.resetView = resetView;
     this.resetTracking = resetTracking;
     this.viewReady = viewReady;
+    this.pauseRobot = pauseRobot;
+    this.resumeRobot = resumeRobot;
+    this.finishRobotPause = finishRobotPause;
     this.display = byId('display-mode');
     this.head = byId('head-tracking-enabled');
     this.cameras = byId('rgb-camera-select');
@@ -48,6 +51,7 @@ export class TrialController {
     recording.outcome.addEventListener('change', () => this.render());
     byId('trial-outcome').addEventListener('change', event => {recording.outcome.value = event.target.value;});
     byId('trial-action').addEventListener('click', () => this.act());
+    byId('trial-pause').addEventListener('click', () => this.togglePause());
     byId('guided-trials').addEventListener('change', event => {
       this.state.guided = event.target.checked;
       this.persist();
@@ -130,7 +134,7 @@ export class TrialController {
     await this.apply();
   }
   async act() {
-    if (this.recording.busy || this.pending) return;
+    if (this.recording.busy || this.pending || this.pausePending) return;
     if (this.active) {
       if (this.recording.status?.state !== 'saving' && this.recording.status?.is_owner !== false)
         await this.recording.command('stop');
@@ -151,6 +155,37 @@ export class TrialController {
     await this.recording.command('start');
   }
 
+  async togglePause() {
+    const recorder = this.recording, status = recorder.status || {};
+    if (this.pending || this.pausePending || recorder.busy || recorder.offline || status.is_owner === false
+      || status.pause_supported !== true || !['recording', 'paused'].includes(status.state)
+      || typeof this.pauseRobot !== 'function' || typeof this.resumeRobot !== 'function') return;
+    const resume = status.state === 'paused';
+    this.pausePending = resume ? 'resuming' : 'pausing';
+    this.viewError = ''; this.render();
+    try {
+      if (resume) {
+        if (!await recorder.command('resume')) return;
+        try {
+          await this.resumeRobot();
+          this.robotPaused = false;
+        } catch (error) {
+          await this.pauseRobot().catch(() => {});
+          await recorder.command('pause');
+          throw new Error(`${error.message || error} Arm remains held.`);
+        }
+      } else {
+        this.robotPaused = true;
+        await this.pauseRobot();
+        await recorder.command('pause');
+      }
+    } catch (error) {
+      this.viewError = String(error.message || error);
+    } finally {
+      this.pausePending = null; this.render();
+    }
+  }
+
   switchCamera(direction) {
     const options = Array.from(this.cameras.options).filter(option => option.value && !option.disabled);
     if (this.display.value !== 'rgb_camera' || options.length < 2) return;
@@ -162,7 +197,11 @@ export class TrialController {
 
   render() {
     const recorder = this.recording, status = recorder.status || {};
-    const active = this.active, locked = active || recorder.busy || this.pending;
+    const active = this.active, locked = active || recorder.busy || this.pending || !!this.pausePending;
+    if (this.robotPaused && !this.pausePending && !['recording', 'paused'].includes(status.state)) {
+      this.robotPaused = false;
+      this.finishRobotPause?.();
+    }
     const saved = !active && this.saved;
     const guided = this.state.guided;
     const done = guided && this.state.finished;
@@ -179,18 +218,24 @@ export class TrialController {
     const task = recorder.task.value.trim() || 'Task not configured';
     byId('trial-task').textContent = task; byId('trial-task').title = task;
     if (active) this.lastElapsed = Number(status.elapsed_seconds) || 0;
-    else if (saved) this.lastElapsed = Number(saved.duration_seconds) || this.lastElapsed;
+    else if (saved) this.lastElapsed = Number(saved.active_duration_seconds ?? saved.duration_seconds) || this.lastElapsed;
     byId('trial-timer').textContent = formatTime(this.lastElapsed);
     const label = this.pending ? 'Switching…' : status.state === 'preparing' ? 'Preparing' : status.state === 'saving' ? 'Saving…'
-      : active ? 'Recording' : done ? 'Complete' : saved ? 'Saved' : status.state === 'error' ? 'Interrupted' : 'Ready';
+      : status.state === 'paused' ? 'Paused' : active ? 'Recording' : done ? 'Complete' : saved ? 'Saved' : status.state === 'error' ? 'Interrupted' : 'Ready';
     byId('trial-recording-state').textContent = label;
     byId('trial-recording-state').hidden = label === 'Ready';
     action.textContent = this.pending ? 'Switching…' : recorder.busy ? 'Please wait…' : active ? status.state === 'saving' ? 'Saving…' : 'Finish trial'
       : done ? 'Complete' : saved ? this.state.index === 2 ? 'End session' : 'Next trial' : guided ? 'Start trial' : 'Start recording';
-    action.disabled = this.pending || recorder.busy || status.state === 'saving' || done
+    action.disabled = this.pending || !!this.pausePending || recorder.busy || status.state === 'saving' || done
       || (active ? status.is_owner === false : saved ? !!recorder.offline
         : needsTask || !!recorder.offline || !status.supported || !status.ready || !status.controller_active || mismatch || needsTracking || needsView);
     recorder.startButton.disabled ||= this.pending || (guided && (mismatch || needsTracking || needsView || !!saved || done));
+    const pause = byId('trial-pause');
+    pause.hidden = !['recording', 'paused'].includes(status.state) || status.pause_supported !== true
+      || typeof this.pauseRobot !== 'function' || typeof this.resumeRobot !== 'function' || status.is_owner === false;
+    pause.disabled = !!this.pausePending || recorder.busy || !!recorder.offline || !!this.pending;
+    pause.textContent = this.pausePending === 'pausing' ? 'Pausing…' : this.pausePending === 'resuming' ? 'Resuming…'
+      : status.state === 'paused' ? 'Resume' : 'Pause';
     const progress = byId('trial-progress');
     progress.hidden = !guided;
     progress.max = this.state.timeTargetSeconds;

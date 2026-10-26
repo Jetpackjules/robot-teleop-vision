@@ -145,6 +145,9 @@ class So101Operator(GenericRobotOperator):
     def hold_message(self) -> dict[str, Any]:
         return {"type": "arm_hold"}
 
+    def is_hold(self, message: Mapping[str, Any]) -> bool:
+        return message.get("type") == "arm_hold"
+
     def is_motion(self, message: Mapping[str, Any]) -> bool:
         return message.get("type") in self._motion_types
 

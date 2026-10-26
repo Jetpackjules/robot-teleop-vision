@@ -270,6 +270,7 @@ export class So101ArmController extends EventTarget {
   }
 
   send(message) {
+    if (this.trialSuspended && !["arm_status_request", "arm_hold"].includes(message.type)) return false;
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return false;
     if (this.socket.bufferedAmount > 32 * 1024) return false;
     this.socket.send(JSON.stringify(message));
@@ -535,8 +536,65 @@ export class So101ArmController extends EventTarget {
     this.keyboardKeys.clear();
     this.keyboardKeyOrder.clear();
     this.latest.keyboardDeadman = false;
-    this.send({ type: "arm_hold" });
+    const sent = this.send({ type: "arm_hold" });
     this.emitStatus();
+    return sent;
+  }
+
+  waitForTrialStatus(predicate) {
+    if (predicate(this.latest)) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const finish = (error) => {
+        window.clearTimeout(timer);
+        this.removeEventListener("status", check);
+        if (error) reject(error); else resolve();
+      };
+      const check = () => {
+        if (!this.latest.serverConnected) finish(new Error("Arm connection was lost. The trial remains held."));
+        else if (predicate(this.latest)) finish();
+      };
+      const timer = window.setTimeout(() => finish(new Error("The arm did not confirm the trial control change.")), 3000);
+      this.addEventListener("status", check);
+    });
+  }
+
+  async pauseTrial() {
+    if (!this.latest.serverConnected) throw new Error("Arm control server is not connected.");
+    if (!this.trialSuspended) {
+      this.trialWasArmed = this.latest.armed === true;
+      this.trialControlMode = this.latest.controlMode;
+      // A paused study must not trigger the optional idle return to rest.
+      this.send({type: "arm_idle_return_settings", enabled: false, timeout_seconds: this.idleReturnTimeoutSeconds || 600});
+    }
+    this.trialSuspended = true;
+    if (!this.hold()) throw new Error("Could not send Hold to the arm.");
+    await this.waitForTrialStatus(status => status.followerConnected && status.state === "hold" && !status.armed);
+  }
+
+  async resumeTrial() {
+    if (!this.trialSuspended) return;
+    if (this.trialWasArmed && this.latest.controlMode !== this.trialControlMode)
+      throw new Error("Restore the arm control mode used before Pause.");
+    this.trialSuspended = false;
+    try {
+      if (this.trialWasArmed) {
+        this.enableArm();
+        await this.waitForTrialStatus(status => status.followerConnected && status.armed === true);
+      }
+      this.trialWasArmed = false;
+      this.sendIdleReturnSettings();
+    } catch (error) {
+      this.trialSuspended = true;
+      this.hold();
+      throw error;
+    }
+  }
+
+  finishTrialPause() {
+    if (!this.trialSuspended) return;
+    this.trialSuspended = false;
+    this.trialWasArmed = false;
+    this.sendIdleReturnSettings();
   }
 
   returnToRest() {
@@ -610,6 +668,7 @@ export class So101ArmController extends EventTarget {
   }
 
   handleKeyboardEvent(event, pressed) {
+    if (this.trialSuspended) return;
     if (!this.latest.keyboardConnected || !KEYBOARD_CODES.has(event.code)) return;
     if (isTextEditingTarget(event.target)) return;
     event.preventDefault();

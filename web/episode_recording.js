@@ -45,8 +45,8 @@ export class EpisodeRecordingControl {
   }
 
   async command(command) {
-    if (this.busy) return;
-    if (command === 'start' && !this.task.reportValidity()) return;
+    if (this.busy) return false;
+    if (command === 'start' && !this.task.reportValidity()) return false;
     this.revision++;
     this.busy = true;
     this.error = this.commandError = '';
@@ -66,8 +66,10 @@ export class EpisodeRecordingControl {
       this.status = result;
       this.offline = false;
       if (command === 'start') this.outcome.value = 'unrated';
+      return true;
     } catch (error) {
       this.error = this.commandError = error.message;
+      return false;
     } finally {
       this.busy = false;
       this.render();
@@ -76,7 +78,7 @@ export class EpisodeRecordingControl {
 
   render() {
     const status = this.status;
-    const active = ['preparing', 'recording', 'saving'].includes(status?.state);
+    const active = ['preparing', 'recording', 'paused', 'saving'].includes(status?.state);
     const finishing = status?.state === 'saving';
     const owner = status?.is_owner !== false;
     this.startButton.disabled = this.busy || active || !status?.ready || !status?.controller_active || !this.task.value.trim();

@@ -86,6 +86,9 @@ class GenericRobotOperator:
     def hold_message(self) -> dict[str, Any]:
         return self._system_command("hold")
 
+    def is_hold(self, message: Mapping[str, Any]) -> bool:
+        return message.get("control_space") == "system" and message.get("command") == "hold"
+
     def _system_command(self, command: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return {
             "protocol": PROTOCOL,

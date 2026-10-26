@@ -563,6 +563,10 @@ class So101WebModule {
     this.renderStatus();
   }
 
+  pauseTrial() { return window.so101ArmController.pauseTrial(); }
+  resumeTrial() { return window.so101ArmController.resumeTrial(); }
+  finishTrialPause() { window.so101ArmController.finishTrialPause(); }
+
   stop() { window.so101ArmController?.shutdown(); }
 }
 

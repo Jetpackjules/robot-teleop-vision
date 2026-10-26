@@ -324,7 +324,10 @@
         <div class="trial-meta"><span id="trial-position" aria-label="Trial 1 of 3">1/3</span><span class="meta-divider" aria-hidden="true">/</span><span id="trial-condition">Fixed cameras</span></div>
       </div>
       <div class="trial-clock"><output id="trial-timer" aria-label="Trial elapsed time" aria-live="off">00:00</output><span id="trial-recording-state" hidden></span></div>
-      <button id="trial-action" class="primary" type="button" disabled>Start trial</button>
+      <div class="trial-actions">
+        <button id="trial-pause" type="button" hidden>Pause</button>
+        <button id="trial-action" class="primary" type="button" disabled>Start trial</button>
+      </div>
       <progress id="trial-progress" value="0" max="600" aria-label="Trial elapsed time"></progress>
       <p id="trial-message" role="status" aria-live="polite" hidden></p>
       <div id="trial-outcome-control" hidden><label>Outcome<select id="trial-outcome"><option value="unrated">Not rated</option><option value="success">Success</option><option value="failure">Failure</option></select></label></div>

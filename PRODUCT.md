@@ -46,6 +46,7 @@ These mechanisms describe the implementation. Improved task performance, presenc
 - Mouse 3D trials use the existing 3D scene with head tracking off. Head-tracked trials use that scene with head tracking on and an accessible reset action. Keep the selected 3D renderer consistent between these two conditions.
 - The facilitator chooses the condition order. The implemented default is fixed cameras, mouse 3D, then head tracking; this is configurable rather than a requirement of the study protocol.
 - The facilitator explicitly clicks Next after the host has finished saving a complete episode. Do not automatically advance conditions. Discarded or incomplete recordings do not qualify as a completed trial.
+- Pause/Resume is available beside Finish during a trial. Pause holds arm control and freezes task time while original RGB and robot data continue recording with pause annotations. Resume is explicit and only restores previously armed control after module readiness checks. Finish while paused saves without resuming the arm.
 - Preserve free configuration and recording outside guided trials.
 
 ### Controls and configuration

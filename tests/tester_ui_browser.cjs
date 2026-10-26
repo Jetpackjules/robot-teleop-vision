@@ -53,6 +53,7 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
     assert.equal(await page.locator('#trial-action').textContent(), 'Start trial', 'preset task is immediately ready to start');
     assert.equal(await page.locator('#trial-task-editor').count(), 0, 'participant view has no task-entry workflow');
     assert.equal(await page.locator('#trial-task').textContent(), 'Place the block in the cup');
+    assert.equal(await page.locator('#trial-pause').isVisible(), false, 'Pause is only shown during a trial');
     assert.equal(await page.locator('#episode-recording').getAttribute('data-recording-state'), 'idle', 'loading the preset never starts recording');
     await page.locator('#open-advanced').click();
     const taskInput = page.locator('[data-recording-task]');
@@ -96,6 +97,50 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
       assert.ok(Number(await page.locator('#trial-progress').getAttribute('value')) > 0, 'time bar advances during the trial');
       assert.equal(await page.locator('#trial-duration').isDisabled(), true);
       assert.equal(await page.locator('#display-mode').isDisabled(), true, 'condition cannot change during a trial');
+      await page.locator('#trial-pause').click();
+      await page.waitForFunction(() => document.getElementById('trial-pause').textContent === 'Resume'
+        && !document.getElementById('trial-pause').disabled);
+      assert.equal(await page.locator('#trial-recording-state').textContent(), 'Paused');
+      assert.equal(await page.locator('#trial-action').textContent(), 'Finish trial');
+      const paused = await page.evaluate(async () => ({
+        status: await (await fetch('/api/v1/recording?client=recording-fixture')).json(),
+        timer: document.getElementById('trial-timer').textContent,
+        progress: document.getElementById('trial-progress').value,
+        held: window.so101ArmController.trialSuspended && !window.so101ArmController.latest.armed,
+      }));
+      assert.equal(paused.held, true, 'Pause is acknowledged by the simulated arm');
+      await page.waitForTimeout(500);
+      const duringPause = await page.evaluate(async () => await (await fetch('/api/v1/recording?client=recording-fixture')).json());
+      assert.equal(duringPause.elapsed_seconds, paused.status.elapsed_seconds, 'host task clock freezes');
+      assert.ok(duringPause.frames > paused.status.frames, 'original capture continues through the pause');
+      assert.equal(await page.locator('#trial-timer').textContent(), paused.timer);
+      assert.equal(Number(await page.locator('#trial-progress').getAttribute('value')), paused.progress);
+      assert.equal(await page.locator('#trial-position').textContent(), `${index + 1}/3`);
+      if (index === 1) {
+        const rejected = await page.evaluate(async () => {
+          const socket = window.so101ArmController.socket;
+          const received = new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {socket.removeEventListener('message', check); reject(new Error('No paused-command rejection'));}, 3000);
+            function check(event) {
+              const status = JSON.parse(event.data);
+              if (!String(status.fault).includes('Trial is paused')) return;
+              clearTimeout(timer); socket.removeEventListener('message', check); resolve(status);
+            }
+            socket.addEventListener('message', check);
+          });
+          socket.send(JSON.stringify({type: 'arm_enable', source: 'keyboard'}));
+          return await received;
+        });
+        assert.equal(rejected.armed, false, 'server blocks Enable even if browser gate is bypassed');
+        await capture(resolve(output, 'trial-paused-laptop.png'));
+      }
+      if (index !== 0) {
+        await page.locator('#trial-pause').click();
+        await page.waitForFunction(() => document.getElementById('trial-pause').textContent === 'Pause'
+          && !document.getElementById('trial-pause').disabled);
+        assert.equal(await page.evaluate(() => window.so101ArmController.trialSuspended), false);
+        assert.equal(await page.evaluate(() => window.so101ArmController.latest.armed), false, 'Resume preserves an initially unarmed robot');
+      }
       if (index === 1) {
         await page.waitForFunction(() => window.getGodotHybridRendererStatus?.().robotModelsLoaded === 7);
         const recordingURL = '**/api/v1/recording?*';
@@ -134,6 +179,10 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
       assert.equal(manifest.outcome, index === 1 ? 'failure' : 'success');
       assert.equal(manifest.trial.display_mode, index ? 'blendpcr' : 'rgb_camera');
       assert.equal(manifest.cameras.length, 2, 'host records all cameras, independent of selected view');
+      assert.equal(manifest.pauses.length, 1);
+      assert.ok(manifest.pauses[0].end_seconds > manifest.pauses[0].start_seconds);
+      assert.equal(await page.evaluate(() => window.so101ArmController.trialSuspended), false, 'Finish releases the trial input gate without enabling');
+      assert.equal(await page.locator('#trial-pause').isVisible(), false);
       episodes.push(manifest.episode_id);
       await page.locator('#trial-action').click();
       if (index < 2) {
@@ -204,6 +253,7 @@ const server = spawn(process.env.TEST_PYTHON || resolve(root, '.venv/Scripts/pyt
       outcomes: true, cameraArrows: true, tabsAndFocus: true, holdInSettings: true, freeConfiguration: true,
       elapsedTimeProgress: true, timeTargetNoAutoStop: true,
       presetTask: true, taskAcrossConditions: true, facilitatorTaskOverride: true,
+      pauseResume: true, finishWhilePaused: true, pausedCommandGate: true, rawCaptureContinues: true,
       actualCadModels: 7, layouts, episodeRoot};
     writeFileSync(resolve(output, 'browser-results.json'), JSON.stringify(result, null, 2));
     console.log(JSON.stringify(result));

@@ -1386,6 +1386,9 @@
     robotModule.bind?.({ sendViewSettings, updateStatus });
     robotModule.start?.({ sendViewSettings, updateStatus });
     const trialController = new TrialController({recording: episodeRecording,
+      pauseRobot: typeof robotModule.pauseTrial === 'function' ? () => robotModule.pauseTrial() : null,
+      resumeRobot: typeof robotModule.resumeTrial === 'function' ? () => robotModule.resumeTrial() : null,
+      finishRobotPause: () => robotModule.finishTrialPause?.(),
       applyCondition: async (condition, renderer) => {
         const mode = condition === 'fixed_rgb' ? 'rgb_camera' : renderer;
         displayModeSelect.value = displayModes.includes(mode) ? mode : defaultDisplayMode;

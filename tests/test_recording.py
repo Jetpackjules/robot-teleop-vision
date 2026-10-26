@@ -146,6 +146,74 @@ def test_trial_metadata_survives_host_save(tmp_path):
         assert manifest['trial'] == TRIAL
 
 
+def test_pause_freezes_trial_time_without_dropping_capture_and_finishes_paused(tmp_path):
+    with recorder_at(tmp_path) as (recorder, _, _):
+        with pytest.raises(RecordingError):
+            recorder.set_paused('page-a', True)
+        recorder.start('page-a', 'Place the block in the cup', trial=TRIAL)
+        wait_for(lambda: recorder.status()['frames'] >= 4)
+        with pytest.raises(RecordingError, match='another controller'):
+            recorder.set_paused('other', True)
+        paused = recorder.set_paused('page-a', True)
+        assert paused['state'] == 'paused' and paused['pause_supported']
+        recorder.set_paused('page-a', True)  # A retried request is idempotent.
+        wait_for(lambda: recorder.status()['frames'] >= paused['frames']+4)
+        assert recorder.status()['elapsed_seconds'] == paused['elapsed_seconds']
+        assert len(recorder.pauses) == 1 and recorder.pauses[0]['end_seconds'] is None
+        recorder.set_paused('page-a', False)
+        recorder.set_paused('page-a', False)
+        wait_for(lambda: recorder.status()['elapsed_seconds'] > paused['elapsed_seconds']+.1)
+        assert recorder.pauses[0]['end_seconds'] > recorder.pauses[0]['start_seconds']
+        paused = recorder.set_paused('page-a', True)
+        wait_for(lambda: recorder.status()['frames'] >= paused['frames']+3)
+        recorder.stop('page-a', outcome='success')
+        wait_for(lambda: recorder.status()['state'] == 'idle')
+        saved = recorder.status()['last_saved']
+        manifest, arrays = inspect_episode(tmp_path/saved['episode'])
+        assert manifest['status'] == 'complete' and manifest['trial'] == TRIAL
+        assert len(manifest['pauses']) == 2
+        assert all(p['end_seconds'] > p['start_seconds'] for p in manifest['pauses'])
+        assert saved['active_duration_seconds'] < saved['duration_seconds']-.25
+        assert manifest['active_duration_seconds'] == saved['active_duration_seconds']
+        mask = arrays['trial_paused']
+        assert mask.sum() >= 4 and (~mask).sum() >= 4
+        assert np.all(np.diff(arrays['timestamp']) > 0)
+        assert np.all(np.diff(arrays['trial_elapsed_seconds']) >= -1e-6)
+        assert np.ptp(arrays['trial_elapsed_seconds'][mask][-2:]) < 1e-6
+        rows = [json.loads(line) for line in (tmp_path/saved['episode']/'frames.jsonl').read_text().splitlines()]
+        assert [r['trial_paused'] for r in rows] == mask.tolist()
+        assert all(len(list((tmp_path/saved['episode']/c['key']).glob('*.jpg'))) == manifest['frames'] for c in manifest['cameras'])
+
+        class Dataset:
+            @classmethod
+            def create(cls, **kwargs):
+                kwargs['root'].mkdir()
+                cls.frames, cls.features = [], kwargs['features']
+                return cls()
+
+            def add_frame(self, frame):
+                self.frames.append(frame)
+
+            def save_episode(self):
+                pass
+
+            def finalize(self):
+                pass
+
+        summary = export_episodes(tmp_path/saved['episode'], tmp_path/'export', dataset_class=Dataset)
+        assert summary['episodes'][0]['pauses'] == manifest['pauses']
+        exported_mask = [int(frame['annotation.trial_paused'][0]) for frame in Dataset.frames]
+        assert 0 in exported_mask and 1 in exported_mask
+        assert 'annotation.trial_paused' in Dataset.features
+
+        # Older captures remain exportable, with explicitly unpaused annotations.
+        arrays.pop('trial_paused')
+        arrays.pop('trial_elapsed_seconds')
+        np.savez_compressed(tmp_path/saved['episode']/'episode.npz', **arrays)
+        export_episodes(tmp_path/saved['episode'], tmp_path/'legacy-export', dataset_class=Dataset)
+        assert all(frame['annotation.trial_paused'][0] == 0 for frame in Dataset.frames)
+
+
 @pytest.mark.parametrize('patch', [
     {'index': 0}, {'index': True}, {'index': 4}, {'total': 31}, {'session_id': '../test'},
     {'session_id': []}, {'condition': 'invented'}, {'display_mode': 'blendpcr'}, {'extra': 'unbounded'},
@@ -320,7 +388,8 @@ def request(port, method, path, body=None, origin=True):
     return status, json.loads(payload) if payload.startswith(b'{') else payload
 
 
-def test_real_http_and_existing_multipart_rgb_record_without_motor_commands(tmp_path):
+@pytest.mark.parametrize('pause_trial', [False, True])
+def test_real_http_and_existing_multipart_rgb_record_without_motor_commands(tmp_path, monkeypatch, pause_trial):
     capture = ThreadingHTTPServer(('127.0.0.1', 0), CaptureHandler)
     capture.daemon_threads = True
     capture.stopping, capture.requests = threading.Event(), []
@@ -354,6 +423,24 @@ def test_real_http_and_existing_multipart_rgb_record_without_motor_commands(tmp_
         assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'start', 'client': 'page-a', 'task': 'Synthetic HTTP trial', 'trial': TRIAL})[0] == 200
         wait_for(lambda: server.episode_recorder.status()['frames'] >= 4)
         assert request(server.server_port, 'GET', '/api/v1/recording?client=page-a')[1]['state'] == 'recording'
+        if pause_trial:
+            assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'pause', 'client': 'other'})[0] == 409
+            with pytest.raises(socket.timeout):
+                commands.recvfrom(1024)
+            assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'pause', 'client': 'page-a'})[1]['state'] == 'paused'
+            assert json.loads(commands.recvfrom(1024)[0])['type'] == 'arm_hold'
+            assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'resume', 'client': 'page-a'})[1]['state'] == 'recording'
+            with pytest.raises(socket.timeout):  # Recorder Resume never enables motors.
+                commands.recvfrom(1024)
+            with monkeypatch.context() as patch:
+                def failed_hold(_):
+                    raise OSError('simulated missing arm service')
+                patch.setattr(server, 'forward_robot', failed_hold)
+                code, result = request(server.server_port, 'POST', '/api/v1/recording', {'command': 'pause', 'client': 'page-a'})
+                assert code == 409 and 'Hold could not reach' in result['error']
+                assert server.episode_recorder.status()['state'] == 'paused'
+            assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'pause', 'client': 'page-a'})[0] == 200
+            assert json.loads(commands.recvfrom(1024)[0])['type'] == 'arm_hold'
         assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'stop', 'client': 'page-a', 'outcome': 'success'})[0] == 200
         wait_for(lambda: server.episode_recorder.status()['state'] == 'idle')
         saved = server.episode_recorder.status()['last_saved']
@@ -403,6 +490,7 @@ assert b['action'].shape==(2,6)
 assert b['observation.images.camera_1'].shape==(2,3,48,64)
 assert not torch.equal(b['observation.state'],b['action'])
 assert b['annotation.outcome'].eq(1).all()
+assert b['annotation.trial_paused'].eq(0).all()
 raw=np.load(Path(sys.argv[2])/'episode.npz',allow_pickle=False)
 image=Path(sys.argv[2])/str(raw['obs.images.camera_1'][0])
 expected=av.CodecContext.create('mjpeg','r').decode(av.Packet(image.read_bytes()))[-1].to_ndarray(format='rgb24')

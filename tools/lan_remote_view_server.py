@@ -1826,6 +1826,7 @@ class LanRemoteServer(ThreadingHTTPServer):
             if item
         )
         self.robot_operator = load_robot_operator(self.robot_module, module_paths)
+        self.trial_control_lock = threading.RLock()
         self.episode_recorder = HostEpisodeRecorder(
             recording_root or root.parent / ".teleop" / "recordings", self.robot_operator,
             lambda: CaptureRgbSource(self.stream_host, self.capture_port, MultipartRawFrameReader,
@@ -2638,6 +2639,16 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     result = recorder.start(client, data.get("task"), data.get("cameras"), data.get("fps", 15), data.get("trial"))
             elif command in ("stop", "discard"):
                 result = recorder.stop(client, discard=command == "discard", outcome=data.get("outcome", "unrated"))
+            elif command in ("pause", "resume"):
+                with self.server.browser_client_lock, self.server.trial_control_lock:
+                    if self.server.browser_client_id != client:
+                        raise RecordingError("Reconnect this controller before changing the trial pause state.")
+                    result = recorder.set_paused(client, command == "pause")
+                    if command == "pause":
+                        try:
+                            self.server.forward_robot(self.server.robot_operator.hold_message())
+                        except OSError as exc:
+                            raise RecordingError("Trial paused, but Hold could not reach the arm service. Check the arm connection.") from exc
             else:
                 raise RecordingError("Unknown recording command.")
             result["controller_active"] = self.server.browser_client_id == client
@@ -4031,12 +4042,14 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                             self.send_robot_status(controller_id)
                             continue
                     if not self.server.robot_operator.is_status_request(message):
-                        self.server.robot_operator.add_control_session(message, controller_id)
-                        self.server.forward_robot(message)
-                        self.server.resume_after_transient_watchdog(
-                            controller_id,
-                            message,
-                        )
+                        with self.server.trial_control_lock:
+                            with self.server.episode_recorder.lock:
+                                trial_paused = self.server.episode_recorder.state == "paused"
+                            if trial_paused and not self.server.robot_operator.is_hold(message):
+                                raise RobotCommandError("Trial is paused. Use Resume before commanding the robot.")
+                            self.server.robot_operator.add_control_session(message, controller_id)
+                            self.server.forward_robot(message)
+                            self.server.resume_after_transient_watchdog(controller_id, message)
                     self.send_robot_status(controller_id)
                 except (UnicodeDecodeError, json.JSONDecodeError, RobotCommandError, ValueError) as exc:
                     status = self.server.latest_robot_status(controller_id)

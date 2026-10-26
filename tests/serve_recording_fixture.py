@@ -157,8 +157,11 @@ def main():
     capture.daemon_threads = True
     capture.stopping, capture.requests = threading.Event(), []
     threading.Thread(target=capture.serve_forever, daemon=True).start()
+    commands = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    commands.bind(('127.0.0.1', 0))
+    commands.settimeout(.1)
     server = LanRemoteServer(('127.0.0.1', args.port), FixtureHandler, ROOT/'web', '127.0.0.1', 0,
-        '127.0.0.1', capture.server_port, '', robot_module='so101', robot_command_port=0,
+        '127.0.0.1', capture.server_port, '', robot_module='so101', robot_command_port=commands.getsockname()[1],
         robot_status_port=0, robot_calibration_status_port=0, recording_root=args.output,
         site_settings_path=args.output/'fixture-site-settings.json',
         robot_view_devices={'wrist_rgb': 'unused'})
@@ -180,14 +183,34 @@ def main():
     server.episode_recorder.source_factory = synthetic_source
     server.browser_client_id = 'recording-fixture'
     stopping = threading.Event()
+    control_lock = threading.Lock()
+    control_status = {'state': 'ready', 'armed': False, 'torque_enabled': False}
+
+    def receive_commands():
+        # Simulated acknowledgement only; this socket never forwards to hardware.
+        while not stopping.is_set():
+            try:
+                packet, _ = commands.recvfrom(65536)
+                message = json.loads(packet)
+                if message.get('type') in ('arm_hold', 'arm_enable'):
+                    armed = message['type'] == 'arm_enable'
+                    with control_lock:
+                        control_status.update(state='armed' if armed else 'hold', armed=armed, torque_enabled=True)
+            except TimeoutError:
+                continue
+            except OSError:
+                break
 
     def publish():
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as publisher:
             while not stopping.is_set():
-                publisher.sendto(json.dumps(feedback()).encode(), server.robot_status_socket.getsockname())
+                with control_lock:
+                    status = {**feedback(), **control_status}
+                publisher.sendto(json.dumps(status).encode(), server.robot_status_socket.getsockname())
                 stopping.wait(.01)
 
     threading.Thread(target=publish, daemon=True).start()
+    threading.Thread(target=receive_commands, daemon=True).start()
     print(json.dumps({'port': server.server_port, 'synthetic': True}), flush=True)
     try:
         server.serve_forever()
@@ -195,6 +218,7 @@ def main():
         pass
     finally:
         stopping.set()
+        commands.close()
         server.server_close()
         capture.stopping.set()
         capture.shutdown()

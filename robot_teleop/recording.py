@@ -200,6 +200,8 @@ class HostEpisodeRecorder:
         self.episode = ''
         self.samples = 0
         self.started_ns = 0
+        self.stopped_ns = 0
+        self.pauses: list[dict] = []
         self.last_saved = None
         self.interruption = ''
         self.discard = False
@@ -224,13 +226,48 @@ class HostEpisodeRecorder:
     def status(self, client: str = '') -> dict:
         with self.lock:
             ready = bool(self.telemetry and time.monotonic_ns()-self.telemetry[-1]['measured_ns'] <= 350_000_000)
+            elapsed, _ = self._trial_clock()
             return {'supported': self.operator.recording_spec() is not None,
+                    'pause_supported': True,
                     'ready': ready,
                     'state': self.state, 'message': self.message, 'episode': self.episode,
                     'frames': self.samples, 'elapsed_seconds':
-                    round((time.monotonic_ns()-self.started_ns)/1e9, 1) if self.started_ns and self.state in ('recording', 'saving') else 0,
+                    round(elapsed, 1) if self.state in ('recording', 'paused', 'saving') else 0,
                     'is_owner': not self.owner or client == self.owner, 'last_saved': self.last_saved,
                     'trial': self.trial}
+
+    def _trial_clock(self, at_ns: int | None = None) -> tuple[float, bool]:
+        """Task time excludes pauses; capture timestamps always keep real time."""
+        if not self.started_ns:
+            return 0., False
+        at_ns = at_ns if at_ns is not None else time.monotonic_ns()
+        if self.stopped_ns:
+            at_ns = min(at_ns, self.stopped_ns)
+        seconds = max(0., (at_ns-self.started_ns)/1e9)
+        paused = sum(max(0., min(seconds, p['end_seconds'] if p['end_seconds'] is not None else seconds)
+                         - p['start_seconds']) for p in self.pauses)
+        inside = any(p['start_seconds'] <= seconds and
+                     (p['end_seconds'] is None or seconds < p['end_seconds']) for p in self.pauses)
+        return max(0., seconds-paused), inside
+
+    def _close_pause(self, now_ns: int) -> None:
+        if self.pauses and self.pauses[-1]['end_seconds'] is None:
+            self.pauses[-1]['end_seconds'] = max(0., (now_ns-self.started_ns)/1e9)
+
+    def set_paused(self, client: str, paused: bool) -> dict:
+        with self.lock:
+            if self.owner != client:
+                raise RecordingError('This episode belongs to another controller page.')
+            if self.state not in ('recording', 'paused'):
+                raise RecordingError('Pause is only available during an active recording.')
+            if paused and self.state == 'recording':
+                self.pauses.append({'start_seconds': (time.monotonic_ns()-self.started_ns)/1e9,
+                                    'end_seconds': None})
+                self.state, self.message = 'paused', 'Trial paused; original RGB and robot data are still being recorded.'
+            elif not paused and self.state == 'paused':
+                self._close_pause(time.monotonic_ns())
+                self.state, self.message = 'recording', 'Recording original RGB and measured robot data on the host.'
+            return self.status(client)
 
     def start(self, client: str, task: str, cameras: list[str] | None = None, fps: int = 15,
               trial: dict | None = None) -> dict:
@@ -275,6 +312,8 @@ class HostEpisodeRecorder:
             self.interruption, self.discard, self.outcome = '', False, 'unrated'
             self.trial = trial
             self.started_ns = 0
+            self.stopped_ns = 0
+            self.pauses = []
             self.worker = threading.Thread(target=self._record, args=(task.strip(), cameras, fps, trial),
                                            daemon=True, name='host-episode-recorder')
             self.worker.start()
@@ -286,18 +325,22 @@ class HostEpisodeRecorder:
         with self.lock:
             if self.owner and client != self.owner:
                 raise RecordingError('This episode belongs to another controller page.')
-            if self.state not in ('preparing', 'recording', 'saving'):
+            if self.state not in ('preparing', 'recording', 'paused', 'saving'):
                 return self.status(client)
             if self.state != 'saving':
                 self.discard, self.outcome = discard, outcome
+                self.stopped_ns = time.monotonic_ns()
+                self._close_pause(self.stopped_ns)
                 self.state, self.message = 'saving', 'Finishing the episode on the host…'
                 self.stop_event.set()
             return self.status(client)
 
     def interrupt(self, reason: str) -> None:
         with self.lock:
-            if self.state in ('preparing', 'recording'):
+            if self.state in ('preparing', 'recording', 'paused'):
                 self.interruption = reason
+                self.stopped_ns = time.monotonic_ns()
+                self._close_pause(self.stopped_ns)
                 self.state, self.message = 'saving', 'Preserving the interrupted episode…'
                 self.stop_event.set()
 
@@ -377,8 +420,8 @@ class HostEpisodeRecorder:
             write_json(destination/'episode.json', manifest)
             for camera in manifest['cameras']:
                 (destination/camera['key']).mkdir()
-            self.started_ns = frames[0].capture_monotonic_ns
             with self.lock:
+                self.started_ns = frames[0].capture_monotonic_ns
                 if not self.stop_event.is_set():
                     self.state, self.message = 'recording', 'Recording original RGB and measured robot data on the host.'
             tick = time.monotonic()
@@ -401,6 +444,8 @@ class HostEpisodeRecorder:
                            'action_applied_ns': robot['applied_ns'],
                            'command_sequence': robot['sequence'], 'images': [], 'capture_unix_ns': [],
                            'capture_monotonic_ns': [], 'camera_sequence': []}
+                    with self.lock:
+                        row['trial_elapsed_seconds'], row['trial_paused'] = self._trial_clock(frames[0].capture_monotonic_ns)
                     # Repeated samples are explicit in source sequence/timestamps;
                     # frozen inputs are rejected by the capture-age bound above.
                     for camera, frame in zip(manifest['cameras'], frames, strict=True):
@@ -428,6 +473,13 @@ class HostEpisodeRecorder:
         except Exception as exc:
             failure = str(exc) if isinstance(exc, RecordingError) else 'Host recording failed; partial files were preserved.'
         finally:
+            with self.lock:
+                if self.state in ('preparing', 'recording', 'paused'):
+                    self.state = 'saving'
+                self.stopped_ns = self.stopped_ns or time.monotonic_ns()
+                self._close_pause(self.stopped_ns)
+                active_duration, _ = self._trial_clock()
+                pauses = [dict(p) for p in self.pauses]
             if source is not None:
                 try:
                     source.close()
@@ -440,6 +492,8 @@ class HostEpisodeRecorder:
                         arrays = {'obs.state': np.asarray([r['state'] for r in rows], dtype=np.float32),
                                   'action': np.asarray([r['action'] for r in rows], dtype=np.float32),
                                   'timestamp': np.asarray([r['timestamp'] for r in rows], dtype=np.float64),
+                                  'trial_elapsed_seconds': np.asarray([r['trial_elapsed_seconds'] for r in rows], dtype=np.float64),
+                                  'trial_paused': np.asarray([r['trial_paused'] for r in rows], dtype=np.bool_),
                                   'obs.capture_unix_ns': np.asarray([r['capture_unix_ns'] for r in rows], dtype=np.int64),
                                   'obs.capture_monotonic_ns': np.asarray([r['capture_monotonic_ns'] for r in rows], dtype=np.int64),
                                   'obs.robot_measured_ns': np.asarray([r['robot_measured_ns'] for r in rows], dtype=np.int64),
@@ -453,11 +507,13 @@ class HostEpisodeRecorder:
                             np.savez_compressed(data, **arrays)
                     status = 'discarded' if self.discard else 'incomplete' if failure or len(rows) < 2 else 'complete'
                     manifest.update(status=status, outcome=self.outcome, frames=len(rows), bytes=saved_bytes,
+                                    pauses=pauses, active_duration_seconds=round(active_duration, 3),
                                     error=failure, finished_utc=datetime.now(timezone.utc).isoformat())
                     write_json(destination/'episode.json', manifest)
                     self.last_saved = {'episode': self.episode, 'status': status, 'frames': len(rows),
                                        'outcome': self.outcome, 'host_folder': str(destination),
                                        'duration_seconds': round(rows[-1]['timestamp']+1/fps, 3) if rows else 0,
+                                       'active_duration_seconds': round(active_duration, 3),
                                        'trial': trial}
             except Exception:
                 failure = 'Episode finalization failed; preserve the host folder for recovery.'

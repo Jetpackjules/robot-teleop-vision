@@ -117,6 +117,8 @@ Settings tabs are flat text controls with an accent underline on the selected ta
 
 Show the preconfigured study task in the top bar with Start trial as the initial action. Task configuration belongs in Settings → Session; participants do not type the task between trials. The current block-and-cup instruction is a placeholder for the final study task.
 
+During a trial, group the secondary Pause/Resume action immediately before Finish. Keep its navy fill subordinate to the pale primary action. Paused appears beside the frozen timer; no explanatory subtitle is needed. Keep Finish available while paused and hide Pause once saving begins.
+
 Trial progress is a visible 6px cyan horizontal bar showing elapsed time toward the configured target. Keep a compact 1/3 trial counter beside the condition. Timer figures are yellow and tabular, turning red when the time target has been reached; recording still ends manually. Keep the task distinct through modest size and weight rather than large display typography. Live and loading states use actual application status; demonstrations must identify synthetic inputs.
 
 ## Do's and Don'ts

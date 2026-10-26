@@ -43,6 +43,13 @@ def inspect_episode(root: Path) -> tuple[dict, dict[str, np.ndarray]]:
         raise RecordingError('Capture timestamps are invalid or run backwards.')
     if times[-1]-times[0] < .001:
         raise RecordingError('The episode contains no advancing camera frames.')
+    if 'trial_paused' in arrays and (arrays['trial_paused'].shape != (count,) or arrays['trial_paused'].dtype.kind != 'b'):
+        raise RecordingError('Invalid trial pause annotations.')
+    if 'trial_elapsed_seconds' in arrays:
+        elapsed = arrays['trial_elapsed_seconds']
+        if (elapsed.shape != (count,) or not np.all(np.isfinite(elapsed)) or np.any(elapsed < 0)
+                or np.any(np.diff(elapsed) < -1e-6) or np.any(elapsed > times+.001)):
+            raise RecordingError('Invalid trial time annotations.')
     for camera in cameras:
         if not re.fullmatch(r'camera_[1-8]', camera['key']) or not 0 < camera['width']*camera['height'] <= 16*1024*1024:
             raise RecordingError('Invalid camera feature description.')
@@ -110,7 +117,8 @@ def export_episodes(source: Path, output: Path, repo_id: str = 'local/robot-tele
                 'observation.capture_time_ns': {'dtype': 'int64', 'shape': (len(cameras),), 'names': [c['key'] for c in cameras]},
                 'observation.robot_time_ns': {'dtype': 'int64', 'shape': (1,), 'names': ['host_monotonic_ns']},
                 'observation.action_time_ns': {'dtype': 'int64', 'shape': (1,), 'names': ['host_monotonic_ns']},
-                'annotation.outcome': {'dtype': 'int64', 'shape': (1,), 'names': ['failure_0_success_1_unrated_minus1']}}
+                'annotation.outcome': {'dtype': 'int64', 'shape': (1,), 'names': ['failure_0_success_1_unrated_minus1']},
+                'annotation.trial_paused': {'dtype': 'int64', 'shape': (1,), 'names': ['paused_1_active_0']}}
     for camera in cameras:
         features['observation.images.'+camera['key']] = {'dtype': 'image',
             'shape': (camera['height'], camera['width'], 3), 'names': ['height', 'width', 'channels']}
@@ -132,6 +140,7 @@ def export_episodes(source: Path, output: Path, repo_id: str = 'local/robot-tele
                          'observation.robot_time_ns': np.array([arrays['obs.robot_measured_ns'][index]], dtype=np.int64),
                          'observation.action_time_ns': np.array([arrays['action_applied_ns'][index]], dtype=np.int64),
                          'annotation.outcome': np.array([{'success': 1, 'failure': 0}.get(manifest['outcome'], -1)], dtype=np.int64),
+                         'annotation.trial_paused': np.array([int(arrays['trial_paused'][index]) if 'trial_paused' in arrays else 0], dtype=np.int64),
                          'task': manifest['task']}
                 for camera, decoder in zip(cameras, decoders, strict=True):
                     key = camera['key']
@@ -144,6 +153,8 @@ def export_episodes(source: Path, output: Path, repo_id: str = 'local/robot-tele
             dataset.save_episode()
             summary['episodes'].append({'source_episode': manifest['episode_id'], 'frames': len(indices),
                                         'source_frames': manifest['frames'], 'outcome': manifest['outcome'],
+                                        'pauses': manifest.get('pauses', []),
+                                        'active_duration_seconds': manifest.get('active_duration_seconds'),
                                         'trial': manifest.get('trial')})
     except BaseException:
         write_json(output/'capture_export_incomplete.json', summary)
