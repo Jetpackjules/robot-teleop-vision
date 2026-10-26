@@ -52,10 +52,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from robot_teleop.camera_preview import CameraPreviewEncoder
 from robot_teleop.modules import public_robot_module
 from robot_teleop.operator import RobotCommandError, load_robot_operator
 from robot_teleop.recording import CaptureRgbSource, HostEpisodeRecorder, RecordingError, camera_id
-from robot_teleop.camera_preview import CameraPreviewEncoder
 from robot_teleop.state import godot_app_userdata_root
 from tools.godot_desktop_stream import DesktopStreamConfig, GodotDesktopStream
 from tools.workspace_stream_crop import STREAM_SETTING_KEYS, WorkspaceStreamCropper
@@ -3687,7 +3687,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             last_keyframe = 0.0
             while not stop.is_set():
                 with condition:
-                    condition.wait_for(lambda: stop.is_set() or error is not None or
+                    condition.wait_for(lambda consumed=consumed, sent_sequence=sent_sequence: stop.is_set() or error is not None or
                         (source_sequence != consumed and sent_sequence - acknowledged < 16), timeout=2.0)
                     if stop.is_set() or error is not None:
                         break
