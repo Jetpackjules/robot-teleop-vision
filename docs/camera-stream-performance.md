@@ -425,6 +425,13 @@ Wasm loading time. Unsupported formats, profiles, dimensions, unavailable Wasm,
 or a mismatch retain Canvas. This startup choice is a conservative local
 measurement, not a guarantee against later CPU/GPU contention changes.
 
+The final check loaded the deployed assets through the public gateway, with
+no local candidate-file overrides. It measured about 17 median rendered FPS
+stationary and 13.6 while orbiting, with roughly 16–18 fresh decoded batches/s,
+41–51 ms codec time and 11–13 ms upload time. GeForce NOW stayed running;
+the same native camera and output dimensions were retained. This is still
+below the 30 FPS requirement. Public hashes matched all five deployed assets.
+
 The converter follows the integer H2V2 interpolation described in
 [libjpeg's upsampler](https://skia.googlesource.com/external/github.com/libjpeg-turbo/libjpeg-turbo/%2B/refs/tags/jpeg-ari/jdsample.c).
 Rebuild the checked-in binary with `python tools/build_jpeg_rgba_wasm.py`
