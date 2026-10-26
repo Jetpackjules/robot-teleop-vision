@@ -9,6 +9,8 @@ import { COLOR_PROJECTION_SHADER, bindColorProjection, colorFrameDimensions } fr
 import { WORKSPACE_CROP_SHADER, WORKSPACE_CROP_CONTEXT, bindWorkspaceCrop, workspaceCropBounds, workspaceSourceWindow, workspaceCropLines, workspaceVisibleTiles, bindWorkspaceTiles, unbindWorkspaceTiles } from './workspace_crop.js?v=20261021_original_rgb';
 import { MODELED_WORKSPACE_DEFAULTS, MODELED_WORKSPACE_SHADER, ModeledWorkspaceRenderer, modeledWorkspace, modeledWorkspaceBounds, bindModeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
 import {SCENE_LIGHTING_SHADER,bindSceneLighting,SceneShadowRenderer} from './scene_lighting.js?v=20261021_lit_workspace';
+import {NativePointColors} from './hybrid_point_colors.js?v=20261026_native_render';
+import {visibleNativeTiles} from './native_geometry.js?v=20261026_native_render';
 
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},
@@ -215,6 +217,10 @@ flat out uint v_triangle_id;
 uniform highp sampler2DArray u_rig_quality;
 uniform highp int u_rig_index;
 uniform highp int u_quality_enabled;
+#ifdef NATIVE_POINT_COLORS
+uniform highp sampler2DArray u_point_color_cache;
+uniform highp int u_point_color_cache_enabled;
+#endif
 uniform ivec2 u_source_origin;
 uniform ivec2 u_source_size;
 uniform highp int u_sparse_tiles;
@@ -394,6 +400,10 @@ void main() {
   v_world_position = world_position;
   gl_PointSize = clamp(u_point_size * z / max(0.001, gl_Position.w), 1.0, u_max_point_size);
   v_color = texelFetch(u_color, ivec2(x, y), 0).rgb;
+#ifdef NATIVE_POINT_COLORS
+  if(u_point_color_cache_enabled==1&&u_render_mode!=1)
+    v_color=texelFetch(u_point_color_cache,ivec3(pixel_coord,u_rig_index),0).rgb;
+#endif
   if (u_fusion_enabled == 1) {
     vec3 fusion_position = (u_world_to_fusion * vec4(world_position, 1.0)).xyz;
     float fusion_projected_depth = -fusion_position.z;
@@ -426,6 +436,9 @@ in vec3 v_local_position;
 uniform highp int u_render_mode;
 uniform highp int u_quality_enabled;
 uniform highp int u_depth_only_enabled;
+#ifdef NATIVE_POINT_COLORS
+uniform highp int u_point_color_cache_enabled;
+#endif
 uniform mat4 u_model;
 uniform sampler2D u_color;
 uniform ivec2 u_size;
@@ -466,6 +479,9 @@ void main() {
     out_color = vec4(depth_surface_gray(normal), 1.0);
     return;
   }
+#ifdef NATIVE_POINT_COLORS
+  if(u_point_color_cache_enabled==1&&u_render_mode!=1){out_color=vec4(v_color,1);return;}
+#endif
   vec4 source_color=camera_sample_color(u_color,v_local_position,
     clamp(ivec2(floor(v_source_pixel+0.5)),ivec2(0),u_size-1));
   vec3 color=source_color.a>0.5?source_color.rgb:vec3(0.34);
@@ -686,14 +702,15 @@ function ensureIndexedProgram() {
 
 // Separate original-RGB and legacy color shaders. Keeping both large camera
 // loops live in one shader exceeds some ANGLE/D3D compiler limits.
-function ensureOriginalProgram(indexed=false) {
-  const key=indexed?'originalIndexed':'original';
+function ensureOriginalProgram(indexed=false,pointColors=false) {
+  const key=pointColors?'originalPoints':indexed?'originalIndexed':'original';
   if(state[key+'Unavailable'])return false;
   if(state[key+'Program'])return true;
   const gl=state.gl;
   try {
-    const vertex=indexed?VERTEX_SHADER.replace('#version 300 es','#version 300 es\n#define INDEXED_NATIVE_MESH'):VERTEX_SHADER;
-    const fragment=FRAGMENT_SHADER.replace('#version 300 es','#version 300 es\n#define ORIGINAL_RGB');
+    const pointDefine=pointColors?'\n#define NATIVE_POINT_COLORS':'';
+    const vertex=VERTEX_SHADER.replace('#version 300 es',`#version 300 es${pointDefine}${indexed?'\n#define INDEXED_NATIVE_MESH':''}`);
+    const fragment=FRAGMENT_SHADER.replace('#version 300 es',`#version 300 es\n#define ORIGINAL_RGB${pointDefine}`);
     const program=createProgram(gl,vertex,fragment),u=findUniforms(gl,program);
     state[key+'Program']=program;state[key+'Uniforms']=u;gl.useProgram(program);
     for(const [name,unit] of [['depth',0],['color',1],['fusionDepth',2],['fusionColor',3],['rigDepth',4],['rigData',5],['rigQuality',6],['rigColor',7]])gl.uniform1i(u[name],unit);
@@ -1290,6 +1307,7 @@ function findUniforms(gl, program) {
     rigColor: gl.getUniformLocation(program, "u_rig_color"),
     rigColorEnabled: gl.getUniformLocation(program, "u_rig_color_enabled"),
     qualityEnabled: gl.getUniformLocation(program, "u_quality_enabled"),
+    pointColorCacheEnabled: gl.getUniformLocation(program, "u_point_color_cache_enabled"),
     depthOnlyEnabled: gl.getUniformLocation(program, "u_depth_only_enabled"),
     renderMode: gl.getUniformLocation(program, "u_render_mode"),
     meshDepthDelta: gl.getUniformLocation(program, "u_mesh_depth_delta"),
@@ -1730,7 +1748,7 @@ async function decodeCamera(payload) {
   let color, rawDepth, depthTiles=null;
   if (state.nativeDecoder && !state.nativeDecoder.disabled
       && state.socketOptions?.exactDepth === true && isIndependentNativeFrame(payload.metadata)) {
-    const decoded = await state.nativeDecoder.decode({...payload,workspaceTiles:state.settings.workspace_crop_enabled===true||state.settings.modeled_workspace_enabled===true});
+    const decoded = await state.nativeDecoder.decode({...payload,workspaceTiles:state.useNativeTileCulling!==false&&state.settings.geometry_mode!=='mesh'||state.settings.workspace_crop_enabled===true||state.settings.modeled_workspace_enabled===true});
     depthTiles=decoded.depthTiles;
     color = {bitmap: decoded.bitmap, pixels: null,rgbaPixels:decoded.rgbaPixels};rawDepth = decoded.depth;
     for(const key of ["workerMs","dispatchMs"])state.stats[key]=state.stats[key]>0?state.stats[key]*.8+decoded[key]*.2:decoded[key];
@@ -1844,6 +1862,7 @@ function uploadCamera(decoded) {
   camera.intrinsicsArray = new Float32Array(camera.metadata.intrinsics);
 
   gl.bindTexture(gl.TEXTURE_2D, camera.depthTexture);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, camera.width, camera.height, gl.RED_INTEGER, gl.UNSIGNED_SHORT, camera.depth);
 
   gl.bindTexture(gl.TEXTURE_2D, camera.colorTexture);
@@ -2536,6 +2555,19 @@ function render() {
     }
   }
   let blended = false;
+  let pointColors=false;
+  if(!meshMode&&cached&&state.cameraFusion.originalRgb&&state.usePointColorCache!==false
+      &&!state.settings.depth_only_enabled&&!state.pointColorCacheUnavailable
+      &&state.cameras.every(camera=>camera.metadata.color_space==='original_rgb')){
+    try{
+      state.pointColors ||= new NativePointColors(gl);
+      state.pointColors.update(state.cameraFusion,state.cameras,maskCapsules,[0,0,dimensions.width,dimensions.height]);
+      pointColors=true;
+    }catch(error){
+      state.pointColors?.dispose();state.pointColors=null;state.pointColorCacheUnavailable=true;
+      state.stats.renderWarning=`Point color cache unavailable: ${error.message||error}; using direct colors`;
+    }
+  }
   if (meshMode && state.settings.blendpcr_enabled && cached) {
     try {
       state.blendPCR ||= new BrowserBlendPCR(gl, VERTEX_SHADER);
@@ -2565,8 +2597,8 @@ function render() {
     &&standardSurfacePrograms.has(state.program)&&ensureIndexedProgram();
   if(indexedMesh) {state.program=state.indexedProgram;state.uniforms=state.indexedUniforms;}
   if(cached&&!blended&&state.cameraFusion.originalRgb) {
-    if(ensureOriginalProgram(indexedMesh)) {
-      const key=indexedMesh?'originalIndexed':'original';
+    if(ensureOriginalProgram(indexedMesh,pointColors)) {
+      const key=pointColors?'originalPoints':indexedMesh?'originalIndexed':'original';
       state.program=state[key+'Program'];state.uniforms=state[key+'Uniforms'];
     }
   }
@@ -2574,6 +2606,9 @@ function render() {
   gl.useProgram(state.program);
   if (cached) state.cameraFusion.bind(state.program);
   else gl.uniform1i(state.uniforms.rigCount, 0);
+  gl.uniform1i(state.uniforms.pointColorCacheEnabled,pointColors?1:0);
+  gl.uniform1i(gl.getUniformLocation(state.program,'u_point_color_cache'),pointColors?8:7);
+  if(pointColors)state.pointColors.bind(state.program);
   gl.uniformMatrix4fv(state.uniforms.viewProjection, false, viewProjection);
   gl.uniform1i(state.uniforms.robotMaskEnabled, maskCapsules ? 1 : 0);
   if (maskCapsules) {
@@ -2595,7 +2630,9 @@ function render() {
   for (const [cameraIndex, camera] of state.cameras.entries()) {
     if (blended || !cameraIsFresh(camera, now)) continue;
     const source = workspaceSourceWindow(camera, state.useWorkspaceCulling === false ? null : cropBounds);
-    const tiles=state.useWorkspaceCulling===false?null:workspaceVisibleTiles(camera,cropBounds);
+    const tiles=state.useWorkspaceCulling===false?null:state.useNativeTileCulling===false||meshMode
+      ?workspaceVisibleTiles(camera,cropBounds)
+      :visibleNativeTiles(camera,viewProjection,cropBounds,meshMode?[0,0]:[32/dimensions.width,32/dimensions.height]);
     sourceCells += Math.max(0, camera.width - 1) * Math.max(0, camera.height - 1);
     submittedCells += tiles?tiles.cellCount:Math.max(0, source.width - 1) * Math.max(0, source.height - 1);
     if (tiles?tiles.length===0:(source.width < (meshMode ? 2 : 1) || source.height < (meshMode ? 2 : 1))) continue;
@@ -3428,6 +3465,7 @@ export function stopGodotHybridRenderer() {
   state.blendPCR = null;
   state.cameraFusion?.clear();
   state.cameraFusion = null;
+  state.pointColors?.dispose();state.pointColors=null;state.pointColorCacheUnavailable=false;
   const gl = state.gl;
   deleteWorkspaceGuide(gl);
   state.modeledWorkspace?.dispose();
@@ -3440,7 +3478,7 @@ export function stopGodotHybridRenderer() {
   if (gl && state.program) gl.deleteProgram(state.program);
   if (gl && state.indexedProgram) gl.deleteProgram(state.indexedProgram);
   state.indexedProgram=state.indexedUniforms=null;state.indexedUnavailable=false;
-  for(const key of ['original','originalIndexed']) {
+  for(const key of ['original','originalIndexed','originalPoints']) {
     if(gl&&state[key+'Program'])gl.deleteProgram(state[key+'Program']);
     state[key+'Program']=state[key+'Uniforms']=null;state[key+'Unavailable']=false;
   }

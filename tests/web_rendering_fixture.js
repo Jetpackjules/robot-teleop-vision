@@ -11,7 +11,7 @@ export function setup() {
   if(state.program)gl.deleteProgram(state.program);
   if(state.indexedProgram)gl.deleteProgram(state.indexedProgram);
   state.indexedProgram=state.indexedUniforms=null;state.indexedUnavailable=false;
-  for(const key of ['original','originalIndexed']) {
+  for(const key of ['original','originalIndexed','originalPoints']) {
     if(state[key+'Program'])gl.deleteProgram(state[key+'Program']);state[key+'Program']=state[key+'Uniforms']=null;state[key+'Unavailable']=false;
   }
   Object.assign(state,{canvas,gl,running:true,cameras:[],blendPCR:null,program:createProgram(gl),cameraFusion:new MultiCameraFusion(gl),
@@ -293,6 +293,7 @@ export async function runRenderingChecks() {
   state.useIndexedMeshes=false;draw('independent_mesh');state.useIndexedMeshes=true;
   gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.useProgram(state.program);
   gl.uniform1i(state.uniforms.qualityEnabled,0);gl.uniform1i(state.uniforms.rigEnabled,0);
+  gl.uniform1i(state.uniforms.sparseTiles,0);gl.uniform2i(state.uniforms.sourceOrigin,0,0);gl.uniform2i(state.uniforms.sourceSize,79,53);
   gl.drawArrays(gl.TRIANGLES,0,(79-1)*(53-1)*6);
   const original=image();
   check(cached.every((v,i)=>v===original[i]),'cached validation is pixel-identical to original mesh rules');
@@ -398,6 +399,7 @@ export async function runRenderingChecks() {
   mask.starts.set([.0183,.0207,-1,.133]);mask.ends.set([.0183,.0207,-1,.133]);
   gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.useProgram(state.program);
   gl.uniform1i(state.uniforms.robotMaskEnabled,1);
+  gl.uniform1i(state.uniforms.sparseTiles,0);gl.uniform2i(state.uniforms.sourceOrigin,0,0);gl.uniform2i(state.uniforms.sourceSize,64,64);
   gl.uniform4fv(state.uniforms.maskCapsuleA,mask.starts);gl.uniform4fv(state.uniforms.maskCapsuleB,mask.ends);
   gl.drawArrays(gl.TRIANGLES,0,63*63*6);const maskedReference=image();
   const view={width:canvas.width,height:canvas.height,now:performance.now(),viewer:state.currentViewer,

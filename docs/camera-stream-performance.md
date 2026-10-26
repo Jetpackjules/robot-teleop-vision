@@ -311,3 +311,45 @@ Capture-profile reconnects retain the picked world pivot, camera frame, viewing
 angles, dolly and head-tracking baseline. Pan moves the pivot with the same
 camera motion as before; a new double-click or middle-click pivot replaces the
 previous pan translation. Zoom distance and height behavior are unchanged.
+
+## Native-frame rendering benchmark and point-color cache
+
+The October 26 frozen-frame benchmark replays one actual three-camera RGB-D
+packet on the laptop, with network and robot control disconnected. It retains
+the packet's two 640×360 depth views, one 1280×720 depth view, and three original
+1920×1080 RGB images. The output canvas remains 2240×1260 pixels (1280×720 CSS
+at device pixel ratio 1.75). The GPU is Intel Iris Xe through ANGLE/D3D11.
+
+Point-cloud color evaluation uses the same calibrated projection, surface
+normals, RGB visibility, black-pixel handling and linear-light blending as the
+direct shader. These calculations depend on the native point and camera rig,
+not on the operator's viewpoint. `NativePointColors` caches their RGBA8 result
+per native depth sample. New captures, rig metadata, calibration, freshness and
+robot masks invalidate the cache. Shader/allocation failures retain the direct
+path. Mesh and BlendPCR programs retain their existing shaders and caches.
+
+Conservative point-cloud tiles reject only empty or wholly off-screen regions,
+including shared sample borders and the maximum point-sprite radius. Every
+remaining native sample is retained. Tile ranges are computed in the existing
+decoder workers; dense views use regular grids when tiling overhead would cost
+more than the rejection saves. Existing workspace bounds remain authoritative.
+
+The frozen captured image was pixel-identical with point colors cached versus
+direct shading, and with conservative culling enabled versus disabled. Browser
+regressions cover projection, peer updates, freshness, calibration, depth-only
+mode, rig reallocation, partial tiles, and viewport movement. Local render FPS
+and GPU timer queries are distinct from fresh camera FPS and command-to-visible
+motion latency. Refreshing capture-dependent work in a replay is a rendering
+stress test; it does not measure capture, encoding or network throughput.
+
+Adaptive sampling and changes to the 3D wire representation are separate work;
+this rendering phase changes neither camera resolution nor the wire format.
+
+In the sequential Iris Xe replay, moving the viewpoint over the frozen native
+point cloud improved from 23.4 to 60.0 rendered FPS; median GPU time fell from
+41.8 to 9.6 ms. Refreshing capture-dependent work at a requested 30 Hz produced
+38.3 rendered FPS versus 15.8 before. Independent mesh remained about 37 FPS for
+viewpoint movement and 21 FPS under capture refresh; BlendPCR was about 60 and
+37 FPS respectively. These short local replay measurements are not live WAN
+sensor-rate or command-to-motion measurements. Raw evidence remains in
+`.teleop/render-native-20261026/` alongside the captured source frame.
