@@ -2741,16 +2741,13 @@ function animationLoop(now) {
     state.socket
     && state.socket.readyState === WebSocket.OPEN
     && state.lastPacketMs > 0
-    && now - state.lastPacketMs > 1500
+    && now - state.lastPacketMs > 5000
   ) {
     const options = state.socketOptions || {};
     state.stats.connected = false;
     state.stats.status = "RGB-D WebSocket stale; reconnecting";
     closeRgbdSocket();
-    state.reconnectTimer = window.setTimeout(() => {
-      state.reconnectTimer = 0;
-      startConfiguredRgbdFallback(options);
-    }, 100);
+    scheduleRgbdSocketRecovery(options);
   }
   // High-refresh displays were rendering hundreds of thousands of points at
   // 120-165 Hz and starving RGB-D decode/upload work on the same main thread.
@@ -2980,8 +2977,16 @@ function startRgbdWebSocket(options) {
   state.stats.connected = false;
   state.stats.status = "RGB-D WebSocket connecting";
   state.stats.transport = "WebSocket latest-frame";
+  state.reconnectTimer = window.setTimeout(() => {
+    state.reconnectTimer = 0;
+    if (state.socket !== socket) return;
+    closeRgbdSocket();
+    scheduleRgbdSocketRecovery(options);
+  }, 5000);
   socket.onopen = () => {
     if (!state.running || state.socket !== socket) return;
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = 0;
     const now = performance.now();
     state.socketOpenedMs = now;
     state.lastPacketMs = now;
@@ -2997,6 +3002,8 @@ function startRgbdWebSocket(options) {
   };
   socket.onclose = (event) => {
     if (!state.running || state.socket !== socket) return;
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = 0;
     state.socket = null;
     state.stats.connected = false;
     if (event.code === 4001) {
@@ -3004,10 +3011,25 @@ function startRgbdWebSocket(options) {
       state.stats.transport = "Superseded";
       return;
     }
-    state.stats.status = "RGB-D WebSocket unavailable; using HTTPS latest-frame";
-    state.stats.transport = "HTTPS latest-frame fallback";
-    window.setTimeout(() => startRgbdHttpLatest(options), 100);
+    scheduleRgbdSocketRecovery(options);
   };
+}
+
+function scheduleRgbdSocketRecovery(options) {
+  if (!state.running || document.hidden || state.rgbdPaused) return;
+  if (state.reconnectTimer) window.clearTimeout(state.reconnectTimer);
+  // A brief tunnel interruption should reconnect the preferred transport.
+  // Bound consecutive failures so hosts without WebSocket support still work.
+  const retrySocket = ++state.reconnectAttempt <= 3;
+  state.stats.status = retrySocket ? "RGB-D WebSocket reconnecting" : "RGB-D WebSocket unavailable; using HTTPS latest-frame";
+  state.stats.transport = retrySocket ? "WebSocket reconnecting" : "HTTPS latest-frame fallback";
+  state.reconnectTimer = window.setTimeout(() => {
+    state.reconnectTimer = 0;
+    if (!state.running || document.hidden || state.rgbdPaused) return;
+    if (state.dataChannel?.readyState === "open") return;
+    if (retrySocket) startRgbdWebSocket(options);
+    else startRgbdHttpLatest(options);
+  }, retrySocket ? Math.min(2000, 250 * 2 ** (state.reconnectAttempt - 1)) : 100);
 }
 
 function startConfiguredRgbdFallback(options) {
@@ -3040,7 +3062,9 @@ async function runRgbdHttpWorker(options, worker, generation) {
       }
       const controller = new AbortController();
       state.httpControllers.add(controller);
-      const timeout = window.setTimeout(() => controller.abort(), 1500);
+      // A native RGB-D response can be over a megabyte. Allow a cold crop
+      // cache and a WAN transfer to finish instead of aborting every response.
+      const timeout = window.setTimeout(() => controller.abort(), 5000);
       try {
         const response = await fetch(
           latestRgbdUrl(options, state.httpSequence, worker),
@@ -3095,7 +3119,7 @@ async function runRgbdHttpWorker(options, worker, generation) {
 }
 
 function startRgbdHttpLatest(options) {
-  if (!state.running) return;
+  if (!state.running || state.rgbdPaused) return;
   if (state.dataChannel && state.dataChannel.readyState === "open") return;
   if (state.httpWorkers > 0) return;
   if (document.hidden) {

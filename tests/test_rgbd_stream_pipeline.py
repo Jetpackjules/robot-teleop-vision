@@ -1,11 +1,23 @@
 """Bounded persistent-reference pipelining across a slow network send."""
-from pathlib import Path
+import shutil
+import subprocess
 import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"tools"))
 import lan_remote_view_server as remote
+
+
+def test_browser_transport_recovers_without_resurrecting_stopped_pages():
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("Node.js is required for browser transport checks")
+    result = subprocess.run([node, str(Path(__file__).with_name("rgbd_transport_recovery.cjs"))],
+                            capture_output=True, text=True, timeout=15, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 def test_persistent_reference_encoder_overlaps_send_and_keeps_order(monkeypatch):
     sending=threading.Event()

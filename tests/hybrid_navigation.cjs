@@ -205,7 +205,7 @@ check(changedReference[0].sequence === 1,
   let requestedMode;
   const presets = await import('data:text/javascript;base64,' + Buffer.from(
     fs.readFileSync(path.join(__dirname, '../web/capture_presets.js'), 'utf8')).toString('base64'));
-  const policy = vm.createContext({URLSearchParams, document:{getElementById:control}, robotModule:{},
+  const policy = vm.createContext({URLSearchParams, document:{getElementById:control,body:{classList:{contains:()=>false}}}, robotModule:{},
     viewSettingsVersion:15,displayModes:['point_cloud','independent_mesh','blendpcr','rgb_camera'],
     cropViewSettings:()=>({workspace_crop_enabled:false,workspace_crop_show_box:false,
       workspace_crop_min:[-.6,-.45,-.6],workspace_crop_max:[.6,.45,.6]}),
@@ -214,7 +214,7 @@ check(changedReference[0].sequence === 1,
     defaultDisplayMode:'independent_mesh',displayModeSelect:control('display-mode'),
     streamPresetSelect:control('stream-preset'),localSavedViewSettings:()=>null,
     updateHeadTrackingOptions(){},updateViewLabels(){},showHybrid(){},updateStatus(){},
-    viewportGeneration:0,retainedNavigation:null,selectedRgbCamera:'',capturePresetControl:null,remoteUrl:()=> 'wss://example.test/head-tracking',
+    viewportGeneration:0,retainedNavigation:null,selectedRgbCamera:'',capturePresetControl:null,workspaceStreamControl:{update(){}},remoteUrl:()=> 'wss://example.test/head-tracking',
     nativeStreamPreset:presets.nativeStreamPreset,
     CapturePresetControl:class {async request(mode){requestedMode=mode;return true;} cancel(){}},
     currentPreset:()=>({label:'Quality'}),startHybridControlPeer:async()=>true,

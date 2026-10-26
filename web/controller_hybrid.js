@@ -1,7 +1,7 @@
     import { robotModuleReady } from "./robot_module_host.js";
     import { EpisodeRecordingControl } from './episode_recording.js?v=20261025_trials';
     import { TrialController } from './trial_controller.js?v=20261025_trials';
-    import { CapturePresetControl, WorkspaceStreamControl, nativeStreamPreset } from "./capture_presets.js?v=20261026_workspace_delivery";
+    import { CapturePresetControl, WorkspaceStreamControl, nativeStreamPreset } from "./capture_presets.js?v=20261026_transport_recovery";
     import { workspaceCropBounds } from './workspace_crop.js?v=20261021_original_rgb';
     import { MODELED_WORKSPACE_DEFAULTS, modeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
 

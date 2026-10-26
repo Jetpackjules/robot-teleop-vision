@@ -47,10 +47,13 @@ vm.runInContext(source+'\nglobalThis.control=new CapturePresetControl("wss://exa
   assert.equal(connecting.sent[0].type,'view_settings');
   context.workspace.update({...settings,modeled_workspace_width:1.4});
   assert.equal(connecting.sent.length,1,'unchanged bounds do not resend');
+  const heartbeat=[...timers.entries()][0];timers.delete(heartbeat[0]);heartbeat[1]();
+  assert.equal(connecting.sent.length,2,'view-only heartbeat keeps the idle control socket alive');
+  assert.deepEqual(connecting.sent[1],connecting.sent[0],'heartbeat cannot replay additional actions');
   connecting.onclose();assert.equal(timers.size,1);
   const retry=[...timers.entries()][0];timers.delete(retry[0]);retry[1]();
   const reconnected=sockets.at(-1);reconnected.readyState=1;reconnected.onopen();
-  assert.deepEqual(reconnected.sent,connecting.sent,'reconnect restores only viewing bounds');
+  assert.deepEqual(reconnected.sent[0],connecting.sent[0],'reconnect restores only viewing bounds');
   context.workspace.update({...settings,modeled_workspace_enabled:false});
   assert.equal(reconnected.sent.at(-1).modeled_workspace_enabled,false,'off restores uncropped data');
   assert.equal(context.workspace.update({...settings,rgbd_client_id:'../bad'}),false);

@@ -24,9 +24,9 @@ export class WorkspaceStreamControl {
     return true;
   }
 
-  schedule() {
+  schedule(delay = 500) {
     if (this.closed || this.retry !== null) return;
-    this.retry = setTimeout(() => { this.retry = null; this.flush(); }, 500);
+    this.retry = setTimeout(() => { this.retry = null; this.flush(); }, delay);
   }
 
   flush() {
@@ -35,6 +35,9 @@ export class WorkspaceStreamControl {
       if (this.socket.bufferedAmount > 16384) { this.schedule(); return; }
       try { this.socket.send(this.latest); }
       catch (_) { this.socket.close(); this.schedule(); }
+      // The authenticated control socket has a two-second idle timeout.
+      // Refresh viewing bounds only; never replay head poses or robot actions.
+      this.schedule(1000);
       return;
     }
     if (this.socket?.readyState === 0) return;
@@ -49,6 +52,7 @@ export class WorkspaceStreamControl {
     const lost = () => {
       if (this.socket !== socket) return;
       clearTimeout(this.connectTimer); this.connectTimer = null;
+      clearTimeout(this.retry); this.retry = null;
       this.socket = null;
       socket.onopen = socket.onclose = socket.onerror = null;
       socket.close();
