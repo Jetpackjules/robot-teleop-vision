@@ -2,6 +2,41 @@
 // Consume the existing quality flags; retain every accepted native triangle.
 // SPDX-License-Identifier: EUPL-1.2
 const PARAMS=`struct Params { matrix:mat4x4f, intrinsics:vec4f, size:vec2u, half:u32, padding:u32 };`;
+// WGSL fma may expand to separate multiply/add operations. Preserve the
+// production compiler's single rounding for finite, normal-range projection
+// arithmetic using an error-free product and compensated sums instead.
+const GL_MATCHED_MATH=`
+fn rounded(value:vec4f)->vec4f{return bitcast<vec4f>(bitcast<vec4u>(value)^vec4u(p.padding));}
+fn two_sum(a:vec4f,b:vec4f)->mat2x4f{
+  let sum=rounded(a+b);let bb=rounded(sum-a);
+  let error=rounded(rounded(a-rounded(sum-bb))+rounded(b-bb));return mat2x4f(sum,error);
+}
+fn fused(a:vec4f,b:vec4f,c:vec4f)->vec4f{
+  let product=rounded(a*b);
+  let ah=bitcast<vec4f>(bitcast<vec4u>(a)&vec4u(0xfffff000u));let al=rounded(a-ah);
+  let bh=bitcast<vec4f>(bitcast<vec4u>(b)&vec4u(0xfffff000u));let bl=rounded(b-bh);
+  let err1=rounded(product-rounded(ah*bh));
+  let err2=rounded(err1-rounded(al*bh));let err3=rounded(err2-rounded(ah*bl));
+  let product_error=rounded(rounded(al*bl)-err3);
+  let sum=two_sum(product,c);let correction=two_sum(sum[1],product_error);
+  let result=two_sum(sum[0],correction[0]);let tail=two_sum(result[1],correction[1]);
+  let bits=bitcast<vec4u>(result[0]);let positive=tail[0]>vec4f(0);
+  let step=select(vec4u(0xffffffffu),vec4u(1u),(result[0]>=vec4f(0))==positive);
+  var next=bitcast<vec4f>(bits+step);
+  next=select(next,bitcast<vec4f>(select(vec4u(0x80000001u),vec4u(1u),positive)),result[0]==vec4f(0));
+  let half=abs(rounded(next-result[0]))*0.5;
+  let same_sign=(tail[1]>vec4f(0))==positive;
+  let tie=select(same_sign,(bits&vec4u(1u))!=vec4u(0),tail[1]==vec4f(0));
+  let away=(abs(tail[0])>half) | ((abs(tail[0])==half) & tie);
+  let value=select(result[0],next,away & (tail[0]!=vec4f(0)));
+  let signed_zero=bitcast<vec4f>((bitcast<vec4u>(a)^bitcast<vec4u>(b))&bitcast<vec4u>(c)&vec4u(0x80000000u));
+  return select(value,signed_zero,((a==vec4f(0)) | (b==vec4f(0))) & (c==vec4f(0)));
+}
+fn project_gl(point:vec3f)->vec4f{
+  let x=rounded(p.matrix[0]*point.x);
+  let xy=fused(p.matrix[1],vec4f(point.y),x);
+  return rounded(fused(p.matrix[2],vec4f(point.z),xy)+p.matrix[3]);
+}`;
 const COMPACT=`${PARAMS}
 struct Args { count:atomic<u32>, instances:u32, first:u32, base:i32, firstInstance:u32 };
 @group(0) @binding(0) var<uniform> p:Params;
@@ -31,6 +66,7 @@ const VERTEX=`${PARAMS}
 @group(0) @binding(0) var<uniform> p:Params;
 @group(0) @binding(1) var depth:texture_2d<u32>;
 @group(0) @binding(2) var quality:texture_2d<f32>;
+${GL_MATCHED_MATH}
 struct Vertex { @builtin(position) @invariant position:vec4f, @location(0) @interpolate(flat) valid:u32 };
 @vertex fn main(@builtin(vertex_index) index:u32)->Vertex{
   var pixel=vec2i(i32(index%p.size.x),i32(index/p.size.x));var valid=1u;
@@ -68,13 +104,13 @@ function baselineIndices(width,height){
 }
 function buffer(device,bytes,usage){const b=device.createBuffer({size:Math.max(4,bytes.byteLength),usage:usage|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(b,0,bytes);return b;}
 export class ExperimentalGpuVisibility{
-  static async create(cameras,matrices,{matrixMath='native'}={}){
+  static async create(cameras,matrices,{matrixMath='webgl_exact'}={}){
     const adapter=await navigator.gpu?.requestAdapter({powerPreference:'high-performance'});if(!adapter)throw Error('Hardware WebGPU unavailable');
     const timestamps=adapter.features.has('timestamp-query');
     const device=await adapter.requestDevice({requiredFeatures:timestamps?['timestamp-query']:[]});
     const result=new ExperimentalGpuVisibility(device,timestamps,cameras,matrices,matrixMath);
     result.adapterInfo={vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description,isFallbackAdapter:adapter.info.isFallbackAdapter};
-    try{await result.ready;return result;}catch(error){result.destroy();throw error;}
+    try{await result.ready;result.initialized=true;return result;}catch(error){result.destroy();throw error;}
   }
   constructor(device,timestamps,cameras,matrices,matrixMath){
     this.device=device;this.timestamps=timestamps;this.cameras=cameras;this.resources=[];this.sources=[];this.groups=[];
@@ -85,7 +121,7 @@ export class ExperimentalGpuVisibility{
     const d=this.device;
     const shader=async code=>{const s=d.createShaderModule({code});const info=await s.getCompilationInfo();const errors=info.messages.filter(m=>m.type==='error');if(errors.length)throw Error(errors.map(m=>m.message).join('\n'));return s;};
     this.compact=await d.createComputePipelineAsync({layout:'auto',compute:{module:await shader(COMPACT),entryPoint:'main'}});
-    const expressions={native:'p.matrix*vec4f(point,1)',pairwise:'(p.matrix[0]*point.x+p.matrix[1]*point.y)+(p.matrix[2]*point.z+p.matrix[3])',sequential:'((p.matrix[0]*point.x+p.matrix[1]*point.y)+p.matrix[2]*point.z)+p.matrix[3]'};
+    const expressions={native:'p.matrix*vec4f(point,1)',pairwise:'(p.matrix[0]*point.x+p.matrix[1]*point.y)+(p.matrix[2]*point.z+p.matrix[3])',sequential:'((p.matrix[0]*point.x+p.matrix[1]*point.y)+p.matrix[2]*point.z)+p.matrix[3]',webgl:'fma(p.matrix[2],vec4f(point.z),fma(p.matrix[1],vec4f(point.y),p.matrix[0]*point.x))+p.matrix[3]',webgl_exact:'project_gl(point)'};
     if(!expressions[matrixMath])throw Error('Unknown matrix evaluation mode');
     const vertexSource=VERTEX.replace('p.matrix*vec4f(point,1)',expressions[matrixMath]);
     const compactVertex=await shader(vertexSource),baselineVertex=await shader(vertexSource.replace('// BASELINE_ONLY',BASELINE_FLAGS).replace('// BASELINE_ZERO',BASELINE_ZERO));
@@ -97,17 +133,18 @@ export class ExperimentalGpuVisibility{
     for(let source=0;source<this.cameras.length;source++){
       const c=this.cameras[source],total=(c.width-1)*(c.height-1)*6;
       const depth=d.createTexture({size:[c.width,c.height],format:'r16uint',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
-      const quality=d.createTexture({size:[c.width,c.height],format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+      const quality=d.createTexture({size:[c.width,c.height],format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT});
       d.queue.writeTexture({texture:depth},c.depth,{bytesPerRow:c.width*2},[c.width,c.height]);d.queue.writeTexture({texture:quality},c.quality,{bytesPerRow:c.width*4},[c.width,c.height]);
       const indices=d.createBuffer({size:total*4,usage:GPUBufferUsage.INDEX|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
       const args=buffer(d,new Uint32Array([0,1,0,0,0]),GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_SRC);
       const baseline=buffer(d,baselineIndices(c.width,c.height),GPUBufferUsage.INDEX);this.resources.push(depth,quality,indices,args,baseline);
       this.sources.push({depth,quality,indices,args,baseline,total});
       for(let target=0;target<this.cameras.length;target++){
-        const groups={baseline:[]};
+        const groups={baseline:[],params:[]};
         for(let half=0;half<2;half++){
           const bytes=new ArrayBuffer(96),floats=new Float32Array(bytes),ints=new Uint32Array(bytes);floats.set(matrices[target][source]);floats.set(c.intrinsics,16);ints.set([c.width,c.height,half,0],20);
           const params=buffer(d,bytes,GPUBufferUsage.UNIFORM);this.resources.push(params);
+          groups.params.push(params);
           const entries=[{binding:0,resource:{buffer:params}},{binding:1,resource:depth.createView()},{binding:2,resource:quality.createView()}];
           groups.baseline.push(d.createBindGroup({layout:this.baselinePipeline.getBindGroupLayout(0),entries}));
           if(!half){
@@ -121,18 +158,20 @@ export class ExperimentalGpuVisibility{
     }
     if(this.timestamps){this.queries=d.createQuerySet({type:'timestamp',count:4});this.queryResolve=d.createBuffer({size:512,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});this.queryRead=d.createBuffer({size:512,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});this.resources.push(this.queries,this.queryResolve,this.queryRead);}
   }
-  async render(compacted,{timing=true,compute=true}={}){
-    await this.ready;const d=this.device,encoder=d.createCommandEncoder();
+  async render(compacted,{timing=true,compute=true,wait=true,layers=null,activeSources=null}={}){
+    if(!this.initialized)await this.ready;const d=this.device,encoder=d.createCommandEncoder();
     if(compacted&&compute){
       for(const source of this.sources)d.queue.writeBuffer(source.args,0,new Uint32Array([0,1,0,0,0]));
       const pass=encoder.beginComputePass(this.timestamps&&timing?{timestampWrites:{querySet:this.queries,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1}}:{});pass.setPipeline(this.compact);
       this.sources.forEach((source,i)=>{const c=this.cameras[i];pass.setBindGroup(0,source.compute);pass.dispatchWorkgroups(Math.ceil(Math.ceil((c.width-1)/4)*Math.ceil((c.height-1)/8)*32/256));});pass.end();
     }
     for(let target=0;target<this.cameras.length;target++)for(let kind=0;kind<2;kind++){
+      if(layers&&!layers.has(target*2+kind))continue;
       const layer=target*2+kind,descriptor={colorAttachments:[],depthStencilAttachment:{view:this.views[layer],depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store',stencilReadOnly:true}};
       if(this.timestamps&&timing&&(layer===0||layer===this.layers-1))descriptor.timestampWrites={querySet:this.queries,...(layer===0?{beginningOfPassWriteIndex:2}:{}),...(layer===this.layers-1?{endOfPassWriteIndex:3}:{})};
       const pass=encoder.beginRenderPass(descriptor);pass.setViewport(0,0,this.cameras[target].colorWidth,this.cameras[target].colorHeight,0,1);pass.setPipeline(compacted?this.compactPipeline:this.baselinePipeline);
       this.sources.forEach((source,i)=>{
+        if(activeSources&&!activeSources[i])return;
         if((i===target)!==(kind===0))return;const groups=this.groups[target*this.cameras.length+i];
         pass.setIndexBuffer(compacted?source.indices:source.baseline,'uint32');
         if(compacted){pass.setBindGroup(0,groups.compact);pass.drawIndexedIndirect(source.args,0);}
@@ -141,6 +180,7 @@ export class ExperimentalGpuVisibility{
     }
     if(this.timestamps&&timing){if(compacted&&compute)encoder.resolveQuerySet(this.queries,0,2,this.queryResolve,0);encoder.resolveQuerySet(this.queries,2,2,this.queryResolve,256);encoder.copyBufferToBuffer(this.queryResolve,0,this.queryRead,0,512);}
     const started=performance.now();d.queue.submit([encoder.finish()]);
+    if(!timing&&!wait)return {wallMs:performance.now()-started};
     if(!this.timestamps||!timing){await d.queue.onSubmittedWorkDone();return {wallMs:performance.now()-started};}
     await this.queryRead.mapAsync(GPUMapMode.READ);const values=new BigUint64Array(this.queryRead.getMappedRange());const result={computeMs:compacted&&compute?Number(values[1]-values[0])/1e6:0,renderMs:Number(values[33]-values[32])/1e6,wallMs:performance.now()-started};this.queryRead.unmap();return result;
   }

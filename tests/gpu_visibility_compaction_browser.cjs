@@ -87,7 +87,7 @@ const root=path.resolve(__dirname,'..');
         }
         return {captured,geometry,matrixMath,adapter:gpu.adapterInfo,productionParityPassed:crossApiDifferent===0,counts,depthParity:{different,crossApiDifferent,maximumDepthDifference,total:reference.length,layerStats},timings,productionComparison,glError,gpuErrors};
       }finally{gpu.destroy();}
-    },{captured:Boolean(process.env.CAPTURE_PACKET),skipBenchmark:process.env.SKIP_BENCHMARK==='1',matrixMath:process.env.MATRIX_MATH||'native',geometry:process.env.TEST_GEOMETRY||'holes'});
+    },{captured:Boolean(process.env.CAPTURE_PACKET),skipBenchmark:process.env.SKIP_BENCHMARK==='1',matrixMath:process.env.MATRIX_MATH||'webgl_exact',geometry:process.env.TEST_GEOMETRY||'holes'});
     if(process.env.RESULT_PATH)fs.writeFileSync(process.env.RESULT_PATH,JSON.stringify({...result,pageErrors:errors},null,2));
     console.log(JSON.stringify(result));assert.deepEqual(errors,[]);assert.deepEqual(result.gpuErrors,[]);assert.equal(result.glError,0);assert.equal(result.depthParity.different,0,'compaction preserves every WebGPU depth texel');for(const c of result.counts){assert.equal(c.expected,c.actual);assert.equal(c.invalid,0);assert.equal(c.duplicates,0);}
     if(process.env.REQUIRE_PRODUCTION_PARITY==='1')assert.equal(result.productionParityPassed,true,'production WebGL parity is required before enabling this experiment');
