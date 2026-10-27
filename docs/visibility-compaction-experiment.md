@@ -155,7 +155,9 @@ The temporary visible window was closed after the test.
 projection fixes the edge problem, but cross-API transfers/synchronization
 erase the visibility-stage gain and reduce decode throughput. Keeping
 visibility and BlendPCR composition in one WebGPU pipeline is the next
-integration direction to investigate; it has not been implemented or timed.
+integration direction to investigate. The subsequent native implementation
+and its separate live acceptance gates are documented in
+[the unified WebGPU BlendPCR experiment](webgpu-blendpcr-experiment.md).
 
 Two further WebGL variants were removed: GPU-written element buffers are
 disallowed by WebGL, and a projected-vertex cache failed exact edge parity.

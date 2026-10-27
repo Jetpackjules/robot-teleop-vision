@@ -87,6 +87,7 @@ function projection(p){
     2*(k[2]+.5)/w-1,2*(k[3]+.5)/h-1,(f+n)/(f-n),1,0,0,-2*f*n/(f-n),0]);
   return multiply(clip,cv);
 }
+export {projection as rgbVisibilityProjection,multiply as rgbVisibilityMultiply};
 export class RgbVisibility {
   constructor(gl,compile,allocate,replayQuality=null){this.gl=gl;this.compile=compile;this.allocate=allocate;this.replayQuality=replayQuality;this.buffers=new Map();this.tileUploads=new Map();this.passes=0;this.tiled=true;this.sharedVertices=true;this.useRegions=true;this.layers=new Int32Array(0);this.sources=[];this.revisions=[];this.layerStates=[];this.snapshotCache=new WeakMap();}
   clear(){const gl=this.gl;if(this.texture)gl.deleteTexture(this.texture);if(this.framebuffer)gl.deleteFramebuffer(this.framebuffer);

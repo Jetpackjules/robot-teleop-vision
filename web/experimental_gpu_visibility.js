@@ -104,17 +104,17 @@ function baselineIndices(width,height){
 }
 function buffer(device,bytes,usage){const b=device.createBuffer({size:Math.max(4,bytes.byteLength),usage:usage|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(b,0,bytes);return b;}
 export class ExperimentalGpuVisibility{
-  static async create(cameras,matrices,{matrixMath='webgl_exact'}={}){
+  static async create(cameras,matrices,{matrixMath='webgl_exact',history=false}={}){
     const adapter=await navigator.gpu?.requestAdapter({powerPreference:'high-performance'});if(!adapter)throw Error('Hardware WebGPU unavailable');
     const timestamps=adapter.features.has('timestamp-query');
     const device=await adapter.requestDevice({requiredFeatures:timestamps?['timestamp-query']:[]});
-    const result=new ExperimentalGpuVisibility(device,timestamps,cameras,matrices,matrixMath);
+    const result=new ExperimentalGpuVisibility(device,timestamps,cameras,matrices,matrixMath,history);
     result.adapterInfo={vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description,isFallbackAdapter:adapter.info.isFallbackAdapter};
     try{await result.ready;result.initialized=true;return result;}catch(error){result.destroy();throw error;}
   }
-  constructor(device,timestamps,cameras,matrices,matrixMath){
+  constructor(device,timestamps,cameras,matrices,matrixMath,history=false){
     this.device=device;this.timestamps=timestamps;this.cameras=cameras;this.resources=[];this.sources=[];this.groups=[];
-    this.width=Math.max(...cameras.map(c=>c.colorWidth));this.height=Math.max(...cameras.map(c=>c.colorHeight));this.layers=cameras.length*2;
+    this.width=Math.max(...cameras.map(c=>c.colorWidth));this.height=Math.max(...cameras.map(c=>c.colorHeight));this.layers=cameras.length*(history?4:2);
     this.ready=this.initialize(matrices,matrixMath);
   }
   async initialize(matrices,matrixMath){
@@ -158,8 +158,9 @@ export class ExperimentalGpuVisibility{
     }
     if(this.timestamps){this.queries=d.createQuerySet({type:'timestamp',count:4});this.queryResolve=d.createBuffer({size:512,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC});this.queryRead=d.createBuffer({size:512,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});this.resources.push(this.queries,this.queryResolve,this.queryRead);}
   }
-  async render(compacted,{timing=true,compute=true,wait=true,layers=null,activeSources=null}={}){
+  async render(compacted,{timing=true,compute=true,wait=true,layers=null,activeSources=null,layerMap=null}={}){
     if(!this.initialized)await this.ready;const d=this.device,encoder=d.createCommandEncoder();
+    const selected=Array.from({length:this.cameras.length*2},(_,i)=>i).filter(i=>!layers||layers.has(i));
     if(compacted&&compute){
       for(const source of this.sources)d.queue.writeBuffer(source.args,0,new Uint32Array([0,1,0,0,0]));
       const pass=encoder.beginComputePass(this.timestamps&&timing?{timestampWrites:{querySet:this.queries,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1}}:{});pass.setPipeline(this.compact);
@@ -167,8 +168,9 @@ export class ExperimentalGpuVisibility{
     }
     for(let target=0;target<this.cameras.length;target++)for(let kind=0;kind<2;kind++){
       if(layers&&!layers.has(target*2+kind))continue;
-      const layer=target*2+kind,descriptor={colorAttachments:[],depthStencilAttachment:{view:this.views[layer],depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store',stencilReadOnly:true}};
-      if(this.timestamps&&timing&&(layer===0||layer===this.layers-1))descriptor.timestampWrites={querySet:this.queries,...(layer===0?{beginningOfPassWriteIndex:2}:{}),...(layer===this.layers-1?{endOfPassWriteIndex:3}:{})};
+      const layer=layerMap?layerMap[target*2+kind]:target*2+kind,descriptor={colorAttachments:[],depthStencilAttachment:{view:this.views[layer],depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store',stencilReadOnly:true}};
+      const logical=target*2+kind;
+      if(this.timestamps&&timing&&(logical===selected[0]||logical===selected.at(-1)))descriptor.timestampWrites={querySet:this.queries,...(logical===selected[0]?{beginningOfPassWriteIndex:2}:{}),...(logical===selected.at(-1)?{endOfPassWriteIndex:3}:{})};
       const pass=encoder.beginRenderPass(descriptor);pass.setViewport(0,0,this.cameras[target].colorWidth,this.cameras[target].colorHeight,0,1);pass.setPipeline(compacted?this.compactPipeline:this.baselinePipeline);
       this.sources.forEach((source,i)=>{
         if(activeSources&&!activeSources[i])return;
@@ -178,11 +180,11 @@ export class ExperimentalGpuVisibility{
         else for(let half=0;half<2;half++){pass.setBindGroup(0,groups.baseline[half]);pass.drawIndexed(source.total/2,1,half*source.total/2);}
       });pass.end();
     }
-    if(this.timestamps&&timing){if(compacted&&compute)encoder.resolveQuerySet(this.queries,0,2,this.queryResolve,0);encoder.resolveQuerySet(this.queries,2,2,this.queryResolve,256);encoder.copyBufferToBuffer(this.queryResolve,0,this.queryRead,0,512);}
+    if(this.timestamps&&timing){if(compacted&&compute)encoder.resolveQuerySet(this.queries,0,2,this.queryResolve,0);if(selected.length)encoder.resolveQuerySet(this.queries,2,2,this.queryResolve,256);encoder.copyBufferToBuffer(this.queryResolve,0,this.queryRead,0,512);}
     const started=performance.now();d.queue.submit([encoder.finish()]);
     if(!timing&&!wait)return {wallMs:performance.now()-started};
     if(!this.timestamps||!timing){await d.queue.onSubmittedWorkDone();return {wallMs:performance.now()-started};}
-    await this.queryRead.mapAsync(GPUMapMode.READ);const values=new BigUint64Array(this.queryRead.getMappedRange());const result={computeMs:compacted&&compute?Number(values[1]-values[0])/1e6:0,renderMs:Number(values[33]-values[32])/1e6,wallMs:performance.now()-started};this.queryRead.unmap();return result;
+    await this.queryRead.mapAsync(GPUMapMode.READ);const values=new BigUint64Array(this.queryRead.getMappedRange());const result={computeMs:compacted&&compute?Number(values[1]-values[0])/1e6:0,renderMs:selected.length?Number(values[33]-values[32])/1e6:0,wallMs:performance.now()-started};this.queryRead.unmap();return result;
   }
   async readDepth(){
     const d=this.device,size=this.width*this.height*this.layers*4,out=d.createBuffer({size,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC}),read=d.createBuffer({size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
@@ -195,4 +197,7 @@ export class ExperimentalGpuVisibility{
     finally{if(args.mapState==='mapped')args.unmap();args.destroy();if(read){if(read.mapState==='mapped')read.unmap();read.destroy();}}
   }
   destroy(){for(const resource of this.resources)resource.destroy();this.resources=[];this.device.destroy();}
+}
+export function webglProjectionArithmetic(zeroExpression){
+  return GL_MATCHED_MATH.slice(0,GL_MATCHED_MATH.indexOf('fn project_gl')).replaceAll('p.padding',zeroExpression);
 }

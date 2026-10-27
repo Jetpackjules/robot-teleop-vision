@@ -1,0 +1,396 @@
+{
+  "date": "2026-10-27",
+  "decision": "disabled; fidelity and performance gates failed",
+  "viewport": [
+    1972,
+    1290
+  ],
+  "adapter": {
+    "vendor": "intel",
+    "architecture": "gen-12lp",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "live": [
+    {
+      "phase": "baseline-orbit",
+      "uiFps": {
+        "median": 43.145741399491186,
+        "minimum": 35.34956794641477,
+        "p10_nearest": 37.81094527363184,
+        "samples": 32,
+        "below30": 0
+      },
+      "decodedBatchFpsMedian": 17.254601864352594,
+      "keptPercentRange": [
+        4.571345225732933,
+        4.619545642666189
+      ],
+      "allEditorActive": true,
+      "activeNativeSamples": 0,
+      "lastNativeStatus": {
+        "requested": false,
+        "verified": false,
+        "active": false,
+        "frames": 0,
+        "verification": null,
+        "failure": null,
+        "presentations": 0
+      },
+      "lastRollingCpuMs": {
+        "rigUpdateMs": {
+          "mean": 0.5131250128149987,
+          "max": 2.200000047683716
+        },
+        "webglRenderMs": {
+          "mean": 0.4243749901652336,
+          "max": 3.5
+        }
+      }
+    },
+    {
+      "phase": "gpu-orbit",
+      "uiFps": {
+        "median": 17.312687309448652,
+        "minimum": 13.451191388772472,
+        "p10_nearest": 13.942140119666806,
+        "samples": 32,
+        "below30": 29
+      },
+      "decodedBatchFpsMedian": 17.677331330498927,
+      "keptPercentRange": [
+        4.57810983224731,
+        4.622338789437136
+      ],
+      "allEditorActive": true,
+      "activeNativeSamples": 32,
+      "lastNativeStatus": {
+        "requested": true,
+        "verified": true,
+        "active": true,
+        "frames": 370,
+        "verification": {
+          "colorDifferent": 0,
+          "depthDifferent": 0,
+          "pixels": 2543880
+        },
+        "failure": null,
+        "presentations": 299
+      },
+      "lastRollingCpuMs": {
+        "rgbUploadMs": {
+          "mean": 1.036874994635582,
+          "max": 2.9000000953674316
+        },
+        "rigUpdateMs": {
+          "mean": 0.007500001788139343,
+          "max": 0.10000014305114746
+        },
+        "webglRenderMs": {
+          "mean": 0.4428571973528181,
+          "max": 1.1000001430511475
+        },
+        "nativeUpdateMs": {
+          "mean": 2.8112500101327895,
+          "max": 8.700000047683716
+        },
+        "nativeRenderMs": {
+          "mean": 3.4843750044703485,
+          "max": 11.700000047683716
+        },
+        "presentMs": {
+          "mean": 0.16312500089406967,
+          "max": 0.40000009536743164
+        }
+      }
+    },
+    {
+      "phase": "baseline-orbit",
+      "uiFps": {
+        "median": 43.846558455303004,
+        "minimum": 30.52852509618666,
+        "p10_nearest": 38.89537146522502,
+        "samples": 32,
+        "below30": 0
+      },
+      "decodedBatchFpsMedian": 19.4288118095074,
+      "keptPercentRange": [
+        4.567031054111558,
+        4.609932728731935
+      ],
+      "allEditorActive": true,
+      "activeNativeSamples": 0,
+      "lastNativeStatus": {
+        "requested": false,
+        "verified": false,
+        "active": false,
+        "frames": 371,
+        "verification": {
+          "colorDifferent": 0,
+          "depthDifferent": 0,
+          "pixels": 2543880
+        },
+        "failure": null,
+        "presentations": 300
+      },
+      "lastRollingCpuMs": {
+        "rigUpdateMs": {
+          "mean": 0.8799999952316284,
+          "max": 5.200000047683716
+        },
+        "webglRenderMs": {
+          "mean": 0.6412500023841858,
+          "max": 2.299999952316284
+        }
+      }
+    }
+  ],
+  "parity": {
+    "initial": {
+      "different": {
+        "quality": 0,
+        "metadata": 0,
+        "visibility": 0,
+        "color": 0,
+        "depth": 0
+      },
+      "glError": 0,
+      "gpuError": null,
+      "presentation": {
+        "color": {
+          "different": 0,
+          "total": 10175520,
+          "max": 0,
+          "examples": []
+        },
+        "depth": {
+          "different": 0,
+          "total": 2543880,
+          "max": 0,
+          "examples": []
+        },
+        "glError": 0
+      }
+    },
+    "sequence": [
+      {
+        "case": "viewpoint",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "near-plane",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 11162
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "independent-camera-update",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "rotated-crop",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "modeled-table",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "robot-mask",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "gray-capture",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "restore-rgb",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "one-stale",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "all-stale",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "restore-fresh",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "resize",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "empty-source",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      },
+      {
+        "case": "restored-source",
+        "different": {
+          "quality": 0,
+          "metadata": 0,
+          "visibility": 0,
+          "color": 0,
+          "depth": 0
+        },
+        "glError": 0,
+        "gpuError": null
+      }
+    ],
+    "nearPlaneDepthFailure": {
+      "different": 11162,
+      "total": 2543880,
+      "max": 131071,
+      "examples": [
+        {
+          "at": 186446,
+          "a": 1051199281,
+          "b": 1051199280
+        },
+        {
+          "at": 188413,
+          "a": 1051173109,
+          "b": 1051173108
+        },
+        {
+          "at": 188414,
+          "a": 1051165723,
+          "b": 1051165722
+        },
+        {
+          "at": 188415,
+          "a": 1051158369,
+          "b": 1051158368
+        },
+        {
+          "at": 188416,
+          "a": 1051150973,
+          "b": 1051150972
+        },
+        {
+          "at": 188418,
+          "a": 1051136205,
+          "b": 1051136204
+        },
+        {
+          "at": 188419,
+          "a": 1051128759,
+          "b": 1051128758
+        },
+        {
+          "at": 188420,
+          "a": 1051121199,
+          "b": 1051121198
+        }
+      ]
+    }
+  },
+  "newRobotCommandsSentToHost": 0,
+  "errors": []
+}
