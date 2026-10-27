@@ -2549,6 +2549,7 @@ function render() {
       gl.bindVertexArray(null);
       state.cameraFusion.update(state.cameras, inverseRigidTransform, now, state.settings, {
         framebuffer: null, vertexArray: null, viewport: [0,0,dimensions.width,dimensions.height],
+        workspaceEditing: Boolean(state.workspaceEditor?.drag),
       });
       cached = true;
     } catch (error) {

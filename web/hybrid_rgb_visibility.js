@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 import {bindWorkspaceTiles,unbindWorkspaceTiles} from './workspace_crop.js?v=20261021_original_rgb';
 import {visibleNativeTiles,nativeSourceTiles} from './native_geometry.js?v=20261026_native_render';
+import {rgbVisibilityRegion,regionContains,rgbRegionClip} from './rgb_visibility_region.js?v=20261027_visibility_region';
 const VERTEX=`#version 300 es
 precision highp float;precision highp int;precision highp usampler2D;
 uniform usampler2D u_depth;
@@ -87,14 +88,14 @@ function projection(p){
   return multiply(clip,cv);
 }
 export class RgbVisibility {
-  constructor(gl,compile,allocate){this.gl=gl;this.compile=compile;this.allocate=allocate;this.buffers=new Map();this.tileUploads=new Map();this.passes=0;this.tiled=true;this.sharedVertices=true;this.layers=new Int32Array(0);this.sources=[];this.revisions=[];}
+  constructor(gl,compile,allocate,replayQuality=null){this.gl=gl;this.compile=compile;this.allocate=allocate;this.replayQuality=replayQuality;this.buffers=new Map();this.tileUploads=new Map();this.passes=0;this.tiled=true;this.sharedVertices=true;this.useRegions=true;this.layers=new Int32Array(0);this.sources=[];this.revisions=[];this.layerStates=[];this.snapshotCache=new WeakMap();}
   clear(){const gl=this.gl;if(this.texture)gl.deleteTexture(this.texture);if(this.framebuffer)gl.deleteFramebuffer(this.framebuffer);
     if(this.program)gl.deleteProgram(this.program);if(this.tileProgram)gl.deleteProgram(this.tileProgram);if(this.vao)gl.deleteVertexArray(this.vao);
     for(const b of this.buffers.values())gl.deleteBuffer(b.buffer);this.buffers.clear();
     for(const b of this.tileUploads.values()){gl.deleteBuffer(b.buffer);gl.deleteBuffer(b.vertexBuffer);}this.tileUploads.clear();
     this.texture=this.framebuffer=this.program=this.tileProgram=this.vao=null;
-    this.signature='';this.historyKey='';this.layers=new Int32Array(0);this.sources=[];this.revisions=[];}
-  update(cameras,quality,inverse,enabled,now,active=true,revisions=null){
+    this.signature='';this.historyKey='';this.layers=new Int32Array(0);this.sources=[];this.revisions=[];this.layerStates=[];this.snapshotCache=new WeakMap();}
+  update(cameras,quality,inverse,enabled,now,active=true,revisions=null,options={}){
     const gl=this.gl,width=enabled?Math.max(...cameras.map(c=>c.colorWidth||c.width)):1,
       height=enabled?Math.max(...cameras.map(c=>c.colorHeight||c.height)):1;
     const tiled=this.tiled;
@@ -130,6 +131,8 @@ export class RgbVisibility {
     const historyKey=JSON.stringify(cameras.map(c=>[c.metadata.id,Array.from(c.modelMatrix),
       c.metadata.color_projection,now-c.lastUpdateMs<1000]));
     const hasHistory=this.historyKey===historyKey;
+    if(!hasHistory){this.layerStates=[];this.snapshotCache=new WeakMap();}
+    const regions=options.regions===true&&Boolean(this.replayQuality);
     const sourceRevisions=revisions||cameras.map(c=>c.uploadRevision??c.lastUpdateMs);
     const changed=cameras.map((camera,index)=>this.sources[index]!==camera||this.revisions[index]!==sourceRevisions[index]);
     const slotSize=cameras.length*2;
@@ -142,27 +145,61 @@ export class RgbVisibility {
       const nextSelf=dirtySelf?(hasHistory?(oldSelf+slotSize)%(slotSize*2):cameras.length+target):oldSelf;
       // Each map rotates independently. Unchanged maps are the same exact
       // current and previous observation; no copy or repeated raster is needed.
-      this.layers.set([nextPeer,nextSelf,hasHistory?oldPeer:nextPeer,hasHistory?oldSelf:nextSelf],offset);
+      if(!options.regionOnly)this.layers.set([nextPeer,nextSelf,hasHistory?oldPeer:nextPeer,hasHistory?oldSelf:nextSelf],offset);
+      const targetProjection=multiply(projection(camera.metadata.color_projection),inverse(camera.modelMatrix));
+      const region=rgbVisibilityRegion(regions?options.bounds:null,targetProjection,camera.colorWidth,camera.colorHeight);
+      const narrow=regions&&(region.x!==0||region.y!==0||region.width!==camera.colorWidth||region.height!==camera.colorHeight);
+      // Expanding or disabling a crop restores historical maps from their
+      // original raw captures. Never discard temporal evidence on a crop edit.
+      for(const layer of new Set(this.layers.slice(offset,offset+4))){
+        if(layer===nextPeer&&dirtyPeers||layer===nextSelf&&dirtySelf)continue;
+        const previous=this.layerStates[layer];
+        if(previous&&!regionContains(previous.region,region))this.replayLayer(layer,previous,region,tiled,cameras.length);
+      }
       if(!dirtySelf&&!dirtyPeers)continue;
       gl.viewport(0,0,camera.colorWidth,camera.colorHeight);gl.clearDepth(1);
-      const targetProjection=multiply(projection(camera.metadata.color_projection),inverse(camera.modelMatrix));
       for(const [dirty,layer,self]of [[dirtySelf,nextSelf,true],[dirtyPeers,nextPeer,false]]){
         if(!dirty)continue;
+        gl.bindFramebuffer(gl.FRAMEBUFFER,this.framebuffer);gl.bindVertexArray(this.vao);
         gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,this.texture,0,layer);gl.clear(gl.DEPTH_BUFFER_BIT);
+        gl.activeTexture(gl.TEXTURE6);gl.bindTexture(gl.TEXTURE_2D_ARRAY,quality);
+        const records=[];
         for(let source=0;source<cameras.length;source++){
           if((source===target)!==self)continue;
           const c=cameras[source];
           if(now-c.lastUpdateMs>=1000)continue;
-          this.drawSource(c,source,multiply(targetProjection,c.modelMatrix),tiled);
+          const matrix=multiply(targetProjection,c.modelMatrix);
+          if(narrow){
+            let snapshot=this.snapshotCache.get(c);
+            if(!snapshot||snapshot.revision!==sourceRevisions[source]){
+              snapshot={revision:sourceRevisions[source],camera:{...c,modelMatrix:new Float32Array(c.modelMatrix),intrinsicsArray:new Float32Array(c.intrinsicsArray)},delta:options.delta,edge:options.edge};this.snapshotCache.set(c,snapshot);
+            }
+            records.push({snapshot,source,matrix});
+          }
+          if(region.width&&region.height)this.drawSource(c,source,matrix,tiled,rgbRegionClip(matrix,region,camera.colorWidth,camera.colorHeight));
         }
+        this.layerStates[layer]=narrow?{records,region,width:camera.colorWidth,height:camera.colorHeight}:null;
       }
     }
     this.sources=cameras.slice();this.revisions=sourceRevisions.slice();
     this.historyKey=historyKey;
+    const referenced=new Set(this.layers);
+    this.layerStates.forEach((state,layer)=>{if(!referenced.has(layer))this.layerStates[layer]=null;});
+    if(!regions||!this.layerStates.some(Boolean)){this.layerStates=[];this.snapshotCache=new WeakMap();}
     gl.depthFunc(gl.LEQUAL);
   }
-  drawSource(c,source,matrix,tiled){
-    let tiles=tiled?visibleNativeTiles(c,matrix,null,[0,0],true):null;
+  replayLayer(layer,previous,region,tiled,count){
+    const gl=this.gl;gl.bindFramebuffer(gl.FRAMEBUFFER,this.framebuffer);gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,this.texture,0,layer);gl.disable(gl.SCISSOR_TEST);gl.depthMask(true);gl.clearDepth(1);gl.clear(gl.DEPTH_BUFFER_BIT);
+    if(region.width&&region.height)for(const record of previous.records){
+      const replay=this.replayQuality(record.snapshot,record.source,count);
+      gl.bindFramebuffer(gl.FRAMEBUFFER,this.framebuffer);gl.bindVertexArray(this.vao);gl.viewport(0,0,previous.width,previous.height);gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LESS);gl.depthMask(true);gl.disable(gl.BLEND);gl.disable(gl.CULL_FACE);gl.disable(gl.SCISSOR_TEST);
+      gl.activeTexture(gl.TEXTURE6);gl.bindTexture(gl.TEXTURE_2D_ARRAY,replay.quality);
+      this.drawSource({...record.snapshot.camera,depthTexture:replay.depth},record.source,record.matrix,tiled,rgbRegionClip(record.matrix,region,previous.width,previous.height));
+    }
+    previous.region=region;this.regionReplays=(this.regionReplays||0)+1;
+  }
+  drawSource(c,source,matrix,tiled,cullingMatrix=matrix){
+    let tiles=tiled?visibleNativeTiles(c,cullingMatrix,null,[0,0],true):null;
     if(tiled&&!tiles&&(c.metadata.stream_depth_origin||this.sharedVertices))tiles=nativeSourceTiles(c);
     tiled=Boolean(tiles);
     const shared=tiled&&this.sharedVertices;

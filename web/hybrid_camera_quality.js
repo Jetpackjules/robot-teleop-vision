@@ -4,6 +4,8 @@
 import { COLOR_PROJECTION_SHADER, bindColorProjection, validatedColorProjection } from './hybrid_color_projection.js?v=20261021_original_rgb';
 
 import {RgbVisibility} from './hybrid_rgb_visibility.js?v=20261021_original_rgb';
+import {workspaceCropBounds,WORKSPACE_CROP_CONTEXT} from './workspace_crop.js?v=20261021_original_rgb';
+import {modeledWorkspaceBounds} from './modeled_workspace.js?v=20261021_original_rgb';
 
 export const FULLSCREEN_VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -394,6 +396,7 @@ export class GpuCameraRig {
     this.rebuilds = 0;
     this.program = null;
     this.metadataSignature = "";
+    this.visibilityBaseKey="";
     this.count = 0;
     this.bindings = new WeakMap();
     this.failedSignature = "";
@@ -403,13 +406,14 @@ export class GpuCameraRig {
     this.maxLayers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS);
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
     this.copyDepthOnGpu = copyDepthOnGpu;
-    this.visibility=new RgbVisibility(gl,compileGpuProgram,gpuTexture);
+    this.visibility=new RgbVisibility(gl,compileGpuProgram,gpuTexture,(snapshot,index,count)=>this.replayVisibilityQuality(snapshot,index,count));
   }
 
   clear() {
     const gl = this.gl;
     this.visibility.clear();
     if(this.rgb&&this.rgb!==this.color)gl.deleteTexture(this.rgb);this.rgb=null;
+    if(this.visibilityReplay){gl.deleteTexture(this.visibilityReplay.depth);gl.deleteTexture(this.visibilityReplay.quality);gl.deleteFramebuffer(this.visibilityReplay.framebuffer);this.visibilityReplay=null;}
     for (const key of ["depth", "data", "quality", "color"]) {
       if (this[key]) gl.deleteTexture(this[key]);
       this[key] = null;
@@ -421,6 +425,7 @@ export class GpuCameraRig {
     if (this.program) gl.deleteProgram(this.program);
     this.depthCopyFramebuffer = this.framebuffer = this.vao = this.program = null;
     this.signature = this.metadataSignature = "";
+    this.visibilityBaseKey="";
     this.uploads = [];
     this.count = 0;
     this.metadataValues = null;
@@ -449,6 +454,24 @@ export class GpuCameraRig {
     if(this.visibility.layers.length)gl.uniform4iv(locations.visibilityLayers,this.visibility.layers);
     if(locations.uniformData!==null&&this.metadataValues)gl.uniform4fv(locations.uniformData,this.metadataValues);
     if(locations.mask!==null){gl.activeTexture(gl.TEXTURE3);gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.maskTexture||this.depth);gl.uniform1i(locations.mask,3);}
+  }
+
+  replayVisibilityQuality(snapshot,index,count){
+    // Rebuild from the retained raw capture only when its RGB window expands.
+    // Reuse the original quality shader; its unused color output is discarded.
+    const gl=this.gl,c=snapshot.camera;
+    const width=Math.max(c.width,this.width),height=Math.max(c.height,this.height),signature=`${width}:${height}:${count}`;
+    if(this.visibilityReplay?.signature!==signature){
+      if(this.visibilityReplay){gl.deleteTexture(this.visibilityReplay.depth);gl.deleteTexture(this.visibilityReplay.quality);gl.deleteFramebuffer(this.visibilityReplay.framebuffer);}
+      this.visibilityReplay={signature,depth:gpuTexture(gl,gl.TEXTURE_2D,0,gl.R16UI,width,height),quality:gpuTexture(gl,gl.TEXTURE_2D_ARRAY,6,gl.RGBA8,width,height,count),framebuffer:gl.createFramebuffer()};
+    }
+    const replay=this.visibilityReplay,u=this.uniforms;
+    gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,replay.depth);gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,c.width,c.height,gl.RED_INTEGER,gl.UNSIGNED_SHORT,c.depth);
+    gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,c.colorTexture);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,replay.framebuffer);gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,replay.quality,0,index);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    gl.bindVertexArray(this.vao);gl.useProgram(this.program);gl.disable(gl.DEPTH_TEST);gl.disable(gl.BLEND);gl.disable(gl.CULL_FACE);gl.disable(gl.SCISSOR_TEST);gl.viewport(0,0,c.width,c.height);
+    gl.uniform1i(u.u_depth,0);gl.uniform1i(u.u_color,1);gl.uniform2i(u.u_size,c.width,c.height);gl.uniform4fv(u.u_intrinsics,c.intrinsicsArray);gl.uniform1f(u.u_mesh_depth_delta,snapshot.delta);gl.uniform1f(u.u_mesh_max_edge,snapshot.edge);bindColorProjection(gl,this.program,c);gl.drawArrays(gl.TRIANGLES,0,3);
+    return replay;
   }
 
   update(cameras, inverseTransform, now = performance.now(), settings = {}, restoreState = null) {
@@ -489,7 +512,7 @@ export class GpuCameraRig {
         const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
         gl.bindFramebuffer(gl.FRAMEBUFFER,parent);
         if (!complete) throw new Error("Camera cache framebuffer unavailable");
-        if (gl.getError() !== gl.NO_ERROR) throw new Error("Camera cache allocation failed");
+        if(gl.getError()!==gl.NO_ERROR)throw new Error("Camera cache allocation failed");
         this.signature = signature;
         this.width = width;this.height = height;
       } catch (error) {this.clear();this.failedSignature=signature;throw error;}
@@ -513,7 +536,14 @@ export class GpuCameraRig {
       const previous = this.uploads[index];
       if (!previous || previous.camera !== camera || previous.revision !== revision) changed.push({camera,index,revision});
     });
-    const key = metadata.toString()+":"+(settings.depth_only_enabled===true?"gray":"color");
+    // A continuous resize would otherwise replay old captures every time the
+    // sample window expands. Full maps keep active drags at the ordinary cost.
+    const regions=originalRgb&&this.visibility.useRegions===true&&!restoreState?.workspaceEditing;
+    const visibilityBounds=regions?modeledWorkspaceBounds(settings,workspaceCropBounds(settings,WORKSPACE_CROP_CONTEXT),WORKSPACE_CROP_CONTEXT):null;
+    const baseKey=metadata.toString()+":"+(settings.depth_only_enabled===true?"gray":"color");
+    // A crop edit alone must not advance the current/previous observation pair.
+    const regionOnly=!changed.length&&this.visibilityBaseKey===baseKey;
+    const key=baseKey+`:${regions}:${visibilityBounds?.key||''}`;
     this.metadataValues = metadata;
     if (!changed.length && key === this.metadataSignature) return;
     const oldFramebuffer = restoreState ? restoreState.framebuffer : gl.getParameter(gl.FRAMEBUFFER_BINDING);
@@ -566,7 +596,8 @@ export class GpuCameraRig {
         gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,13,cameras.length,gl.RGBA,gl.FLOAT,metadata);
         this.metadataSignature = key;
       }
-      this.visibility.update(cameras,this.quality,inverseTransform,originalRgb,now,settings.depth_only_enabled!==true,this.uploads.map(entry=>entry.revision));
+      this.visibility.update(cameras,this.quality,inverseTransform,originalRgb,now,settings.depth_only_enabled!==true,this.uploads.map(entry=>entry.revision),{regions,bounds:visibilityBounds,delta,edge,regionOnly});
+      this.visibilityBaseKey=baseKey;
       this.version++;
     } catch (error) {
       this.failedSignature=signature;

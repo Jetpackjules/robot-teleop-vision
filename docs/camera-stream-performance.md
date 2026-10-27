@@ -459,3 +459,57 @@ adaptive geometry and 3D wire representation are unchanged.
 Raw follow-up evidence is in the laptop's task-local temporary directory
 `teleop-quality-20261026-pass2`, outside OneDrive to avoid synchronizing large
 profiling artifacts. No robot commands were sent by these tests.
+
+### Crop-aware RGB visibility regions — 2026-10-27
+
+RGB visibility now derives a conservative RGB sampling rectangle from the
+retained workspace/table bounds. Native tiles wholly outside that RGB
+subfrustum can be skipped. The actual projection, native vertices, triangles,
+depth precision and RGB sampling are unchanged. Outside-crop geometry that
+projects into the sampling rectangle still participates as an occluder.
+Near-plane crossings retain full-camera coverage.
+
+Shrinking a crop can reuse the existing maps. Expanding or disabling it
+reconstructs affected current/previous maps from their original raw depth
+captures using the original quality shader. Crop-only changes preserve the
+existing history indices. Raw captures are retained only for narrowed maps;
+full maps require no added capture history. Active workspace drags use full
+maps to avoid repeated historical reconstruction during continuous resizing.
+
+Synthetic and saved native-Quality comparisons cover 190 checks each, with
+no differences in rendered image bytes or the visibility/history depth texels
+that retained points can sample. Cases include outside-crop occluders,
+asynchronous camera updates, crop growth/removal/rotation, table modeling,
+depth-only transitions, dragging and enabling/disabling the optimization.
+The region-math test checks 17,710 geometric conditions. Existing RGB
+visibility/original-RGB checks (39/95) and native renderer checks (1,076) passed.
+
+A captured-frame GPU cache/visibility test fell from about 29.3 to 26.2 ms.
+A separate live, isolated production controller matched the screenshot's
+roughly 4.6% retained-point fraction using a representative table placement;
+it did not read or change the operator's unsaved table draft. It used three
+1280×720 depth views, three 1920×1080 RGB images, seven arm models, an active
+table editor and a 1972×1290 output canvas. The table dimensions were
+0.502×0.730×0.580 m at 5.6 degrees. GeForce NOW was left running.
+
+In an A–B–B–A orbit sequence, 64 sampled UI counter readings per method gave:
+
+| Sampled viewer FPS | Baseline | RGB regions |
+| --- | ---: | ---: |
+| Median | 35.62 | 38.05 |
+| 10th percentile | 29.54 | 33.16 |
+| Lowest sampled reading | 25.68 | 31.62 |
+
+These are short, one-second-style UI counter windows in an isolated browser,
+not per-frame presentation timings or measurements inside the operator's
+existing tab. Earlier trials with different retained fractions varied and
+showed little or no consistent gain. The improvement is modest; these results
+do not promise 60 FPS or a universal 30 FPS minimum. Fresh camera updates
+remain separate from rendered FPS.
+
+The larger GPU triangle-compaction experiment reduced measured visibility
+work further but failed cross-backend depth/coverage parity; it remains
+experimental. See `visibility-compaction-experiment.md`. No adaptive geometry,
+lossy compression, 3D wire-format change, robot command or shared-service
+restart is part of this region optimization. Evidence is retained outside
+OneDrive in `teleop-compaction-20261027` under the laptop's temporary directory.
