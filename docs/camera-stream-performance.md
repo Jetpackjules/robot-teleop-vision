@@ -507,6 +507,15 @@ showed little or no consistent gain. The improvement is modest; these results
 do not promise 60 FPS or a universal 30 FPS minimum. Fresh camera updates
 remain separate from rendered FPS.
 
+The final live check loaded the deployed files through the public gateway
+without candidate-file overrides, and all four public asset hashes matched.
+At the same output dimensions and roughly 4.6% retained points, its 32 sampled
+UI readings had a median of 35.99 FPS and a minimum of 28.72 FPS. All three
+native depth/RGB feeds advanced, seven arm models loaded, and the browser
+reported no errors. This confirms deployment and a useful live result, but
+still does not establish a steady 30 FPS floor. The operator's existing tab
+and unsaved table draft were left untouched.
+
 The larger GPU triangle-compaction experiment reduced measured visibility
 work further but failed cross-backend depth/coverage parity; it remains
 experimental. See `visibility-compaction-experiment.md`. No adaptive geometry,
