@@ -789,7 +789,7 @@ class So101WebModule {
     this.renderStatus();
   }
 
-  prepareSession() { return window.so101ArmController.prepareTrialControl({connect: true}); }
+  prepareSession() { return window.so101ArmController.prepareTrialControl({connect: true, keyboardFallback: true}); }
   prepareTrial() { return window.so101ArmController.prepareTrialControl(); }
   sessionConnected() {
     const arm = window.so101ArmController?.latest;

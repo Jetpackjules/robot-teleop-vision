@@ -131,13 +131,21 @@ export class TrialController {
       if (this.condition === 'head_3d' && !window.godotWebcamTrackerLatest?.active)
         throw new Error('Wait for head tracking before starting this trial.');
       if (!this.viewReady()) throw new Error('Wait for the live view before starting this trial.');
+      const detail = byId('point-preview-enabled')?.value;
+      const preset = byId('stream-preset')?.value;
+      const overlay = byId('so101-overlay-enabled');
+      const input = window.so101ArmController?.latest?.controlMode;
       return {session_id: this.state.id, session_name: this.state.name, index: this.state.index + 1, total: this.state.plan.length,
         condition: this.condition, display_mode: this.display.value,
         task_id: this.state.taskId, time_limit_seconds: this.state.timeTargetSeconds,
         success_metric: this.state.plan[this.state.index].success_metric || defaultMetric(this.state.taskId),
         outcome_rule: this.state.plan[this.state.index].outcome_rule ||
           (defaultMetric(this.state.taskId) === 'pass_fail' ? 'finish_before_limit' : 'manual'), result_prompt: !this.practice,
-        ...(this.state.plan[this.state.index].phase ? {phase: this.state.plan[this.state.index].phase} : {})};
+        ...(this.state.plan[this.state.index].phase ? {phase: this.state.plan[this.state.index].phase} : {}),
+        ...(['0','-2','-1','20000','40000'].includes(detail) ? {point_preview_detail:Number(detail)} : {}),
+        ...(['quality','latency'].includes(preset) ? {stream_preset:preset} : {}),
+        ...(overlay ? {robot_overlay_enabled:overlay.checked} : {}),
+        ...(['keyboard','leader'].includes(input) ? {control_source:input} : {})};
     };
     recording.root.addEventListener('recordingchange', () => this.render());
     recording.task.addEventListener('input', () => {

@@ -787,3 +787,23 @@ def test_practice_records_observations_actions_but_never_pass_fail(tmp_path, con
             recorder.set_outcome('page-a', 'success')
         with pytest.raises(RecordingError):
             recorder.set_block_count('page-a', 1)
+
+
+def test_trial_preserves_actual_preview_start_settings(tmp_path):
+    trial = {**TRIAL, 'point_preview_detail':40000, 'stream_preset':'latency', 'robot_overlay_enabled':True, 'control_source':'keyboard'}
+    with recorder_at(tmp_path) as (recorder, _, _):
+        recorder.start('page-a', 'Preview settings audit', trial=trial)
+        wait_for(lambda: recorder.samples >= 3)
+        recorder.stop('page-a')
+        wait_for(lambda: recorder.state == 'idle')
+        path = tmp_path/recorder.last_saved['episode']
+        assert json.loads((path/'episode.json').read_text())['trial'] == trial
+        assert inspect_episode(path)[0]['trial'] == trial
+
+
+@pytest.mark.parametrize('patch', [{'point_preview_detail':True}, {'point_preview_detail':1000},
+    {'stream_preset':'unknown'}, {'robot_overlay_enabled':1}, {'control_source':'unknown'}])
+def test_trial_rejects_invalid_preview_settings(tmp_path, patch):
+    with recorder_at(tmp_path) as (recorder, _, _):
+        with pytest.raises(RecordingError):
+            recorder.start('page-a', 'Invalid preview snapshot', trial={**TRIAL, **patch})

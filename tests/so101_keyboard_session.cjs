@@ -21,5 +21,12 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
  const noAck=make();noAck.socket.send=raw=>noAck.sent.push(JSON.parse(raw));await assert.rejects(noAck.prepareTrialControl(),/did not confirm/);
  const leader=make();leader.latest.keyboardConnected=false;let received;leader.prepareLeaderTrial=async options=>{received=options;};
  await leader.prepareTrialControl({connect:true});assert.deepEqual(received,{connect:true});assert.equal(leader.sent.length,0,'default setup stays on the physical leader');
+ const fallback=make();fallback.latest.keyboardConnected=false;let keyboardConnections=0;
+ fallback.connectKeyboard=async()=>{keyboardConnections++;fallback.latest.keyboardConnected=true;};
+ await fallback.prepareTrialControl({connect:true,keyboardFallback:true});
+ assert.equal(keyboardConnections,1);assert.equal(fallback.sent[0].source,'keyboard');
+ const connected=make();connected.latest.keyboardConnected=false;connected.latest.leaderConnected=true;
+ connected.prepareLeaderTrial=async()=>{};connected.connectKeyboard=async()=>{throw Error('Do not replace a connected leader');};
+ await connected.prepareTrialControl({connect:true,keyboardFallback:true});
  console.log('PASS opt-in keyboard setup, no USB chooser, acknowledged Enable, Hold re-enable, Pause/offline gates and default leader setup');
 })().catch(e=>{console.error(e.message);process.exitCode=1;});

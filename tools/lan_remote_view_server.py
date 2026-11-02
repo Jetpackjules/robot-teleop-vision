@@ -123,6 +123,7 @@ CORE_PERSISTENT_VIEW_SETTINGS = frozenset(
         "robot_overlay_scope",
         "display_mode",
         "stream_preset",
+        "point_preview_detail",
     }
 )
 
@@ -4699,6 +4700,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if not isinstance(stream_preset, str) or stream_preset not in ("quality", "latency"):
                 raise ValueError("stream_preset must be quality or latency")
             packet["stream_preset"] = stream_preset
+        if "point_preview_detail" in data:
+            detail = data["point_preview_detail"]
+            if type(detail) is not int or detail not in (0, -2, -1, 20000, 40000):
+                raise ValueError("point_preview_detail must be full, balanced mesh, all points, 20k or 40k")
+            packet["point_preview_detail"] = detail
         for key, allowed in self.server.robot_operator.enum_view_settings().items():
             if key not in data:
                 continue

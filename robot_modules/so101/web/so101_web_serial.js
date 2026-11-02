@@ -587,9 +587,12 @@ export class So101ArmController extends EventTarget {
   }
 
   async prepareTrialControl(options = {}) {
-    // Keyboard is opt-in. The study's normal setup still uses the physical leader.
-    if (!this.latest.keyboardConnected) return this.prepareLeaderTrial(options);
     if (this.trialSuspended) throw new Error("Resume or finish the paused trial before setting up control.");
+    // The explicit setup click can use keyboard when no leader is connected.
+    // An existing or partially opened leader is never silently replaced.
+    if (options.connect && options.keyboardFallback && !this.latest.leaderConnected && !this.latest.keyboardConnected && !this.port)
+      await this.connectKeyboard();
+    if (!this.latest.keyboardConnected) return this.prepareLeaderTrial(options);
     await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected && status.keyboardConnected);
     this.clearKeyboardMotion();
     if (!this.latest.armed || (this.latest.status?.control_source ?? this.latest.controlMode) !== "keyboard") this.enableArm();

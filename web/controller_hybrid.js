@@ -4,6 +4,7 @@
     import { CapturePresetControl, WorkspaceStreamControl, nativeStreamPreset } from "./capture_presets.js?v=20261028_crop_queue";
     import { MODELED_WORKSPACE_DEFAULTS, modeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
     import { renderCropStatistics } from './crop_statistics.js';
+    import { resolvePointDetail } from './point_detail_settings.js';
 
     const robotModule = await robotModuleReady;
     const recordingRoot = document.getElementById('episode-recording');
@@ -29,7 +30,7 @@
     blendSupport.value=clampBlend(storedBlend.support,0,4,localStorage.getItem('robotTeleopTriangleFilter')==='relaxed'?1:2);
     blendEdge.value=clampBlend(storedBlend.edge,20,1000,80);
     const savedPointDetail=localStorage.getItem('robotTeleopPointDetail');
-    pointPreviewToggle.value=['0','-2','-1','20000','40000'].includes(savedPointDetail)?savedPointDetail:'0';
+    pointPreviewToggle.value=resolvePointDetail({},savedPointDetail);
     const applyPointOptions=()=>{
       blendControls.hidden=displayModeSelect.value!=='blendpcr'||pointPreviewActive();
       document.getElementById('blend-depth-value').textContent=Number(blendDepth.value).toFixed(1)+'Ã—';
@@ -62,7 +63,7 @@
       "head-height", "orbit-elevation",
     ];
     // v13 adds GPU mesh views while preserving older saved camera views.
-    const viewSettingsVersion = 16;
+    const viewSettingsVersion = 17;
     const modeledFields = ['width','depth','table-height','heading','clearance','height','light-angle','x','y','z'];
     let lastValidModeled = {...MODELED_WORKSPACE_DEFAULTS};
     let modeledWorkspaceConfigured = false;
@@ -215,6 +216,7 @@
       const payload = {
         rgbd_client_id:window.robotTeleopPageId,
         point_preview_enabled:pointPreviewActive(),point_preview_budget:selectedPointBudget(),
+        point_preview_detail:Number(pointPreviewToggle.value),
       workspace_stream_crop_enabled:!document.body.classList.contains('workspace-editing'),
         // Mouse navigation and click-to-focus are always available. Head
         // tracking layers onto this orbit rather than selecting another mode.
@@ -297,6 +299,11 @@
     function restoreViewSettings(savedInput = null, {preferLastTable = true} = {}) {
       const localSaved = localSavedViewSettings();
       const saved = savedInput && Object.keys(savedInput).length ? { ...localSaved, ...savedInput } : localSaved;
+      const pointDefault = JSON.stringify([saved?.settings_version,saved?.point_preview_detail]);
+      const samePointDefault = localStorage.getItem('robotTeleopPointDetailHostDefault') === pointDefault;
+      pointPreviewToggle.value=resolvePointDetail(saved,localStorage.getItem('robotTeleopPointDetail'),preferLastTable && samePointDefault);
+      localStorage.setItem('robotTeleopPointDetailHostDefault',pointDefault);
+      localStorage.setItem('robotTeleopPointDetail',pointPreviewToggle.value);
       // Installation defaults may use a newer version or a legacy timestamp.
       if (!saved || !Number.isFinite(saved.settings_version) || saved.settings_version < 6) {
         updateHeadTrackingOptions();

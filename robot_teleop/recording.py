@@ -343,7 +343,7 @@ class HostEpisodeRecorder:
             raise RecordingError('Select distinct cameras.')
         if trial is not None:
             fields = {'session_id', 'index', 'total', 'condition', 'display_mode'}
-            if not isinstance(trial, dict) or not fields <= set(trial) or set(trial)-fields-{'task_id', 'time_limit_seconds', 'session_name', 'success_metric', 'outcome_rule', 'result_prompt', 'phase'}:
+            if not isinstance(trial, dict) or not fields <= set(trial) or set(trial)-fields-{'task_id', 'time_limit_seconds', 'session_name', 'success_metric', 'outcome_rule', 'result_prompt', 'phase', 'point_preview_detail', 'stream_preset', 'robot_overlay_enabled', 'control_source'}:
                 raise RecordingError('Invalid trial metadata fields.')
             session = trial['session_id']
             if not isinstance(session, str) or not 1 <= len(session) <= 80 or any(
@@ -374,6 +374,15 @@ class HostEpisodeRecorder:
                 raise RecordingError('Invalid trial result prompt.')
             if 'phase' in trial and trial['phase'] not in ('practice', 'measured'):
                 raise RecordingError('Invalid trial phase.')
+            if 'point_preview_detail' in trial and (type(trial['point_preview_detail']) is not int
+                    or trial['point_preview_detail'] not in (0, -2, -1, 20000, 40000)):
+                raise RecordingError('Invalid trial point detail.')
+            if 'stream_preset' in trial and trial['stream_preset'] not in ('quality', 'latency'):
+                raise RecordingError('Invalid trial stream preset.')
+            if 'robot_overlay_enabled' in trial and type(trial['robot_overlay_enabled']) is not bool:
+                raise RecordingError('Invalid trial overlay setting.')
+            if 'control_source' in trial and trial['control_source'] not in ('keyboard', 'leader'):
+                raise RecordingError('Invalid trial control source.')
             if trial.get('phase') == 'practice' or trial.get('success_metric') == 'practice':
                 if (trial.get('phase') != 'practice' or trial.get('success_metric') != 'practice'
                         or trial.get('task_id') != 'single_block' or trial.get('outcome_rule') != 'manual'
