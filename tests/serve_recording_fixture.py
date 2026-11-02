@@ -166,6 +166,7 @@ def main():
         site_settings_path=args.output/'fixture-site-settings.json',
         robot_view_devices={'wrist_rgb': 'unused'})
     original_source = server.episode_recorder.source_factory
+    server.trial_protocol_path = args.output/'trial-protocol.json'
     server.fixture_scene = copy.deepcopy(scene)
 
     def synthetic_source():

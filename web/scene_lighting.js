@@ -1,4 +1,4 @@
-// Shared CAD lighting, matching RoboCade's ambient, white key and blue fill.
+// Soft neutral CAD lighting with a restrained cool fill for the slate workspace.
 // Camera RGB is deliberately never passed through this material shader.
 export const SCENE_LIGHTING_SHADER = `
 uniform int u_scene_lighting_enabled;
@@ -17,7 +17,7 @@ float scene_shadow(vec3 world,vec3 normal){
   // PCF samples neighboring texels on sloping surfaces. A slope-aware receiver
   // bias plus caster polygon offset avoids self-shadow stripes on the table.
   float bias=max(.002*(1.-max(dot(normal,u_scene_key),0.)),.0005),sum=0.;
-  vec2 texel=1./vec2(textureSize(u_scene_shadow,0));
+  vec2 texel=1.6/vec2(textureSize(u_scene_shadow,0));
   for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)
     sum+=p.z-bias<=texture(u_scene_shadow,p.xy+vec2(x,y)*texel).r?1.:0.;
   return sum/9.;
@@ -36,9 +36,9 @@ vec3 scene_material(vec3 color,vec3 normal,vec3 world,vec2 material){
   vec3 n=dot(normal,normal)>1e-10?normalize(normal):vec3(0,1,0);
   vec3 delta=u_scene_eye-world,v=dot(delta,delta)>1e-10?normalize(delta):n,base=scene_linear(color);
   float roughness=clamp(material.x,.12,1.),metalness=clamp(material.y,0.,1.);
-  vec3 ambient=base*scene_linear(vec3(64./255.))*2.;
-  vec3 key=scene_brdf(base,n,v,u_scene_key,roughness,metalness)*3.*scene_shadow(world,n);
-  vec3 fill=scene_brdf(base,n,v,normalize(vec3(-5,10,-5)),roughness,metalness)*scene_linear(vec3(135,206,235)/255.);
+  vec3 ambient=base*.36;
+  vec3 key=scene_brdf(base,n,v,u_scene_key,roughness,metalness)*2.8*scene_shadow(world,n);
+  vec3 fill=scene_brdf(base,n,v,normalize(vec3(-5,10,-5)),roughness,metalness)*scene_linear(vec3(.82,.89,1.))*1.15;
   return scene_srgb(ambient+key+fill);
 }`;
 

@@ -1,5 +1,5 @@
-import { RIG_SAMPLING_SHADER } from "./hybrid_camera_quality.js?v=20261021_original_rgb";
-export { GpuCameraRig as MultiCameraFusion } from "./hybrid_camera_quality.js?v=20261021_original_rgb";
+import { RIG_SAMPLING_SHADER } from "./hybrid_camera_quality.js?v=20261027_blend_limits";
+export { GpuCameraRig as MultiCameraFusion } from "./hybrid_camera_quality.js?v=20261027_blend_limits";
 
 // Shared by the live renderer and the camera-free GPU regression test.
 export function cameraIsFresh(camera, now = performance.now()) {

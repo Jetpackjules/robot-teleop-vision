@@ -15,6 +15,14 @@ export const MODELED_WORKSPACE_DEFAULTS = Object.freeze({
   scene_shadows_enabled: true,
 });
 
+// Cool slate: the dark arm stays distinct from the matte table and surroundings.
+export const MODELED_WORKSPACE_PALETTE = Object.freeze({
+  tabletop: [0.54, 0.62, 0.73],
+  legs: [0.38, 0.44, 0.52],
+  floor: [0.68, 0.73, 0.80],
+  background: [0.76, 0.79, 0.84],
+});
+
 export function modeledWorkspace(settings) {
   if (settings.modeled_workspace_enabled !== true) return null;
   const value = {...MODELED_WORKSPACE_DEFAULTS, ...settings};
@@ -42,15 +50,14 @@ export function modeledWorkspaceOutside(point, stage) {
 
 // The oriented tabletop's AABB is only a conservative submission bound. The
 // shader below makes the exact cut, retaining full native detail inside it.
-export function modeledWorkspaceBounds(settings, crop=null, margin=0) {
+export function modeledWorkspaceBounds(settings, margin=0) {
   const stage=modeledWorkspace(settings);
-  if (!stage) return crop;
+  if (!stage) return null;
   const x=(Math.abs(stage.cos)*stage.width+Math.abs(stage.sin)*stage.depth)/2;
   const z=(Math.abs(stage.sin)*stage.width+Math.abs(stage.cos)*stage.depth)/2;
   const min=[stage.center[0]-x-margin,stage.center[1]+stage.clearance-margin,stage.center[2]-z-margin];
   const max=[stage.center[0]+x+margin,stage.center[1]+stage.height+margin,stage.center[2]+z+margin];
-  if (crop) for(let axis=0;axis<3;axis++) {min[axis]=Math.max(min[axis],crop.min[axis]);max[axis]=Math.min(max[axis],crop.max[axis]);}
-  return {min,max,key:`${crop?.key||''}:${stage.key}:${margin}`};
+  return {min,max,key:`${stage.key}:${margin}`};
 }
 
 export const MODELED_WORKSPACE_SHADER = `
@@ -92,13 +99,51 @@ export function modeledWorkspaceGeometry(stage) {
     face([[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]],[0,0,1],color,material);
   };
   const w=stage.width/2,d=stage.depth/2,h=stage.tableHeight??.72,leg=Math.min(0.055,stage.width/8,stage.depth/8);
-  box(-w,-0.045,-d,w,0,d,[0.19,0.22,0.25],[.7,.1]);
+  box(-w,-0.045,-d,w,0,d,MODELED_WORKSPACE_PALETTE.tabletop,[.82,.05]);
   for(const x of [-w+leg,w-leg])for(const z of [-d+leg,d-leg])
-    box(x-leg/2,-h,z-leg/2,x+leg/2,-0.045,z+leg/2,[0.31,0.34,0.37],[.6,.8]);
+    box(x-leg/2,-h,z-leg/2,x+leg/2,-0.045,z+leg/2,MODELED_WORKSPACE_PALETTE.legs,[.72,.35]);
   const extent=Math.max(4,stage.width*3,stage.depth*3);
   face([[-extent,-h,-extent],[-extent,-h,extent],[extent,-h,extent],[extent,-h,-extent]],
-    [0,1,0],[0.105,0.13,0.15],[.8,.1]);
+    [0,1,0],MODELED_WORKSPACE_PALETTE.floor,[.9,.02]);
   return new Float32Array(vertices);
+}
+
+// Only the upper tabletop is an orbit target. The remaining geometry can
+// occlude other picks, but never supplies an orbit center itself.
+export function raycastModeledWorkspace(ray, stage) {
+  if(!stage||!ray||ray.direction[1]>=-1e-7)return null;
+  const distance=(stage.center[1]-ray.origin[1])/ray.direction[1];
+  if(distance<=1e-6)return null;
+  const point=ray.origin.map((v,i)=>v+ray.direction[i]*distance);
+  const x=point[0]-stage.center[0],z=point[2]-stage.center[2];
+  return Math.abs(stage.cos*x-stage.sin*z)<=stage.width/2
+    &&Math.abs(stage.sin*x+stage.cos*z)<=stage.depth/2?{point,distance}:null;
+}
+
+export function raycastModeledWorkspaceOccluder(ray, stage) {
+  if (!stage || !ray) return null;
+  const subtract=(a,b)=>a.map((v,i)=>v-b[i]);
+  const dot=(a,b)=>a.reduce((sum,v,i)=>sum+v*b[i],0);
+  const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+  const local=v=>[stage.cos*v[0]-stage.sin*v[2],v[1],stage.sin*v[0]+stage.cos*v[2]];
+  const origin=local(subtract(ray.origin,stage.center)),direction=local(ray.direction);
+  const vertices=modeledWorkspaceGeometry(stage);
+  let distance=Infinity;
+  for(let i=0;i<vertices.length;i+=33) {
+    const a=Array.from(vertices.subarray(i,i+3));
+    const edge1=subtract(Array.from(vertices.subarray(i+11,i+14)),a);
+    const edge2=subtract(Array.from(vertices.subarray(i+22,i+25)),a);
+    const p=cross(direction,edge2),det=dot(edge1,p);
+    if(Math.abs(det)<1e-10)continue;
+    const offset=subtract(origin,a),u=dot(offset,p)/det;
+    if(u < -1e-8 || u > 1+1e-8)continue;
+    const q=cross(offset,edge1),v=dot(direction,q)/det;
+    if(v < -1e-8 || u+v > 1+1e-8)continue;
+    const t=dot(edge2,q)/det;
+    if(t>1e-6&&t<distance)distance=t;
+  }
+  return Number.isFinite(distance)
+    ? {point:ray.origin.map((v,i)=>v+ray.direction[i]*distance),distance} : null;
 }
 
 const VERTEX = `#version 300 es

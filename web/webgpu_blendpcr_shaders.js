@@ -6,7 +6,7 @@ export function blendPcrShaders(count,{exact=true}={}){
 struct Frame {
  view_projection:mat4x4f,viewer:mat4x4f,view:mat4x4f,projection:mat4x4f,
  size:vec2u,count:u32,gray:u32,
- crop_min:vec4f,crop_max:vec4f,crop_center:vec4f,crop_inverse:mat3x4f,
+ reserved_region:array<vec4f,6>,
  stage_center:vec4f,stage_extent:vec4f,stage_rotation:vec4f,
  mask_start:array<vec4f,6>,mask_end:array<vec4f,6>,layers:array<vec4u,${count}>,flags:vec4u,context_min:vec4f,context_max:vec4f,
 };
@@ -45,12 +45,6 @@ fn triangle_edge(pixel:vec2i,z:f32,k:vec4f,origin:vec3f)->vec3f{
  // subtraction. Rounding a complete second point first changes the plane.
  let dx=rn(vec4f((f32(pixel.x)-k.z)*z)).x;let dy=rn(vec4f(-(f32(pixel.y)-k.w)*z)).x;
  return vec3f(mad(dx,1.0/k.x,-origin.x),mad(dy,1.0/k.y,-origin.y),-z-origin.z);
-}
-fn outside_crop(p:vec3f,margin:f32)->bool{
- if(frame.crop_min.w==0){return false;}let v=p-frame.crop_center.xyz;
- let rotated=mad3(frame.crop_inverse[2].xyz,vec3f(v.z),mad3(frame.crop_inverse[1].xyz,vec3f(v.y),rn(vec4f(frame.crop_inverse[0].xyz*v.x,0)).xyz));let q=frame.crop_center.xyz+rotated;
- let lo=select(frame.crop_min.xyz,frame.context_min.xyz,margin>0);let hi=select(frame.crop_max.xyz,frame.context_max.xyz,margin>0);
- return any(q<lo)||any(q>hi);
 }
 fn outside_stage(p:vec3f)->bool{
  if(frame.stage_center.w==0){return false;}let v=p-frame.stage_center.xyz;let r=frame.stage_rotation;
@@ -102,7 +96,7 @@ struct Vertex { @builtin(position) @invariant position:vec4f,@location(0) world:
  if(depth==0u){result.position=vec4f(2,-2,1.5,1);return result;}
  let local_point=point(pixel,f32(depth)*0.001,data(camera,3));let p=world(camera,local_point);result.world=p;let clip=mul4(frame.view_projection,vec4f(p,1));result.position=vec4f(clip.x,-clip.y,(clip.z+clip.w)*0.5,clip.w);return result;
 }
-@fragment fn fragment(input:Vertex)->@location(0) u32{if(input.valid==0u||input.id==0u||outside_crop(input.world,0.05)){discard;}return input.id;}
+@fragment fn fragment(input:Vertex)->@location(0) u32{if(input.valid==0u||input.id==0u){discard;}return input.id;}
 `;
  const constantDeclaration=`struct Constants { clip:mat4x4f,origins:array<vec4f,${count}> };`;
  const constants=`${declarations}${constantDeclaration}
@@ -185,7 +179,7 @@ fn projected_color(p:vec3f,n:vec3f,owner:u32)->vec3f{var color=vec3f(0);var sour
 struct Output {@location(0) color:vec4f,@builtin(frag_depth) depth:f32};
 @fragment fn fragment(@builtin(position) position:vec4f)->Output{
  let pixel=vec2u(position.xy);var hits:array<Hit,${count}>;var depths:array<f32,${count}>;var nearest=1e30;
- for(var camera=0u;camera<${count}u;camera++){var hit=sample_camera(camera,pixel);if(hit.valid==1u&&(outside_crop(hit.world,0)||outside_stage(hit.world))){hit.valid=0u;}hits[camera]=hit;let z=-mul4(frame.view,vec4f(hit.world,1)).z;depths[camera]=z;if(hit.valid==1u){nearest=min(nearest,z);}}
+ for(var camera=0u;camera<${count}u;camera++){var hit=sample_camera(camera,pixel);if(hit.valid==1u&&(outside_stage(hit.world))){hit.valid=0u;}hits[camera]=hit;let z=-mul4(frame.view,vec4f(hit.world,1)).z;depths[camera]=z;if(hit.valid==1u){nearest=min(nearest,z);}}
  var owner=0xffffffffu;var score=-1.0;var best_world=vec3f(0);var best_normal=vec3f(0);
  for(var camera=0u;camera<${count}u;camera++){let hit=hits[camera];if(hit.valid==0u||abs(depths[camera]-nearest)>tolerance(nearest)){continue;}if(owner==0xffffffffu||better(hit.score,camera,score,owner)){owner=camera;score=hit.score;best_world=hit.world;best_normal=world_vector(camera,hit.normal);}}
  if(owner==0xffffffffu){discard;}var color:vec3f;

@@ -1,12 +1,12 @@
 // Restrict color-visibility work to RGB pixels that retained world points can
 // sample. Occluders outside the world crop still participate in this region.
 // SPDX-License-Identifier: EUPL-1.2
-import {workspaceCropCorners} from './workspace_crop.js?v=20261021_original_rgb';
+import {volumeCorners} from './table_geometry.js?v=20261021_original_rgb';
 export function rgbVisibilityRegion(bounds,matrix,width,height){
   const full={x:0,y:0,width,height};if(!bounds)return full;
   if(bounds.min?.some((v,i)=>v>=bounds.max[i]))return {...full,width:0,height:0};
   let loX=Infinity,loY=Infinity,hiX=-Infinity,hiY=-Infinity,front=0;
-  for(const p of workspaceCropCorners(bounds)){
+  for(const p of volumeCorners(bounds)){
     const clip=[0,1,2,3].map(r=>matrix[r]*p[0]+matrix[r+4]*p[1]+matrix[r+8]*p[2]+matrix[r+12]);
     if(!clip.every(Number.isFinite))return full;
     if(clip[3]<=.05)continue;front++;

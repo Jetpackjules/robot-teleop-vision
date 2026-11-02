@@ -84,7 +84,7 @@ Validate this on the temporary Cloudflare URL, not only on `localhost`:
 3. In **Advanced Setup**, turn **Head tracking** off and confirm the webcam is released while mouse navigation still works.
 4. Switch **View** between **3D point cloud** and **RGB camera** and confirm both remain live.
 5. Turn **Full RGB frame updates** on and off; both modes must keep moving RGB content current.
-6. Confirm the flat support surface is level and adjustable. A robot envelope appears only for a module that declares one; it is a visual guide, not a core motor stop.
+6. Enable **Modeled table and floor** in **Settings → View** and confirm its dimensions, heading, and tabletop position match the workspace. Table changes are saved automatically; they do not change calibration or robot motion limits.
 7. Move to a useful point-cloud camera pose, choose **Save Current Setup as Default**, then open a new browser. It should start with that view and the saved stable settings.
 8. Confirm the simple **Controller** panel contains daily controls only. Calibration, diagnostics, camera defaults, and tuning live behind **Advanced Setup**.
 9. Leave robot hardware disabled for this onboarding test unless a separately reviewed module/site procedure explicitly enables it.

@@ -14,7 +14,7 @@ const {createTestServer}=require('./serve_web_rendering.cjs');
   const result=await page.evaluate(async({captured,benchmark})=>{
    await import('/hybrid_rgbd_renderer.js');const f=await import('/web_rendering_fixture.js'),{state,gl}=f.setup(),p=window.probe;
    const {GpuCameraRig,compileGpuProgram,FULLSCREEN_VERTEX_SHADER}=await import('/hybrid_camera_quality.js?v=20261021_original_rgb');
-   const {workspaceCropBounds,WORKSPACE_CROP_CONTEXT}=await import('/workspace_crop.js?v=20261021_original_rgb');
+   const {TABLE_CONTEXT_MARGIN}=await import('/table_geometry.js?v=20261021_original_rgb');
    const {modeledWorkspaceBounds}=await import('/modeled_workspace.js?v=20261021_original_rgb');
    const {rgbVisibilityRegion}=await import('/rgb_visibility_region.js');
    const {visibilityProjection,visibilityMultiply}=await import('/hybrid_rgb_visibility.js?v=20261021_original_rgb');
@@ -45,7 +45,7 @@ const {createTestServer}=require('./serve_web_rendering.cjs');
     const c=state.cameras[index],depth=new Uint16Array(c.depth);for(let y=Math.floor(c.height*.35);y<Math.floor(c.height*.55);y++)for(let x=Math.floor(c.width*.35);x<Math.floor(c.width*.55);x++){const at=y*c.width+x;if(depth[at])depth[at]+=offset;}
     c.depth=depth;c.depthTiles=null;c.uploadRevision++;gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,c.depthTexture);gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,c.width,c.height,gl.RED_INTEGER,gl.UNSIGNED_SHORT,depth);
    };
-   const crop=(scale=1,shift=0)=>({workspace_crop_enabled:true,workspace_crop_min:[-.25*scale+shift,-.05,-1-.36*scale],workspace_crop_max:[.25*scale+shift,.53*scale,-1+.36*scale],workspace_crop_rotation:[0,0,0]});
+   const crop=(scale=1,shift=0)=>({modeled_workspace_enabled:true,modeled_workspace_center:[shift,-.05,-1],modeled_workspace_width:.5*scale,modeled_workspace_depth:.72*scale,modeled_workspace_height:.58*scale,modeled_workspace_clearance:0,modeled_workspace_heading:0});
    window.setGodotHybridViewSettings({display_mode:'blendpcr',...crop()});
    let checks=0,narrowFrames=0;const failures=[],steps=[];
    const check=(condition,label)=>{checks++;if(!condition)failures.push(label);};
@@ -59,7 +59,7 @@ const {createTestServer}=require('./serve_web_rendering.cjs');
     const imageDifferent=changed(images[0],images[1]);check(imageDifferent===0,label+': final pixels differ '+imageDifferent);
     let depthDifferent=0;
     if(!state.settings.depth_only_enabled){
-     const bounds=modeledWorkspaceBounds(state.settings,workspaceCropBounds(state.settings,WORKSPACE_CROP_CONTEXT),WORKSPACE_CROP_CONTEXT);
+     const bounds=modeledWorkspaceBounds(state.settings,TABLE_CONTEXT_MARGIN);
      for(let target=0;target<state.cameras.length;target++){
       const c=state.cameras[target],matrix=visibilityMultiply(visibilityProjection(c.metadata.color_projection),p.inverseRigidTransform(c.modelMatrix)),region=rgbVisibilityRegion(bounds,matrix,c.colorWidth,c.colorHeight);
       for(let kind=0;kind<4;kind++){const full={x:0,y:0,width:c.colorWidth,height:c.colorHeight},a=read(rigs[0],full,target*4+kind),b=read(rigs[1],full,target*4+kind);const n=changed(a,b);depthDifferent+=n;check(n===0,label+': visibility/history '+target+':'+kind+' differs '+n);}
@@ -68,12 +68,12 @@ const {createTestServer}=require('./serve_web_rendering.cjs');
     const narrow=rigs[1].visibility.layerStates.some(Boolean);narrowFrames+=narrow?1:0;
     check(gl.getError()===gl.NO_ERROR&&warnings.every(w=>!w)&&state.stats.renderMethod==='blendpcr',label+': active BlendPCR path and valid WebGL state');steps.push({label,imageDifferent,depthDifferent,warnings,narrow,replays:rigs[1].visibility.regionReplays||0});
    };
-   await frame('initial narrow crop');mutate(0,10);await frame('one changed camera');await frame('expand with unchanged captures',crop(1.8,.05));
-   mutate(1,8);await frame('shift and shrink',crop(.7,-.08));await frame('disable crop with unchanged captures',{workspace_crop_enabled:false});
-   await frame('rotated crop',{...crop(),workspace_crop_rotation:[0,19,0]});
+   await frame('initial narrow table');mutate(0,10);await frame('one changed camera');await frame('expand with unchanged captures',crop(1.8,.05));
+   mutate(1,8);await frame('shift and shrink',crop(.7,-.08));await frame('disable table with unchanged captures',{modeled_workspace_enabled:false});
+   await frame('rotated table',{...crop(),modeled_workspace_heading:19});
    for(let i=0;i<4;i++){mutate(i%3,5);await frame('depth-only capture '+i,{depth_only_enabled:true});}
    await frame('restore RGB and expand after depth-only',{...crop(1.8),depth_only_enabled:false,mesh_depth_delta:.025});
-   await frame('modeled table',{workspace_crop_enabled:false,modeled_workspace_enabled:true,modeled_workspace_center:[0,0,-1],modeled_workspace_width:.5,modeled_workspace_depth:.73,modeled_workspace_height:.58,modeled_workspace_heading:5.6});
+   await frame('modeled table',{modeled_workspace_enabled:true,modeled_workspace_center:[0,0,-1],modeled_workspace_width:.5,modeled_workspace_depth:.73,modeled_workspace_height:.58,modeled_workspace_heading:5.6});
    state.workspaceEditor={active:false,drag:{}};
    await frame('begin table drag');await frame('resize during table drag',{modeled_workspace_width:.8,modeled_workspace_depth:1.1});
    state.workspaceEditor=null;await frame('end table drag');

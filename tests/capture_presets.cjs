@@ -36,11 +36,14 @@ vm.runInContext(source+'\nglobalThis.control=new CapturePresetControl("wss://exa
   assert.equal(context.workspace.update(settings),true,'view settings connect without a tracker or WebRTC');
   const connecting=sockets.at(-1);
   context.workspace.update({...settings,modeled_workspace_width:1.4});
+  context.workspace.update({rgbd_client_id:'page-a',point_preview_enabled:false,point_preview_budget:20000});
   assert.equal(sockets.at(-1),connecting,'rapid edits share one connection');
   assert.equal(connecting.sent.length,0);
   connecting.readyState=1;connecting.onopen();
   assert.equal(connecting.sent.length,1);
   assert.equal(connecting.sent[0].modeled_workspace_width,1.4,'newest bounds replace pending edits');
+  assert.equal(connecting.sent[0].modeled_workspace_enabled,true,'a queued point-detail update retains workspace bounds');
+  assert.equal(connecting.sent[0].point_preview_budget,20000,'partial point-detail updates share the latest bounds');
   assert.equal(connecting.sent[0].calibrate_robot_position,undefined,'calibration actions are never queued');
   assert.equal(connecting.sent[0].robot_visual_calibration_action,undefined);
   assert.equal(connecting.sent[0].stream_preset,undefined,'workspace edits never restart cameras');
@@ -57,6 +60,8 @@ vm.runInContext(source+'\nglobalThis.control=new CapturePresetControl("wss://exa
   context.workspace.update({...settings,modeled_workspace_enabled:false});
   assert.equal(reconnected.sent.at(-1).modeled_workspace_enabled,false,'off restores uncropped data');
   assert.equal(context.workspace.update({...settings,rgbd_client_id:'../bad'}),false);
+  context.workspace.update({rgbd_client_id:'page-b',point_preview_enabled:true});
+  assert.equal(reconnected.sent.at(-1).modeled_workspace_width,undefined,'viewing bounds cannot leak into a different client');
   const staleOpen=reconnected.onopen;
   context.workspace.close();staleOpen();
   assert.equal(timers.size,0);assert.equal(context.workspace.socket,null);

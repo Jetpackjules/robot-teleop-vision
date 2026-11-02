@@ -1,5 +1,5 @@
 // Conservative tile rejection only: no point sampling, simplification or LOD.
-import {workspaceDepthTiles,workspaceVisibleTiles} from './workspace_crop.js?v=20261021_original_rgb';
+import {workspaceDepthTiles,workspaceVisibleTiles} from './table_geometry.js?v=20261021_original_rgb';
 
 const cache=new WeakMap();
 const sourceTiles=new WeakMap();

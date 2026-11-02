@@ -1,4 +1,5 @@
 const MODEL_ROOT = "/robot-modules/so101/assets";
+const NOTIFICATIONS_STORAGE_KEY = "robotTeleopArmNotificationsEnabled";
 
 const RENDERER = {
   modelUrls: {
@@ -20,9 +21,14 @@ const RENDERER = {
     moving_jaw_so101_v1_link: [0.95, 0.81, 0.24, 1],
   },
   baseLink: "base_link",
+  materialPalette: [
+    {sourceColor:[1,209/255,31/255], color:[.19,.20,.215,1], roughness:.78, metalness:0, detail:1},
+    {sourceColor:[28/255,31/255,36/255], color:[.105,.12,.14,1], roughness:.34, metalness:.03, detail:.2},
+  ],
   accentLinks: ["moving_jaw_so101_v1_link"],
   calibrationLinks: ["wrist_link", "gripper_link", "moving_jaw_so101_v1_link"],
   calibrationBoundsLinks: ["gripper_link", "moving_jaw_so101_v1_link"],
+  endEffectorLinks: ["gripper_link", "moving_jaw_so101_v1_link"],
   maskChain: {
     names: ["base_link", "shoulder_link", "upper_arm_link", "lower_arm_link", "wrist_link", "gripper_link", "moving_jaw_so101_v1_link"],
     radii: [0.065, 0.060, 0.050, 0.047, 0.043, 0.040],
@@ -33,14 +39,6 @@ const RENDERER = {
   },
   // Visualization only. The hardware service remains authoritative for joint
   // limits, path clearance, and contact handling.
-  workspaceBoundary: {
-    shape: "cylinder",
-    anchorLink: "base_link",
-    innerRadius: 0.07,
-    outerRadius: 0.43,
-    minimumHeight: 0.015,
-    maximumHeight: 0.48,
-  },
 };
 
 const MODULE_STYLE = `
@@ -76,6 +74,7 @@ const MODULE_STYLE = `
 `;
 
 const SETTINGS_MARKUP = `
+  <label class="toggle-row" title="Show safeguard warnings and input/connection notices."><span>Show arm notifications</span><input id="so101-notifications-enabled" type="checkbox" checked></label>
   <label class="toggle-row"><span>Wrist camera</span><input id="so101-wrist-camera-enabled" type="checkbox"></label>
   <div class="button-row">
     <button id="so101-connect" type="button">Connect Leader</button>
@@ -91,12 +90,12 @@ const SETUP_MARKUP = `
   <button id="so101-save-rest" type="button">Save Current Pose as Rest</button>
   <p class="helper-text">Place the arm in your chosen rest pose, press Hold, then save. This records the physical pose without moving the arm.</p>
   <p id="so101-setup-warnings" class="helper-text" role="status"></p>
-  <label class="toggle-row" title="Opt-in: modeled checks cannot detect a person or loose object in the path."><span>Auto-return to rest after 10 min</span><input id="so101-idle-return-enabled" type="checkbox"></label>
+  <label class="toggle-row" title="Returns to the saved rest pose after five minutes without arm-control input."><span>Auto-return to rest after 5 min</span><input id="so101-idle-return-enabled" type="checkbox" checked></label>
   <button id="so101-restart" type="button">Reconnect Arm Hardware</button>
   <details class="advanced-disclosure">
     <summary>Experimental safeguards</summary>
     <div class="disclosure-body">
-      <label class="toggle-row"><span>Stop on following error / contact</span><input id="so101-following-error-safety-enabled" type="checkbox" checked></label>
+      <label class="toggle-row"><span>Stop on following error / contact</span><input id="so101-following-error-safety-enabled" type="checkbox"></label>
       <p class="helper-text">This modeled safeguard can false-trigger on gravity sag or backlash. The hardware watchdog and joint limits remain authoritative.</p>
     </div>
   </details>
@@ -105,18 +104,23 @@ const SETUP_MARKUP = `
 
 const VIEW_MARKUP = `
   <label class="toggle-row"><span>Robot overlay</span><input id="so101-overlay-enabled" type="checkbox" checked></label>
+  <label>Show
+    <select id="so101-overlay-scope"><option value="full">Full arm</option><option value="claw">Claw only</option></select>
+  </label>
   <label>Robot overlay style
-    <select id="so101-overlay-style"><option value="alignment" selected>Alignment (transparent + outlines)</option><option value="solid">Solid yellow</option></select>
+    <select id="so101-overlay-style"><option value="realistic" selected>Realistic materials</option><option value="alignment">Alignment (transparent + outlines)</option><option value="solid">Solid yellow</option></select>
   </label>
   <label class="toggle-row"><span>Overlay occludes scanned arm</span><input id="so101-overlay-occlusion-enabled" type="checkbox" checked></label>
   <label class="toggle-row"><span>Show commanded target ghost</span><input id="so101-target-ghost-enabled" type="checkbox" checked></label>
-  <button id="so101-calibrate" class="primary" type="button">Calibrate Full Arm</button>
+  <button id="so101-calibrate" class="primary" type="button">Align Arm</button>
+  <p class="helper-text">Uses a measured base sweep to align the whole arm. Existing joint settings and claw geometry stay fixed.</p>
+  <button id="so101-base-adjust" type="button">Adjust Base in 3D</button>
+  <p id="so101-base-status" class="helper-text" role="status"></p>
   <div class="calibration-progress"><progress id="so101-calibration-progress" max="1" value="0"></progress><span id="so101-calibration-progress-value" class="value-label">0%</span></div>
   <div id="so101-calibration-status" class="network-stats">Arm position calibration idle</div>
   <details class="advanced-disclosure">
     <summary>Recovery tools</summary>
     <div class="disclosure-body">
-      <button id="so101-refine" type="button">Refine Arm Servos</button>
       <button id="so101-manual-open" type="button">Manual Joint Tuning</button>
       <div class="button-row"><button id="so101-calibration-export" type="button">Export JSON</button><button id="so101-calibration-import" type="button">Import JSON</button></div>
       <input id="so101-calibration-file" type="file" accept=".json,application/json" hidden>
@@ -195,6 +199,8 @@ function element(id) { return document.getElementById(id); }
 
 class So101WebModule {
   constructor(manifest) {
+    this.notificationsEnabled = true;
+    try { this.notificationsEnabled = localStorage.getItem(NOTIFICATIONS_STORAGE_KEY) !== "false"; } catch { /* Storage is optional. */ }
     this.manifest = manifest;
     this.renderer = RENDERER;
     this.sendViewSettings = () => false;
@@ -206,6 +212,15 @@ class So101WebModule {
     this.importFile = null;
     this.calibrationRequest = null;
     this.calibrationError = "";
+    this.baseEditor = null;
+    this.baseSession = null;
+    this.basePreviewTimer = null;
+    this.baseHeartbeat = null;
+    this.baseOffsets = { offset_x: 0, offset_y: 0, offset_z: 0, yaw_degrees: 0 };
+    this.previewTimer = null;
+    this.previewDirty = null;
+    this.previewInFlight = 0;
+    this.previewPollTimer = null;
   }
 
   async mount({ settingsRoot, setupRoot, viewRoot, statusRoot, floatingRoot }) {
@@ -213,13 +228,19 @@ class So101WebModule {
     style.dataset.robotModule = "so101";
     style.textContent = MODULE_STYLE;
     document.head.append(style);
-    if (settingsRoot) settingsRoot.innerHTML = SETTINGS_MARKUP;
+    if (settingsRoot) {
+      settingsRoot.innerHTML = SETTINGS_MARKUP;
+      element("so101-notifications-enabled").checked = this.notificationsEnabled;
+    }
     if (setupRoot) setupRoot.innerHTML = SETUP_MARKUP;
     if (viewRoot) viewRoot.innerHTML = VIEW_MARKUP;
     if (statusRoot) statusRoot.innerHTML = STATUS_MARKUP;
     if (floatingRoot) floatingRoot.innerHTML = FLOATING_MARKUP;
     this.manualInputs = Array.from(document.querySelectorAll("[data-manual-key]"));
-    await import("./so101_web_serial.js");
+    await import("./so101_web_serial.js?v=20261101_watchdog_diagnostics");
+    const {ArmToastStack} = await import("./safeguard_toasts.js?v=20261028_toggle");
+    this.armNotices?.dispose();
+    this.armNotices = new ArmToastStack({enabled: this.notificationsEnabled});
     await import("./wrist_camera_view.js");
   }
 
@@ -227,11 +248,12 @@ class So101WebModule {
     return {
       ...payload,
       robot_overlay_enabled: element("so101-overlay-enabled")?.checked !== false,
-      robot_overlay_style: element("so101-overlay-style")?.value || "alignment",
+      robot_overlay_scope: element("so101-overlay-scope")?.value || "full",
+      robot_overlay_style: element("so101-overlay-style")?.value || "realistic",
       robot_overlay_mask_scanned_robot: element("so101-overlay-occlusion-enabled")?.checked !== false,
       arm_measured_feedback_enabled: true,
       arm_target_ghost_enabled: element("so101-target-ghost-enabled")?.checked !== false,
-      arm_following_error_safety_enabled: element("so101-following-error-safety-enabled")?.checked !== false,
+      arm_following_error_safety_enabled: element("so101-following-error-safety-enabled")?.checked === true,
       arm_freeze_overlay_on_stale_enabled: true,
       arm_d455_visual_correction_enabled: element("so101-d455-visual-correction-enabled")?.checked === true,
       arm_idle_return_enabled: element("so101-idle-return-enabled")?.checked === true,
@@ -241,12 +263,18 @@ class So101WebModule {
   restoreViewSettings(saved) {
     if (!saved) return;
     element("so101-overlay-enabled").checked = saved.robot_overlay_enabled !== false;
-    element("so101-overlay-style").value = saved.robot_overlay_style === "solid" ? "solid" : "alignment";
+    element("so101-overlay-scope").value = saved.robot_overlay_scope === "claw" ? "claw" : "full";
+    element("so101-overlay-style").value = ["realistic", "solid", "alignment"].includes(saved.robot_overlay_style) ? saved.robot_overlay_style : "realistic";
     element("so101-overlay-occlusion-enabled").checked = (saved.robot_overlay_mask_scanned_robot ?? saved.robot_overlay_mask_scanned_arm) !== false;
     element("so101-target-ghost-enabled").checked = saved.arm_target_ghost_enabled !== false;
-    element("so101-following-error-safety-enabled").checked = saved.arm_following_error_safety_enabled !== false;
+    element("so101-following-error-safety-enabled").checked = saved.arm_following_error_safety_enabled === true;
     element("so101-d455-visual-correction-enabled").checked = saved.arm_d455_visual_correction_enabled === true;
-    element("so101-idle-return-enabled").checked = saved.arm_idle_return_enabled === true;
+    element("so101-idle-return-enabled").checked = saved.arm_idle_return_enabled !== false;
+    this.syncOverlayScopeControls();
+  }
+
+  syncOverlayScopeControls() {
+    element("so101-overlay-occlusion-enabled").disabled = element("so101-overlay-scope").value === "claw";
   }
 
   manualPayload() {
@@ -287,13 +315,18 @@ class So101WebModule {
   }
 
   calibrationAction(operation, extra = {}) {
+    if (!["preview", "base_preview"].includes(operation)) {
+      window.clearTimeout(this.previewTimer);
+      this.previewTimer = null;
+      this.previewDirty = null;
+    }
     if (operation === "save" && Array.from(document.querySelectorAll("[data-manual-number]")).some(input => !input.checkValidity() || !Number.isFinite(input.valueAsNumber))) {
       return Promise.reject(new Error("Enter a valid angle in each joint field before saving."));
     }
     const request_id = globalThis.crypto?.randomUUID?.() || `cal-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const action = { operation, request_id, ...extra };
     const settings = ["save", "preview"].includes(operation) ? this.manualPayload() : {};
-    if (operation === "preview") {
+    if (["preview", "base_preview"].includes(operation)) {
       return window.so101ArmController.requestViewSettings({ ...settings, robot_visual_calibration_action: action });
     }
     if (this.manualPending) return Promise.reject(new Error("Wait for the previous calibration action."));
@@ -314,18 +347,141 @@ class So101WebModule {
     });
   }
 
+  baseMessage(message) {
+    element("so101-base-status").textContent = message;
+    const help = this.baseEditor?.root.querySelector("#workspace-edit-help");
+    if (help) help.textContent = message;
+  }
+
+  queueBasePreview() {
+    this.previewBaseLocally();
+    this.queuePreview("base");
+  }
+
+  previewBaseLocally() {
+    if (!this.baseOrigin) return;
+    const o=this.baseOrigin,d=this.baseOffsets;
+    window.previewGodotRobotBase?.({origin:[o[0]+d.offset_x,o[1]+d.offset_y,o[2]+d.offset_z],yaw:d.yaw_degrees});
+  }
+
+  queuePreview(kind) {
+    // Coalesce continuous input instead of waiting for it to stop. Bound the
+    // transport work and keep only the newest pending values under load.
+    this.previewDirty = kind;
+    if (this.previewTimer || this.previewInFlight >= 3) return;
+    this.previewTimer = window.setTimeout(() => this.flushPreview(), 33);
+  }
+
+  flushPreview() {
+    this.previewTimer = null;
+    const kind = this.previewDirty;
+    if (!kind || this.manualPending || (kind === "base" ? !this.baseSession || this.baseEditor?.finishing : !this.manualReady)) return;
+    this.previewDirty = null;
+    this.previewInFlight += 1;
+    const action = kind === "base" ? this.calibrationAction("base_preview", {session_id:this.baseSession,...this.baseOffsets}) : this.calibrationAction("preview");
+    action.catch(error => kind === "base" ? this.baseMessage(error.message) : this.manualMessage(error.message)).finally(() => {
+      this.previewInFlight -= 1;
+      if (this.previewDirty) this.queuePreview(this.previewDirty);
+    });
+  }
+
+  startPreviewPolling() {
+    if (this.previewPollTimer) return;
+    this.previewPollTimer = window.setInterval(() => {
+      if (this.manualReady || this.baseSession) window.so101ArmController?.send?.({type:"arm_status_request"});
+    }, 80);
+  }
+
+  async openBaseEditor() {
+    if (this.baseEditor || this.manualPending) return;
+    if (typeof window.editGodotPlanarPose !== "function") {
+      this.baseMessage("Open a connected 3D view before adjusting the base.");
+      return;
+    }
+    try {
+      const reply = await this.calibrationAction("base_begin");
+      this.baseSession = reply.session_id;
+      const origin = reply.origin;
+      this.baseOrigin = origin;
+      this.baseOffsets = { offset_x: 0, offset_y: 0, offset_z: 0, yaw_degrees: 0 };
+      const editor = window.editGodotPlanarPose({title: "Adjust arm base", saveLabel: "Save Base", verticalTranslation:true,
+        getPose: () => ({ origin: [origin[0] + this.baseOffsets.offset_x, origin[1] + this.baseOffsets.offset_y, origin[2] + this.baseOffsets.offset_z], yaw: this.baseOffsets.yaw_degrees }),
+        onChange: pose => {
+          this.baseOffsets = { offset_x: Math.max(-2, Math.min(2, pose.origin[0] - origin[0])), offset_y: Math.max(-2, Math.min(2, pose.origin[1] - origin[1])), offset_z: Math.max(-2, Math.min(2, pose.origin[2] - origin[2])), yaw_degrees: pose.yaw };
+          this.queueBasePreview();
+        },
+        readout: () => `X ${(this.baseOffsets.offset_x * 1000).toFixed(0)} mm · Height ${(this.baseOffsets.offset_y * 1000).toFixed(0)} mm · Z ${(this.baseOffsets.offset_z * 1000).toFixed(0)} mm · Yaw ${this.baseOffsets.yaw_degrees.toFixed(1)}°`,
+        onReset: async () => {
+          window.clearTimeout(this.basePreviewTimer);
+          await this.calibrationAction("base_reset", { session_id: this.baseSession });
+          this.baseOffsets = { offset_x: 0, offset_y: 0, offset_z: 0, yaw_degrees: 0 };
+          this.previewBaseLocally();
+        },
+        onRequestFinish: async commit => {
+          window.clearTimeout(this.basePreviewTimer);
+          const result = await this.calibrationAction(commit ? "base_save" : "base_cancel", { session_id: this.baseSession, ...(commit ? this.baseOffsets : {}) });
+          this.baseMessage(result.message || "Base placement updated.");
+          return true;
+        },
+        onFinish: () => this.closeBaseEditor(),
+      });
+      if (!editor) {
+        await this.calibrationAction("base_cancel", { session_id: this.baseSession });
+        this.baseSession = null;
+        this.baseMessage("Open a connected 3D view and close other placement tools, then try again.");
+        return;
+      }
+      this.baseEditor = editor;
+      this.previewBaseLocally();
+      this.startPreviewPolling();
+      this.baseViewBefore = { enabled: element("so101-overlay-enabled").checked, occlusion: element("so101-overlay-occlusion-enabled").checked, scope: element("so101-overlay-scope").value };
+      element("so101-overlay-scope").value = "full";
+      this.syncOverlayScopeControls();
+      element("so101-overlay-enabled").checked = true;
+      element("so101-overlay-occlusion-enabled").checked = false;
+      this.sendViewSettings();
+      window.so101ArmController?.clearKeyboardMotion?.();
+      document.getElementById("advanced-setup")?.setAttribute("hidden", "");
+      document.body.classList.add("workspace-editing");
+      this.baseHeartbeat = window.setInterval(() => this.queueBasePreview(), 4000);
+      this.baseMessage("");
+    } catch (error) { this.baseMessage(error.message || String(error)); }
+  }
+
+  closeBaseEditor() {
+    window.clearTimeout(this.basePreviewTimer);
+    window.clearInterval(this.baseHeartbeat);
+    this.baseEditor = null;
+    this.baseSession = null;
+    this.baseOrigin = null;
+    window.previewGodotRobotBase?.(null);
+    window.clearInterval(this.previewPollTimer);
+    this.previewPollTimer = null;
+    if (this.baseViewBefore) {
+      element("so101-overlay-enabled").checked = this.baseViewBefore.enabled;
+      element("so101-overlay-occlusion-enabled").checked = this.baseViewBefore.occlusion;
+      element("so101-overlay-scope").value = this.baseViewBefore.scope;
+      this.syncOverlayScopeControls();
+      this.baseViewBefore = null;
+      this.sendViewSettings();
+    }
+    document.body.classList.remove("workspace-editing");
+    document.getElementById("open-advanced")?.focus({ preventScroll: true });
+  }
+
   queueManualPreview() {
     this.updateManualLabels();
-    window.clearTimeout(this.manualPreviewTimer);
-    this.manualPreviewTimer = window.setTimeout(() => {
-      if (!this.manualReady || this.manualPending) return;
-      this.calibrationAction("preview").catch(error => this.manualMessage(error.message));
-    }, 60);
+    this.queuePreview("joint");
   }
 
   finishManualPreview() {
     this.manualReady = false;
     window.clearTimeout(this.manualPreviewTimer);
+    window.clearTimeout(this.previewTimer);
+    this.previewTimer = null;
+    this.previewDirty = null;
+    window.clearInterval(this.previewPollTimer);
+    this.previewPollTimer = null;
     element("so101-manual-workspace").hidden = true;
     this.resetManualControls();
   }
@@ -407,9 +563,13 @@ class So101WebModule {
 
   renderStatus() {
     const arm = this.controllerStatus();
+    this.armNotices?.update(arm);
     const status = arm.status || {};
     const calibration = status.robot_calibration || {};
     const manual = calibration.manual_calibration || {};
+    const base = manual.base_adjustment || {};
+    window.setGodotRobotPreviewActive?.(manual.enabled === true || base.enabled === true);
+    if (manual.render_state) window.updateGodotRobotOverlay?.(manual.render_state);
     if (this.manualPending && manual.reply?.request_id === this.manualPending.request_id) {
       const pending = this.manualPending;
       this.manualPending = null;
@@ -419,9 +579,14 @@ class So101WebModule {
     }
     const manualOffline = calibration.state === "offline" || manual.supported !== true;
     const manualBusy = ["capturing", "solving"].includes(calibration.state) || Boolean(this.manualPending);
-    element("so101-manual-open").disabled = manualOffline || manualBusy || !manual.registered;
-    element("so101-calibration-export").disabled = manualOffline || manualBusy || !manual.registered || manual.enabled === true;
-    element("so101-calibration-import").disabled = manualOffline || manualBusy || manual.enabled === true;
+    element("so101-base-adjust").disabled = manualOffline || manualBusy || manual.enabled === true || base.enabled === true || base.supported !== true;
+    element("so101-manual-open").disabled = manualOffline || manualBusy || !manual.registered || base.enabled === true;
+    element("so101-calibration-export").disabled = manualOffline || manualBusy || !manual.registered || manual.enabled === true || base.enabled === true;
+    element("so101-calibration-import").disabled = manualOffline || manualBusy || manual.enabled === true || base.enabled === true;
+    if (this.baseEditor?.active && !this.baseEditor.finishing && !this.manualPending && base.enabled !== true) {
+      this.baseEditor.close(false);
+      this.baseMessage("Base preview ended. Open Adjust Base to continue.");
+    }
     for (const id of ["so101-manual-save", "so101-manual-reset", "so101-manual-cancel", "so101-import-apply"]) element(id).disabled = manualOffline || manualBusy;
     for (const input of document.querySelectorAll("#so101-manual-workspace input, #so101-manual-workspace select")) input.disabled = manualOffline || manualBusy;
     element("so101-connect").textContent = arm.leaderConnected ? "Leader Connected" : "Connect Leader";
@@ -479,10 +644,9 @@ class So101WebModule {
     const progress = Math.max(0, Math.min(1, Number(calibration.progress || 0)));
     element("so101-calibration-progress").value = progress;
     element("so101-calibration-progress-value").textContent = `${Math.round(progress * 100)}%`;
-    element("so101-calibrate").textContent = capturing && mode === "base" ? "Cancel Full Arm Calibration" : solving && mode === "base" ? "Fitting Full Arm" : offline ? "Godot Calibration Offline" : "Calibrate Full Arm";
-    element("so101-calibrate").disabled = manual.enabled === true || solving || Boolean(this.calibrationRequest) || (!capturing && Boolean(unavailable)) || (capturing && mode !== "base");
-    element("so101-refine").textContent = capturing && mode === "joints" ? "Cancel Servo Refinement" : solving && mode === "joints" ? "Fitting Arm Servos" : offline ? "Godot Calibration Offline" : "Refine Arm Servos";
-    element("so101-refine").disabled = manual.enabled === true || solving || Boolean(this.calibrationRequest) || (!capturing && Boolean(unavailable)) || (capturing && mode !== "joints");
+    const placingArm = mode === "registration" || mode === "base";
+    element("so101-calibrate").textContent = capturing && placingArm ? "Cancel Arm Alignment" : solving && placingArm ? "Aligning Arm" : offline ? "Godot Calibration Offline" : "Align Arm";
+    element("so101-calibrate").disabled = manual.enabled === true || base.enabled === true || solving || Boolean(this.calibrationRequest) || (!capturing && Boolean(unavailable)) || (capturing && !placingArm);
     const message = this.calibrationError || (this.calibrationRequest ? "Request sent. Waiting for Godot calibration…" : !capturing && !solving && unavailable ? unavailable : calibration.message || "Arm position calibration ready");
     element("so101-calibration-status").textContent = `${message}\nFrames ${calibration.frames || 0} | confidence ${Math.round((calibration.confidence || 0) * 100)}%`;
   }
@@ -503,9 +667,44 @@ class So101WebModule {
     window.so101ArmController.emitStatus();
   }
 
+  confirmAction(message, label = "Continue") {
+    if (this.confirmationDialog) return Promise.resolve(false);
+    const dialog = document.createElement("dialog"), form = document.createElement("form");
+    const text = document.createElement("p"), actions = document.createElement("div");
+    const cancel = document.createElement("button"), accept = document.createElement("button");
+    dialog.setAttribute("aria-label", "Confirm robot action");
+    dialog.style.cssText = "max-width:30rem;border:1px solid var(--line,#666);border-radius:10px;padding:24px;background:var(--panel,#18202b);color:var(--text,#fff)";
+    text.textContent = message; text.style.whiteSpace = "pre-line";
+    actions.style.cssText = "display:flex;gap:12px;justify-content:flex-end";
+    form.method = "dialog";
+    cancel.textContent = "Cancel"; cancel.value = "cancel"; cancel.autofocus = true;
+    accept.textContent = label; accept.value = "confirm";
+    actions.append(cancel, accept); form.append(text, actions); dialog.append(form);
+    document.body.append(dialog); this.confirmationDialog = dialog;
+    const controller = window.so101ArmController;
+    if (controller) { controller.keyboardModalOpen = true; controller.clearKeyboardMotion(); }
+    return new Promise(resolve => {
+      const finish = () => {
+        if (controller) controller.keyboardModalOpen = false;
+        this.confirmationDialog = null; dialog.remove();
+        resolve(dialog.returnValue === "confirm");
+      };
+      dialog.addEventListener("close", finish, {once:true});
+      try { dialog.showModal(); cancel.focus(); }
+      catch (error) { dialog.returnValue = "cancel"; finish(); this.reportError(error); }
+    });
+  }
+
   bind({ sendViewSettings, updateStatus }) {
     this.sendViewSettings = sendViewSettings;
     this.updateStatus = updateStatus;
+    element("so101-notifications-enabled").addEventListener("change", (event) => {
+      this.notificationsEnabled = event.currentTarget.checked;
+      this.armNotices?.setEnabled(this.notificationsEnabled);
+      try { localStorage.setItem(NOTIFICATIONS_STORAGE_KEY, String(this.notificationsEnabled)); } catch { /* Storage is optional. */ }
+      event.currentTarget.blur();
+    });
+    element("so101-base-adjust").addEventListener("click", () => this.openBaseEditor());
     element("so101-connect").addEventListener("click", async () => { try { await window.so101ArmController.connectLeader(); } catch (error) { this.reportError(error); } });
     element("so101-keyboard").addEventListener("click", async () => {
       try {
@@ -516,45 +715,39 @@ class So101WebModule {
     });
     element("so101-enable").addEventListener("click", () => { try { window.so101ArmController.enableArm(); } catch (error) { this.reportError(error); } });
     element("so101-hold").addEventListener("click", () => window.so101ArmController?.hold());
-    element("so101-save-rest").addEventListener("click", () => {
-      if (!window.confirm("Save the arm's current physical pose as its rest pose? Any previous saved rest pose will be backed up.")) return;
+    element("so101-save-rest").addEventListener("click", async () => {
+      if (!await this.confirmAction("Save the arm's current physical pose as its rest pose? Any previous saved rest pose will be backed up.", "Save Rest Pose")) return;
       try { window.so101ArmController.saveCurrentRestPose(); } catch (error) { this.reportError(error); }
     });
-    element("so101-return-rest").addEventListener("click", () => {
-      if (!window.confirm("Return the physical arm to its saved rest pose now?\n\nClear the workspace and stay ready to press Hold Arm or remove power.")) return;
+    element("so101-return-rest").addEventListener("click", async () => {
       try { window.so101ArmController.returnToRest(); } catch (error) { this.reportError(error); }
     });
     element("so101-restart").addEventListener("click", () => { try { window.so101ArmController.restartFollower(); } catch (error) { this.reportError(error); } });
-    element("so101-idle-return-enabled").addEventListener("change", (event) => {
-      if (event.currentTarget.checked && !window.confirm("Enable unattended return after 10 minutes without meaningful control input?")) event.currentTarget.checked = false;
+    element("so101-idle-return-enabled").addEventListener("change", async (event) => {
+      const input = event.currentTarget;
+      if (input.checked && !await this.confirmAction("Enable unattended return after 5 minutes without meaningful control input?", "Enable Idle Return")) input.checked = false;
       sendViewSettings();
-      window.so101ArmController?.setIdleReturn(event.currentTarget.checked, 600);
-      event.currentTarget.blur();
+      window.so101ArmController?.setIdleReturn(input.checked, 300);
+      input.blur();
     });
     for (const id of ["so101-target-ghost-enabled", "so101-following-error-safety-enabled", "so101-d455-visual-correction-enabled"]) {
       element(id).addEventListener("change", (event) => { sendViewSettings(); this.sendFeedbackSettings(); event.currentTarget.blur(); });
     }
-    for (const id of ["so101-overlay-enabled", "so101-overlay-occlusion-enabled", "so101-overlay-style"]) {
-      element(id).addEventListener("change", (event) => { sendViewSettings(); event.currentTarget.blur(); });
+    for (const id of ["so101-overlay-enabled", "so101-overlay-occlusion-enabled", "so101-overlay-style", "so101-overlay-scope"]) {
+      element(id).addEventListener("change", (event) => { this.syncOverlayScopeControls(); sendViewSettings(); event.currentTarget.blur(); });
     }
-    element("so101-calibrate").addEventListener("click", () => {
+    element("so101-calibrate").addEventListener("click", async () => {
       const calibration = this.calibrationStatus();
       const capturing = calibration.state === "capturing";
       if (!capturing && this.calibrationUnavailable()) return;
-      if (!capturing && !window.confirm("The follower will locate its base, calibrate outward through the arm, and sample claw openings.\n\nClear its workspace and stay ready to remove physical power.")) return;
+      if (!capturing && !await this.confirmAction("The follower will run a measured base sweep to align the whole arm. Joint settings and claw geometry will stay fixed.\n\nClear its workspace and stay ready to remove physical power.", "Start Alignment")) return;
       this.requestCalibration(capturing ? { cancel_robot_position_calibration: true } : { calibrate_robot_position: true });
-    });
-    element("so101-refine").addEventListener("click", () => {
-      const calibration = this.calibrationStatus();
-      const capturing = calibration.state === "capturing" && calibration.calibration_mode === "joints";
-      if (!capturing && this.calibrationUnavailable()) return;
-      if (!capturing && !window.confirm("Refine shoulder, elbow, and wrist servos now? Clear the workspace and stay ready to remove power.")) return;
-      this.requestCalibration(capturing ? { cancel_robot_position_calibration: true } : { refine_robot_joint_alignment: true });
     });
     element("so101-manual-open").addEventListener("click", async () => {
       if (await this.performManualAction("begin")) {
         this.resetManualControls();
         this.manualReady = true;
+        this.startPreviewPolling();
         element("so101-manual-workspace").hidden = false;
         element("so101-manual-workspace").querySelector("input[type=number]").focus();
       }
@@ -585,13 +778,14 @@ class So101WebModule {
     });
     window.addEventListener("so101-arm-status", updateStatus);
     window.addEventListener("pagehide", () => {
+      if (this.baseSession) window.so101ArmController.requestViewSettings({ robot_visual_calibration_action: { operation: "base_cancel", session_id: this.baseSession, request_id: `base-close-${Date.now()}` } }).catch(() => {});
       if (this.manualReady) window.so101ArmController.requestViewSettings({ robot_visual_calibration_action: { operation: "cancel", request_id: `close-${Date.now()}` } }).catch(() => {});
     });
   }
 
   start() {
     this.sendFeedbackSettings();
-    window.so101ArmController?.setIdleReturn(element("so101-idle-return-enabled").checked, 600);
+    window.so101ArmController?.setIdleReturn(element("so101-idle-return-enabled").checked, 300);
     this.renderStatus();
   }
 
@@ -606,7 +800,13 @@ class So101WebModule {
   resumeTrial() { return window.so101ArmController.resumeTrial(); }
   finishTrialPause() { window.so101ArmController.finishTrialPause(); }
 
-  stop() { window.so101ArmController?.shutdown(); }
+  stop() {
+    this.armNotices?.dispose();
+    this.confirmationDialog?.close("cancel");
+    window.clearInterval(this.previewPollTimer);
+    window.clearTimeout(this.previewTimer);
+    window.so101ArmController?.shutdown();
+  }
 }
 
 export function createRobotModule(manifest) {

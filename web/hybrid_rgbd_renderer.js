@@ -1,17 +1,29 @@
+import {cameraDepthSamples} from './point_preview_sampling.js?v=20261027_sparse_delta';
+import {NativePointAssembler} from './native_point_channel.js?v=20261027_native_rtc';
+import {IndependentCameraSocket} from './independent_camera_socket.js?v=20261028_camera_lanes';
+import {decodeSparsePoints} from './sparse_point_decode_worker.js?v=20261028_near60';
 import {WorkspaceEditor} from './workspace_editor.js?v=20261021_original_rgb';
-import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261021_original_rgb";
+import {orientedBox,screenRay} from './workspace_transform.js?v=20261021_direct_workspace';
+import {timeBrowserWork} from './browser_work_timing.js?v=20261027_stalls';
+import {RobotPosePreview} from './robot_pose_preview.js?v=20261027_smooth_preview';
+import {MeasuredJointAnimation} from './robot_joint_animation.js?v=20261027_camera_sync';
+import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261027_host_sparse";
 
 import { BrowserBlendPCR, nativeMeshIndices } from "./hybrid_blendpcr.js?v=20261021_original_rgb";
 import { DEPTH_SHADING_SHADER } from "./depth_shading.js?v=20261020_depth_only";
 import { CameraRgbViewer } from "./camera_rgb_viewer.js?v=20261020_color_recovery";
-import { NativeRgbdDecoderPool, isIndependentNativeFrame, takeIndependentFrameBatch } from "./rgbd_decode_pool.js?v=20261021_original_rgb";
+import { NativeRgbdDecoderPool, isIndependentNativeFrame, takeIndependentFrameBatch } from "./rgbd_decode_pool.js?v=20261028_near60";
 import { COLOR_PROJECTION_SHADER, bindColorProjection, colorFrameDimensions } from './hybrid_color_projection.js?v=20261021_original_rgb';
-import { WORKSPACE_CROP_SHADER, WORKSPACE_CROP_CONTEXT, bindWorkspaceCrop, workspaceCropBounds, workspaceSourceWindow, workspaceCropLines, workspaceVisibleTiles, bindWorkspaceTiles, unbindWorkspaceTiles } from './workspace_crop.js?v=20261021_original_rgb';
-import { MODELED_WORKSPACE_DEFAULTS, MODELED_WORKSPACE_SHADER, ModeledWorkspaceRenderer, modeledWorkspace, modeledWorkspaceBounds, bindModeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
+import { workspaceSourceWindow, workspaceVisibleTiles, bindWorkspaceTiles, unbindWorkspaceTiles } from './table_geometry.js?v=20261021_original_rgb';
+import { MODELED_WORKSPACE_DEFAULTS, MODELED_WORKSPACE_PALETTE, MODELED_WORKSPACE_SHADER, ModeledWorkspaceRenderer, modeledWorkspace, modeledWorkspaceOutside, modeledWorkspaceBounds, bindModeledWorkspace, raycastModeledWorkspace, raycastModeledWorkspaceOccluder } from './modeled_workspace.js?v=20261021_original_rgb';
+import {raycastRobotPrimitive} from './scene_picking.js';
 import {SCENE_LIGHTING_SHADER,bindSceneLighting,SceneShadowRenderer} from './scene_lighting.js?v=20261021_lit_workspace';
 import {NativePointColors} from './hybrid_point_colors.js?v=20261026_native_render';
 import {visibleNativeTiles} from './native_geometry.js?v=20261026_native_render';
 import {NativeRobotMask} from './native_robot_mask.js?v=20261026_quality_profile';
+import {triangleNormals,robotSurfaceMaterial} from './robot_surface_materials.js?v=20261026_realistic_arm';
+import {fetchRobotModel} from './robot_model_loader.js?v=20261027_link_recovery';
+import {SampledPointPreview} from './sampled_point_preview.js?v=20261028_near60';
 
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},
@@ -22,7 +34,6 @@ const EMPTY_ROBOT_RENDERER = Object.freeze({
   calibrationBoundsLinks: [],
   maskChain: { names: [], radii: [] },
   manualView: {},
-  workspaceBoundary: null,
 });
 
 function activeRobotRenderer() {
@@ -40,16 +51,19 @@ const state = {
   indexedUnavailable: false,
   cameraFusion: null,
   blendPCR: null,
+  sampledPointPreview: null,
+  pointPreviewUnavailable: '',
   robotProgram: null,
   robotUniforms: null,
   robotVao: null,
-  workspaceGuide: null,
   cameraGuide: null,
   cameraGuideLabels: new Map(),
   cameraGuideLabelRoot: null,
   robotMeshes: {},
   robotRenderer: EMPTY_ROBOT_RENDERER,
   robotTransforms: {},
+  robotPosePreview: new RobotPosePreview(),
+  robotJointAnimation: new MeasuredJointAnimation(),
   robotTransformsUpdatedMs: 0,
   robotRegistration: null,
   manualRgbCanvas: null,
@@ -64,6 +78,7 @@ const state = {
   rawRgbViewer: null,
   rgbdPaused: false,
   robotLoadToken: 0,
+  robotLoadController: null,
   dataChannel: null,
   dataChannelHandlers: null,
   dataChannelFallbackTimer: 0,
@@ -98,6 +113,8 @@ const state = {
   currentViewer: null,
   focusWorld: null,
   focusPicked: false,
+  orbitReference: null,
+  orbitAimOffset: null,
   orbitAnchorDirection: null,
   orbitAnchorHeadDelta: null,
   lastHeadDelta: [0, 0, 0],
@@ -131,23 +148,16 @@ const state = {
     mesh_depth_delta: 0.035,
     mesh_max_edge: 0.055,
     point_underlay: false,
+    point_preview_enabled: false,
+    mesh_preview_enabled: false,
     robot_overlay_enabled: true,
+    robot_overlay_scope: "full",
     robot_overlay_style: "alignment",
     robot_overlay_mask_scanned_robot: true,
     white_background_enabled: false,
     depth_only_enabled: false,
-    workspace_surface_enabled: false,
-    workspace_boundary_enabled: false,
     camera_locations_enabled: false,
-    workspace_surface_offset: 0,
-    workspace_surface_size: 1.2,
-    workspace_surface_opacity: 0.18,
     ...MODELED_WORKSPACE_DEFAULTS,
-    workspace_crop_enabled: false,
-    workspace_crop_show_box: false,
-    workspace_crop_rotation: [0,0,0],
-    workspace_crop_min: [-0.6, -0.45, -0.6],
-    workspace_crop_max: [0.6, 0.45, 0.6],
   },
   stats: {
     status: "idle",
@@ -227,7 +237,6 @@ uniform ivec2 u_source_size;
 uniform highp int u_sparse_tiles;
 layout(location=0) in uvec2 a_source_tile;
 layout(location=1) in uint a_source_vertex;
-${WORKSPACE_CROP_SHADER}
 ${MODELED_WORKSPACE_SHADER}
 
 bool robot_masked(vec3 world) {
@@ -375,7 +384,7 @@ void main() {
     -z
   );
   vec3 world_position = (u_model * vec4(local_position, 1.0)).xyz;
-  if(u_render_mode!=1 && (workspace_crop_outside(world_position)||modeled_workspace_outside(world_position))) {
+  if(u_render_mode!=1 && modeled_workspace_outside(world_position)) {
     gl_Position=vec4(2.0,2.0,2.0,1.0);gl_PointSize=0.0;v_color=vec3(0);v_valid=0.0;return;
   }
   v_local_position = local_position;
@@ -449,13 +458,12 @@ out vec4 out_color;
 ${FUSION_FRAGMENT_SHADER}
 ${COLOR_PROJECTION_SHADER}
 ${DEPTH_SHADING_SHADER}
-${WORKSPACE_CROP_SHADER}
 ${MODELED_WORKSPACE_SHADER}
 
 void main() {
   if (v_valid < 0.9999) discard;
   if (u_render_mode == 1 && v_triangle_id == 0u) discard;
-  if (workspace_crop_outside(v_world_position)||modeled_workspace_outside(v_world_position)) discard;
+  if (modeled_workspace_outside(v_world_position)) discard;
   if (u_render_mode == 1 && rig_overlap()) discard;
   // A surface triangle is only usable when all three vertices survived the
   // depth-continuity test. Interpolation makes v_valid less than one if even
@@ -502,10 +510,12 @@ uniform vec2 u_viewport;
 uniform float u_outline_pixels;
 out vec3 v_robot_normal;
 out vec3 v_robot_world;
+out vec3 v_robot_local;
 
 void main() {
   vec4 world = u_model * vec4(a_position, 1.0);
   v_robot_world=world.xyz;
+  v_robot_local=a_position;
   v_robot_normal=transpose(inverse(mat3(u_model)))*a_normal;
   vec4 clip = u_view_projection * world;
   if (u_outline_pixels > 0.0 && dot(a_normal, a_normal) > 0.01) {
@@ -526,13 +536,25 @@ const ROBOT_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 
 uniform vec4 u_color;
+uniform vec2 u_robot_material;
+uniform float u_robot_surface_detail;
 in vec3 v_robot_normal;
 in vec3 v_robot_world;
+in vec3 v_robot_local;
 out vec4 out_color;
 ${SCENE_LIGHTING_SHADER}
 
 void main() {
-  out_color = vec4(scene_material(u_color.rgb,v_robot_normal,v_robot_world,vec2(.6,.08)),u_color.a);
+  vec3 color=u_color.rgb;
+  if(u_robot_surface_detail>0.) {
+    // Link-local plastic grain fades below a pixel to avoid distant shimmer.
+    vec3 cell=v_robot_local*1800.;
+    vec3 footprint=fwidth(cell);
+    float detail=1.-smoothstep(.45,1.25,max(footprint.x,max(footprint.y,footprint.z)));
+    float grain=fract(sin(dot(floor(cell),vec3(127.1,311.7,74.7)))*43758.5453);
+    color*=1.+(grain-.5)*.045*detail*u_robot_surface_detail;
+  }
+  out_color = vec4(scene_material(color,v_robot_normal,v_robot_world,u_robot_material),u_color.a);
 }
 `;
 
@@ -727,6 +749,8 @@ function findRobotUniforms(gl, program) {
     color: gl.getUniformLocation(program, "u_color"),
     viewport: gl.getUniformLocation(program, "u_viewport"),
     outlinePixels: gl.getUniformLocation(program, "u_outline_pixels"),
+    material: gl.getUniformLocation(program, "u_robot_material"),
+    surfaceDetail: gl.getUniformLocation(program, "u_robot_surface_detail"),
   };
 }
 
@@ -747,6 +771,17 @@ function transformDictionaryMatrix(value) {
     Number(value.basis_z[0]), Number(value.basis_z[1]), Number(value.basis_z[2]), 0,
     Number(value.origin[0]), Number(value.origin[1]), Number(value.origin[2]), 1,
   ]);
+}
+
+function acceptRobotOverlayState(robot) {
+  state.robotJointAnimation.accept(robot);
+  const now=performance.now();
+  if(!state.robotPosePreview.accept(robot,now))return false;
+  state.robotTransforms=state.robotPosePreview.sample(now);
+  state.robotTransformsUpdatedMs=now;
+  state.robotRegistration=robot.registration||null;
+  state.stats.robotTransforms=Object.keys(state.robotTransforms).length;
+  return true;
 }
 
 function nodeLocalMatrix(node) {
@@ -848,9 +883,19 @@ function glbPrimitives(gltf, binary) {
           indices = new Uint32Array(source.length);
           for (let index = 0; index < source.length; index += 1) indices[index] = source[index];
         }
+        const pbr = gltf.materials?.[primitive.material]?.pbrMetallicRoughness || {};
+        const color = [...(pbr.baseColorFactor || [1, 1, 1, 1])];
+        if (Number.isInteger(primitive.attributes.COLOR_0)) {
+          const accessor = gltf.accessors[primitive.attributes.COLOR_0];
+          const vertex = accessorValues(gltf, binary, primitive.attributes.COLOR_0);
+          const divisor = accessor.normalized ? ({5121:255,5123:65535}[accessor.componentType] || 1) : 1;
+          for (let i = 0; i < Math.min(4, vertex.componentCount); i++) color[i] *= vertex.values[i] / divisor;
+        }
+        const material = {color, roughness: pbr.roughnessFactor ?? .65, metalness: pbr.metallicFactor ?? 0, detail: 0};
         output.push({
           positions: new Float32Array(positions.values),
-          normals: normals ? new Float32Array(normals.values) : new Float32Array(positions.count * 3),
+          normals: normals ? new Float32Array(normals.values) : triangleNormals(positions.values, indices, Number(primitive.mode ?? 4)),
+          material,
           count: indices ? indices.length : positions.count,
           indices,
           mode: Number(primitive.mode ?? 4),
@@ -869,22 +914,38 @@ function robotDrawMode(gl, mode) {
 }
 
 async function loadRobotMeshes(gl, token) {
+  state.robotLoadController?.abort();
+  const controller = state.robotLoadController = new AbortController();
   deleteRobotMeshes(gl, state.robotMeshes);
   state.robotMeshes = {};
   state.stats.robotModelsLoaded = 0;
   const modelUrls = state.robotRenderer.modelUrls || {};
   state.stats.robotModelsExpected = Object.keys(modelUrls).length;
   state.stats.robotLoadError = "";
-  const failures = [];
+  const failures = new Map();
+  const pending = new Set(Object.keys(modelUrls));
+  const current = () => state.running && state.gl === gl && state.robotLoadToken === token;
+  const publish = () => {
+    if (!current()) return;
+    state.stats.robotModelsLoaded = Object.keys(state.robotMeshes).length;
+    state.stats.robotModelsPending = [...pending];
+    state.stats.robotLoadError = [...failures].map(([name, message]) => `${name}: ${message}`).join('; ');
+  };
+  publish();
   await Promise.all(Object.entries(modelUrls).map(async ([name, url]) => {
     let uploaded = [];
     try {
-      const response = await fetch(url, { cache: "no-cache" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const { gltf, binary } = parseGlb(await response.arrayBuffer());
-      const primitives = glbPrimitives(gltf, binary);
-      if (!primitives.length) throw new Error("model has no drawable primitives");
-      if (!state.running || state.gl !== gl || state.robotLoadToken !== token) return;
+      const primitives = await fetchRobotModel(url, {
+        signal: controller.signal,
+        decode(buffer) {
+          const {gltf, binary} = parseGlb(buffer);
+          const primitives = glbPrimitives(gltf, binary);
+          if (!primitives.length) throw new Error('model has no drawable primitives');
+          return primitives;
+        },
+        onRetry(error) { failures.set(name, error.message || String(error)); publish(); },
+      });
+      if (!primitives || !current()) return;
       uploaded = primitives.map((primitive) => {
         const positionBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
@@ -898,11 +959,11 @@ async function loadRobotMeshes(gl, token) {
           gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
           gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, primitive.indices, gl.STATIC_DRAW);
         }
-        const keepForCalibration = (state.robotRenderer.calibrationLinks || []).includes(name);
         return {
           ...primitive,
-          cpuPositions: keepForCalibration ? primitive.positions : null,
-          cpuIndices: keepForCalibration ? primitive.indices : null,
+          material: robotSurfaceMaterial(primitive.material, state.robotRenderer.materialPalette),
+          cpuPositions: primitive.positions,
+          cpuIndices: primitive.indices,
           positions: null,
           normals: null,
           indices: null,
@@ -916,16 +977,18 @@ async function loadRobotMeshes(gl, token) {
         return;
       }
       state.robotMeshes[name] = uploaded;
-      state.stats.robotModelsLoaded = Object.keys(state.robotMeshes).length;
+      failures.delete(name);
     } catch (error) {
       if (uploaded.length) deleteRobotMeshes(gl, { [name]: uploaded });
       const message = `${name}: ${error && error.message ? error.message : error}`;
-      failures.push(message);
+      failures.set(name, error && error.message ? error.message : String(error));
       console.warn("Hybrid robot link unavailable:", message);
+    } finally {
+      pending.delete(name);
+      publish();
     }
   }));
   if (state.running && state.gl === gl && state.robotLoadToken === token) {
-    state.stats.robotLoadError = failures.join("; ");
     console.info(`Hybrid robot overlay loaded ${state.stats.robotModelsLoaded}/${state.stats.robotModelsExpected} links`);
   }
 }
@@ -940,156 +1003,6 @@ function deleteRobotMeshes(gl, meshes = state.robotMeshes) {
     }
   }
   if (meshes === state.robotMeshes) state.robotMeshes = {};
-}
-
-function deleteWorkspaceGuide(gl) {
-  if (!gl || !state.workspaceGuide) return;
-  for (const item of Object.values(state.workspaceGuide.items || {})) {
-    if (item?.buffer) gl.deleteBuffer(item.buffer);
-  }
-  state.workspaceGuide = null;
-}
-
-function lineRing(vertices, centerX, centerY, centerZ, radius, segments = 64) {
-  if (!(radius > 0)) return;
-  for (let index = 0; index < segments; index += 1) {
-    const first = (index / segments) * Math.PI * 2;
-    const second = ((index + 1) / segments) * Math.PI * 2;
-    vertices.push(
-      centerX + Math.cos(first) * radius, centerY, centerZ + Math.sin(first) * radius,
-      centerX + Math.cos(second) * radius, centerY, centerZ + Math.sin(second) * radius,
-    );
-  }
-}
-
-function workspaceGuideGeometry() {
-  const anchorName = String(state.robotRenderer.workspaceBoundary?.anchorLink || state.robotRenderer.baseLink || "");
-  const anchor = transformDictionaryMatrix(state.robotTransforms[anchorName]);
-  const centerX = anchor ? anchor[12] : 0;
-  const anchorY = anchor ? anchor[13] : 0;
-  const centerZ = anchor ? anchor[14] : 0;
-  const offset = Number(state.settings.workspace_surface_offset || 0);
-  const size = clamp(Number(state.settings.workspace_surface_size || 1.2), 0.2, 10);
-  const surfaceY = anchorY + offset;
-  const half = size * 0.5;
-  const fill = [
-    centerX - half, surfaceY, centerZ - half,
-    centerX + half, surfaceY, centerZ - half,
-    centerX - half, surfaceY, centerZ + half,
-    centerX - half, surfaceY, centerZ + half,
-    centerX + half, surfaceY, centerZ - half,
-    centerX + half, surfaceY, centerZ + half,
-  ];
-  const grid = [];
-  const divisions = 12;
-  for (let index = 0; index <= divisions; index += 1) {
-    const along = -half + (size * index) / divisions;
-    grid.push(
-      centerX - half, surfaceY + 0.0005, centerZ + along,
-      centerX + half, surfaceY + 0.0005, centerZ + along,
-      centerX + along, surfaceY + 0.0005, centerZ - half,
-      centerX + along, surfaceY + 0.0005, centerZ + half,
-    );
-  }
-
-  const boundary = [];
-  const descriptor = state.robotRenderer.workspaceBoundary;
-  if (descriptor?.shape === "cylinder") {
-    const inner = Math.max(0, Number(descriptor.innerRadius || 0));
-    const outer = Math.max(inner, Number(descriptor.outerRadius || 0));
-    const minimumY = anchorY + Number(descriptor.minimumHeight || 0);
-    const maximumY = anchorY + Number(descriptor.maximumHeight || 0);
-    for (const height of [minimumY, maximumY]) {
-      lineRing(boundary, centerX, height, centerZ, inner);
-      lineRing(boundary, centerX, height, centerZ, outer);
-    }
-    for (let index = 0; index < 12; index += 1) {
-      const angle = (index / 12) * Math.PI * 2;
-      boundary.push(
-        centerX + Math.cos(angle) * outer, minimumY, centerZ + Math.sin(angle) * outer,
-        centerX + Math.cos(angle) * outer, maximumY, centerZ + Math.sin(angle) * outer,
-      );
-    }
-  }
-  const crop = workspaceCropLines(workspaceCropBounds(state.settings));
-  return { anchorName, anchor, fill, grid, boundary, crop };
-}
-
-function ensureWorkspaceGuide() {
-  const gl = state.gl;
-  if (!gl) return null;
-  const geometry = workspaceGuideGeometry();
-  const signature = JSON.stringify([
-    geometry.anchorName,
-    geometry.anchor ? [geometry.anchor[12], geometry.anchor[13], geometry.anchor[14]] : null,
-    state.settings.workspace_surface_offset,
-    state.settings.workspace_surface_size,
-    state.robotRenderer.workspaceBoundary || null,
-    state.settings.workspace_crop_enabled, state.settings.workspace_crop_min, state.settings.workspace_crop_max, state.settings.workspace_crop_rotation,
-  ]);
-  if (state.workspaceGuide?.signature === signature) return state.workspaceGuide;
-  deleteWorkspaceGuide(gl);
-  const upload = (values, mode) => {
-    if (!values.length) return null;
-    const buffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(values), gl.STATIC_DRAW);
-    return { buffer, count: values.length / 3, mode };
-  };
-  state.workspaceGuide = {
-    signature,
-    items: {
-      fill: upload(geometry.fill, gl.TRIANGLES),
-      grid: upload(geometry.grid, gl.LINES),
-      boundary: upload(geometry.boundary, gl.LINES),
-      crop: upload(geometry.crop, gl.LINES),
-    },
-  };
-  return state.workspaceGuide;
-}
-
-function drawWorkspaceGuide(viewProjection) {
-  if (!state.robotProgram || !state.robotVao) return;
-  const showSurface = state.settings.workspace_surface_enabled === true;
-  const showBoundary = state.settings.workspace_boundary_enabled === true
-    && state.robotRenderer.workspaceBoundary;
-  const showCrop = state.settings.workspace_crop_show_box === true && workspaceCropBounds(state.settings);
-  if (!showSurface && !showBoundary && !showCrop) return;
-  const guide = ensureWorkspaceGuide();
-  if (!guide) return;
-  const gl = state.gl;
-  gl.useProgram(state.robotProgram);
-  gl.bindVertexArray(state.robotVao);
-  gl.uniformMatrix4fv(state.robotUniforms.viewProjection, false, viewProjection);
-  gl.uniformMatrix4fv(state.robotUniforms.model, false, identityMatrix());
-  gl.uniform2f(state.robotUniforms.viewport, Math.max(gl.canvas.width, 1), Math.max(gl.canvas.height, 1));
-  gl.uniform1f(state.robotUniforms.outlinePixels, 0);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
-  gl.disableVertexAttribArray(1);
-  gl.vertexAttrib3f(1, 0, 1, 0);
-  gl.enable(gl.DEPTH_TEST);
-  gl.depthFunc(gl.LEQUAL);
-  gl.enable(gl.BLEND);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-  gl.depthMask(false);
-  const draw = (item, color) => {
-    if (!item) return;
-    gl.bindBuffer(gl.ARRAY_BUFFER, item.buffer);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
-    gl.uniform4fv(state.robotUniforms.color, color);
-    gl.drawArrays(item.mode, 0, item.count);
-  };
-  if (showSurface) {
-    const opacity = clamp(Number(state.settings.workspace_surface_opacity || 0.18), 0.01, 0.8);
-    draw(guide.items.fill, [0.08, 0.7, 0.92, opacity]);
-    draw(guide.items.grid, [0.22, 0.84, 1.0, Math.min(0.75, opacity + 0.24)]);
-  }
-  if (showBoundary) draw(guide.items.boundary, [1.0, 0.28, 0.08, 0.9]);
-  if (showCrop) draw(guide.items.crop, [0.22, 0.84, 1.0, 1.0]);
-  gl.depthMask(true);
-  gl.disable(gl.BLEND);
-  gl.bindVertexArray(null);
 }
 
 function cameraMarkerGeometry(camera, depth = 0.12) {
@@ -1140,6 +1053,8 @@ function drawCameraGuides(viewProjection) {
   const rect = state.canvas.getBoundingClientRect();
   const present = new Set();
   gl.useProgram(state.robotProgram);
+  gl.uniform1f(state.robotUniforms.surfaceDetail, 0);
+  gl.uniform2f(state.robotUniforms.material, .6, .08);
   gl.bindVertexArray(state.robotVao);
   gl.uniformMatrix4fv(state.robotUniforms.viewProjection, false, viewProjection);
   gl.uniform2f(state.robotUniforms.viewport, Math.max(gl.canvas.width, 1), Math.max(gl.canvas.height, 1));
@@ -1193,10 +1108,30 @@ function drawCameraGuides(viewProjection) {
   gl.bindVertexArray(null);
 }
 
+function robotLinkVisible(name) {
+  return state.settings.robot_overlay_scope !== "claw"
+    || (state.robotRenderer.endEffectorLinks || []).includes(name);
+}
+
+function raycastRobotOverlay(ray,limit=Infinity) {
+  if(!ray||!state.settings.robot_overlay_enabled||!state.robotProgram||!state.robotVao)return null;
+  let nearest=null;
+  for(const [name,primitives] of Object.entries(state.robotMeshes)) {
+    if(!robotLinkVisible(name))continue;
+    const global=transformDictionaryMatrix(state.robotTransforms[name]);if(!global)continue;
+    for(const primitive of primitives) {
+      const hit=raycastRobotPrimitive(ray,primitive,multiplyMatrix(global,primitive.localMatrix),nearest?.distance??limit);
+      if(hit)nearest=hit;
+    }
+  }
+  return nearest;
+}
+
 function drawRobotShadow(program,modelUniform) {
-  if(!state.settings.robot_overlay_enabled||state.settings.robot_overlay_style!=='solid'||!state.robotVao)return;
+  if(!state.settings.robot_overlay_enabled||!['solid','realistic'].includes(state.settings.robot_overlay_style)||!state.robotVao)return;
   const gl=state.gl;gl.bindVertexArray(state.robotVao);
   for(const [name,primitives] of Object.entries(state.robotMeshes)) {
+    if (!robotLinkVisible(name)) continue;
     const matrix=transformDictionaryMatrix(state.robotTransforms[name]);if(!matrix)continue;
     for(const primitive of primitives) {
       gl.bindBuffer(gl.ARRAY_BUFFER,primitive.positionBuffer);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,0,0);
@@ -1218,10 +1153,12 @@ function drawRobotOverlay(viewProjection) {
   gl.enable(gl.DEPTH_TEST);
   gl.depthFunc(gl.LEQUAL);
   const alignmentStyle = state.settings.robot_overlay_style === "alignment";
+  const realisticStyle = state.settings.robot_overlay_style === "realistic";
   bindSceneLighting(gl,state.robotProgram,state.settings,state.currentViewer?.slice(12,15),state.sceneShadow,!alignmentStyle);
   const drawLinks = (outline) => {
     gl.uniform1f(state.robotUniforms.outlinePixels, outline ? 1.75 : 0.0);
     for (const [name, primitives] of Object.entries(state.robotMeshes)) {
+      if (!robotLinkVisible(name)) continue;
       const globalMatrix = transformDictionaryMatrix(state.robotTransforms[name]);
       if (!globalMatrix) continue;
       const accentLink = (state.robotRenderer.accentLinks || []).includes(name);
@@ -1232,6 +1169,10 @@ function drawRobotOverlay(viewProjection) {
         : state.robotRenderer.colors?.[name] || [0.9, 0.75, 0.18, 1];
       gl.uniform4fv(state.robotUniforms.color, color);
       for (const primitive of primitives) {
+      const material = realisticStyle ? primitive.material : {color, roughness:.6, metalness:.08, detail:0};
+      gl.uniform4fv(state.robotUniforms.color, material.color);
+      gl.uniform2f(state.robotUniforms.material, material.roughness, material.metalness);
+      gl.uniform1f(state.robotUniforms.surfaceDetail, material.detail || 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, primitive.positionBuffer);
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
@@ -1270,6 +1211,11 @@ function drawRobotOverlay(viewProjection) {
 }
 
 function robotMaskCapsules() {
+  // Keep the real arm and claw visible while testing end-effector alignment.
+  if (state.settings.robot_overlay_scope === "claw") return null;
+  // Keep camera geometry visible until every replacement model is available.
+  // A failed asset download must not leave a masked hole in the real arm.
+  if (Object.keys(state.robotRenderer.modelUrls || {}).some(name => !state.robotMeshes[name]?.length)) return null;
   const chain = state.robotRenderer.maskChain || {};
   const names = Array.isArray(chain.names) ? chain.names : [];
   const radii = Array.isArray(chain.radii) ? chain.radii.slice(0, 6) : [];
@@ -1378,6 +1324,9 @@ function parsePacket(arrayBuffer) {
   let offset = metadataEnd;
   const payloads = [];
   for (const camera of metadata.cameras || []) {
+    // Preserve each packet's geometry clock before independent-camera packets
+    // are coalesced. Older capture services expose only the packet clock.
+    camera.geometry_capture_unix_ms = Number(camera.capture_unix_ms || metadata.capture_unix_ms || 0);
     const colorEnd = offset + Number(camera.color_length || 0);
     const depthEnd = colorEnd + Number(camera.depth_length || 0);
     if (colorEnd > bytes.length || depthEnd > bytes.length) throw new Error("truncated RGB-D payload");
@@ -1746,11 +1695,20 @@ async function decodeColor(bytes, metadata = {}) {
 }
 
 async function decodeCamera(payload) {
-  let color, rawDepth, depthTiles=null;
-  if (state.nativeDecoder && !state.nativeDecoder.disabled
+  let color, rawDepth, depthTiles=null,previewSamples=null,validPoints=null;
+  // A startup shader compile can delay worker replies beyond their deadline.
+  // Retry fresh independent frames after cooldown instead of staying on the
+  // slower compatibility decoder for the remainder of the session.
+  if(state.nativeDecoder?.disabled)state.nativeDecoder.tryRecover?.();
+  if(payload.metadata.depth_encoding==='u16_mm_sparse_points_deflate'&&(!state.nativeDecoder||state.nativeDecoder.disabled)){
+    const decoded=await decodeSparsePoints(payload.depth,payload.metadata);
+    previewSamples=decoded.previewSamples;validPoints=decoded.validPoints;rawDepth=decoded.depth;
+    color={bitmap:null,pixels:null,rgbaPixels:decoded.rgbaPixels};
+  } else if (state.nativeDecoder && !state.nativeDecoder.disabled
       && state.socketOptions?.exactDepth === true && isIndependentNativeFrame(payload.metadata)) {
-    const decoded = await state.nativeDecoder.decode({...payload,workspaceTiles:state.useNativeTileCulling!==false||state.settings.workspace_crop_enabled===true||state.settings.modeled_workspace_enabled===true});
+    const decoded = await state.nativeDecoder.decode({...payload,pointPreview:state.settings.point_preview_enabled===true,pointPreviewBudget:state.settings.point_preview_budget===0?0:state.settings.point_preview_budget===40000?40000:20000,workspaceTiles:state.useNativeTileCulling!==false||state.settings.modeled_workspace_enabled===true});
     depthTiles=decoded.depthTiles;
+    previewSamples=decoded.previewSamples;validPoints=decoded.validPoints;
     color = {bitmap: decoded.bitmap, pixels: null,rgbaPixels:decoded.rgbaPixels};rawDepth = decoded.depth;
     for(const key of ["workerMs","dispatchMs"])state.stats[key]=state.stats[key]>0?state.stats[key]*.8+decoded[key]*.2:decoded[key];
   } else {
@@ -1761,11 +1719,12 @@ async function decodeCamera(payload) {
   }
   const width = Number(payload.metadata.width || 0);
   const height = Number(payload.metadata.height || 0);
-  if (width <= 0 || height <= 0 || rawDepth.length < width * height) {
+  const compact=Boolean(previewSamples?.depths);
+  if (width <= 0 || height <= 0 || (!compact&&(!rawDepth||rawDepth.length < width * height))) {
     if (color.bitmap) color.bitmap.close();
     throw new Error(`invalid depth dimensions ${width}x${height}`);
   }
-  const depth = payload.metadata.depth_exact === true || state.socketOptions?.exactDepth === true
+  const depth = compact ? null : payload.metadata.depth_exact === true || state.socketOptions?.exactDepth === true
     ? rawDepth : repairSmallDepthHoles(rawDepth, width, height);
   return {
     metadata: payload.metadata,
@@ -1773,6 +1732,7 @@ async function decodeCamera(payload) {
     height,
     depth,
     depthTiles:depth===rawDepth?depthTiles:null,
+    previewSamples:compact||depth===rawDepth?previewSamples:null,validPoints,
     colorWidth:colorFrameDimensions(payload.metadata)[0],colorHeight:colorFrameDimensions(payload.metadata)[1],
     bitmap: color.bitmap,
     colorPixels: color.pixels,
@@ -1820,6 +1780,19 @@ function uploadCamera(decoded) {
   [decoded.colorWidth,decoded.colorHeight]=colorFrameDimensions({...decoded.metadata,width:decoded.width,height:decoded.height});
   const previous = state.cameras.find((camera) => camera.metadata.id === decoded.metadata.id);
   const camera = previous || {};
+  if(decoded.previewSamples?.depths){
+    deleteCameraTextures(camera);
+    Object.assign(camera,decoded,{textureSlots:[],textureSlotIndex:-1,depthTexture:null,colorTexture:null,meshIndexBuffer:null,meshIndexCount:0});
+    camera.lastUpdateMs=performance.now();camera.uploadRevision=(previous?.uploadRevision||0)+1;
+    camera.intrinsicsArray=new Float32Array(camera.metadata.intrinsics);
+    // Materialize colour only for the explicitly opened manual RGB tool.
+    if(state.manualRgbCanvas?.offsetParent){
+      const samples=camera.previewSamples,rgba=new Uint8Array(camera.width*camera.height*4);
+      for(let i=0;i<samples.indices.length;i++){const target=samples.indices[i]*4;rgba.set(samples.colors.subarray(i*3,i*3+3),target);rgba[target+3]=255;}
+      camera.colorRgbaPixels=rgba;updateManualRgbBase(camera);renderManualCalibrationPreview(camera);delete camera.colorRgbaPixels;
+    }
+    return camera;
+  }
   if (!previous || previous.width !== decoded.width || previous.height !== decoded.height || previous.colorWidth !== decoded.colorWidth || previous.colorHeight !== decoded.colorHeight) {
     deleteCameraTextures(camera);
     camera.textureSlots=[];
@@ -2034,7 +2007,7 @@ function renderManualCalibrationPreview(camera) {
     : null;
   if (!cameraMatrix || !Array.isArray(camera.metadata.intrinsics)) return;
   const opacity = Math.max(0.05, Math.min(0.9, Number(state.settings.manual_overlay_opacity ?? 0.3)));
-  const distalNames = state.robotRenderer.calibrationLinks || [];
+  const distalNames = (state.robotRenderer.calibrationLinks || []).filter(robotLinkVisible);
   if (!distalNames.length) return;
   const signature = JSON.stringify([
     camera.colorWidth,
@@ -2127,7 +2100,9 @@ function beginFrameDecode(frame) {
     }
     completed = null;
   };
-  const promise = Promise.allSettled(frame.payloads.map(decodeCamera)).then(results => {
+  const promise = Promise.allSettled(frame.payloads.map(payload=>decodeCamera(payload).then(camera=>{
+    camera.receivedAtMs=payload.receivedAtMs??frame.receivedAtMs??started;return camera;
+  }))).then(results => {
     completed = results;
     if (canceled || !state.running || generation !== state.robotLoadToken) release();
     return results;
@@ -2137,12 +2112,12 @@ function beginFrameDecode(frame) {
 }
 
 function clearPendingCameraUploads() {
-  for(const camera of state.pendingCameraUploads.values())camera.bitmap?.close();
+  for(const queue of state.pendingCameraUploads.values())for(const entry of queue)entry.camera.bitmap?.close();
   state.pendingCameraUploads.clear();
 }
 
 function applyCameraUploads(decoded) {
-  const started=performance.now(),updated=decoded.map(uploadCamera);
+  const started=performance.now(),updated=decoded.filter(camera=>!camera.previewSamples?.depths||state.settings.point_preview_enabled).map(uploadCamera);
   const elapsed=performance.now()-started;
   state.stats.uploadMs=state.stats.uploadMs>0?state.stats.uploadMs*.8+elapsed*.2:elapsed;
   for(const camera of updated) {
@@ -2164,17 +2139,24 @@ function applyCameraUploads(decoded) {
 function queueCameraUploads(decoded) {
   for(const camera of decoded) {
     const id=String(camera.metadata.id||camera.metadata.serial||camera.metadata.model||'camera');
-    state.pendingCameraUploads.get(id)?.bitmap?.close();
-    state.pendingCameraUploads.set(id,camera);
+    const queue=state.pendingCameraUploads.get(id)||[],capacity=camera.previewSamples?.depths?3:1;
+    queue.push({camera,at:camera.receivedAtMs??performance.now()});
+    while(queue.length>capacity)queue.shift().camera.bitmap?.close();
+    state.pendingCameraUploads.set(id,queue);
   }
-  // Independent frames need no earlier reference. Keep the newest complete
-  // capture for each camera, never an A-only update in place of B/C.
+  // Preserve short native-point bursts for successive real draws. The 50 ms
+  // receive-to-upload bound still drops stale frames instead of adding lag.
   if(state.pendingCameraUploads.size>32)flushPendingCameraUploads();
 }
 
-function flushPendingCameraUploads() {
+function flushPendingCameraUploads(latestOnly=false) {
   if(!state.pendingCameraUploads.size)return;
-  const decoded=[...state.pendingCameraUploads.values()];state.pendingCameraUploads.clear();
+  const decoded=[],now=performance.now();
+  for(const [id,queue]of state.pendingCameraUploads) {
+    while(queue.length>1&&(latestOnly||now-queue[0].at>50))queue.shift().camera.bitmap?.close();
+    if(queue.length)decoded.push(queue.shift().camera);
+    if(!queue.length)state.pendingCameraUploads.delete(id);
+  }
   applyCameraUploads(decoded);
 }
 
@@ -2195,18 +2177,19 @@ async function decodeNewestPackets() {
     const payloads = frame.payloads;
     const metadata = frame.metadata;
     state.stats.streamCrop=metadata.stream_crop||null;
+    state.stats.meshPreview=metadata.mesh_preview||null;
     persistentFrame = (
       metadata.temporal_reference_mode === "persistent_v1"
     );
     const decodeStarted = prepared.started, queueElapsed = prepared.queueElapsed;
     const robot = metadata.robot;
-    state.robotRegistration=robot?.registration||null;
     if (robot && robot.available !== false && robot.links && typeof robot.links === "object") {
-      state.robotTransforms = robot.links;
-      state.robotTransformsUpdatedMs = performance.now();
+      acceptRobotOverlayState(robot);
     } else if (robot && robot.available === false
                && performance.now() - state.robotTransformsUpdatedMs > 3000) {
       state.robotTransforms = {};
+      state.robotPosePreview.reset();
+      state.robotJointAnimation.reset();
     }
     state.stats.robotTransforms = Object.keys(state.robotTransforms).length;
     const results = await prepared.promise;
@@ -2238,7 +2221,7 @@ async function decodeNewestPackets() {
       queueCameraUploads(decoded);
     } else {
       // Temporal RGB/depth patches must apply to their exact prior reference.
-      flushPendingCameraUploads();applyCameraUploads(decoded);
+      flushPendingCameraUploads(true);applyCameraUploads(decoded);
     }
     for (const [key, value] of [["codecMs", codecElapsed], ["queueMs", queueElapsed]]) {
       state.stats[key] = state.stats[key] > 0 ? state.stats[key] * 0.8 + value * 0.2 : value;
@@ -2293,17 +2276,18 @@ function currentHeadDelta() {
   const latest = window.godotWebcamTrackerLatest || {};
   if (latest.active !== true) {
     state.lastHeadActive = false;
-    return [0, 0, 0];
+    return state.lastHeadDelta.slice();
   }
-  if (!state.headBaseline || !state.lastHeadActive) {
-    state.headBaseline = { x: Number(latest.x || 0), y: Number(latest.y || 0), z: Number(latest.z || 0) };
+  if (!state.headBaseline) {
+    state.headBaseline = { x: 0, y: 0, z: Number(latest.neutral_z_cm || 35) };
   }
   state.lastHeadActive = true;
-  return [
+  state.lastHeadDelta = [
     (Number(latest.x || 0) - state.headBaseline.x) * 0.01,
     -(Number(latest.y || 0) - state.headBaseline.y) * 0.01,
     (Number(latest.z || 0) - state.headBaseline.z) * 0.01,
   ];
+  return state.lastHeadDelta.slice();
 }
 
 function translatedViewer(base, delta) {
@@ -2362,8 +2346,14 @@ function orbitViewer(base, headDelta) {
     -settings.max_pitch,
     settings.max_pitch,
   );
+  const focus = currentOrbitFocus(base);
+  if (!state.orbitReference) state.orbitReference = {
+    distance: Math.max(.1, Number(settings.orbit_distance || .65)),
+    height: verticalLiftForFocus(focus), pitch: 0,
+  };
+  const reference = state.orbitReference;
   const pitch = clamp(
-    Number(settings.orbit_pitch_offset || 0) + trackedPitch + state.manualOrbitPitch,
+    Number(settings.orbit_pitch_offset || 0) - reference.pitch + trackedPitch + state.manualOrbitPitch,
     -80,
     80,
   ) * Math.PI / 180;
@@ -2373,17 +2363,20 @@ function orbitViewer(base, headDelta) {
   if (settings.dolly_enabled) distance += (relativeHead[2] * 100) * Number(settings.dolly_gain || 0);
   distance += state.manualDolly;
   distance = clamp(distance, Number(settings.min_distance || 0.2), Number(settings.max_distance || 3));
-  const focus = currentOrbitFocus(base);
-  const virtualHeadOffset = scale(worldUp, verticalLiftForFocus(focus));
-  // Rotate the complete camera offset, including its configured height.
-  // Adding height after pitching changes the orbit radius as the mouse moves.
-  const offset = add(scale(direction, distance), virtualHeadOffset);
+  // Build the orbit at its reference radius, then dolly along its optical axis.
+  // Fixed camera height plus a changing horizontal radius would change pitch.
+  const offset = add(scale(direction, reference.distance), scale(worldUp, reference.height));
   const baseElevation = Math.atan2(offset[1], Math.hypot(offset[0], offset[2]));
   const elevationLimit = 80 * Math.PI / 180;
   const elevation = clamp(baseElevation - pitch, -elevationLimit, elevationLimit);
-  const orbitOffset = rotateAroundAxis(offset, pitchAxis, baseElevation - elevation);
-  const cameraPosition = add(focus, orbitOffset);
-  return lookAtTransform(cameraPosition, focus, worldUp);
+  const turn = baseElevation - elevation;
+  const orbitOffset = rotateAroundAxis(offset, pitchAxis, turn);
+  const aim = rotateAroundAxis(rotateAroundAxis(state.orbitAimOffset || [0, 0, 0], worldUp, -yaw), pitchAxis, turn);
+  const target = add(focus, aim);
+  const viewer = lookAtTransform(add(focus, orbitOffset), target, worldUp);
+  const dolly = distance - reference.distance;
+  for (let i = 0; i < 3; i++) viewer[12 + i] += viewer[8 + i] * dolly;
+  return viewer;
 }
 
 function attachPointerNavigation(options = {}) {
@@ -2501,9 +2494,21 @@ function resizeCanvas() {
   return { width, height, dpr };
 }
 
-function render() {
+function render() { return timeBrowserWork('renderer.render', renderImpl); }
+
+function renderImpl() {
   if (!state.running || !state.gl || !state.baseViewer) return;
+  if(Object.keys(state.robotPosePreview.target).length)state.robotTransforms=state.robotPosePreview.sample(performance.now());
   flushPendingCameraUploads();
+  if (!state.robotPosePreview.manual && !state.robotPosePreview.base
+      && new URLSearchParams(globalThis.location?.search || '').get('robot_animation') !== 'legacy') {
+    const times=state.cameras.map(c=>Number(c.metadata.geometry_capture_unix_ms||0)).filter(t=>t>0);
+    const capture=times.length?Math.max(...times):0;
+    const links=state.robotJointAnimation.sample(capture);
+    if(links) state.robotTransforms=links;
+    state.stats.robotJointAnimation={...state.robotJointAnimation.status,
+      cameraSpreadMs:times.length?Math.max(...times)-Math.min(...times):0};
+  }
   if (state.settings.display_mode === "rgb_camera") {
     if (state.blendPCR?.signature) state.blendPCR.clearTargets();
     state.stats.renderWarning = "";
@@ -2530,6 +2535,8 @@ function render() {
   gl.viewport(0, 0, dimensions.width, dimensions.height);
   if (state.settings.white_background_enabled) {
     gl.clearColor(1, 1, 1, 1);
+  } else if (modeledWorkspace(state.settings)) {
+    gl.clearColor(...MODELED_WORKSPACE_PALETTE.background, 1);
   } else {
     gl.clearColor(0.03, 0.035, 0.04, 1);
   }
@@ -2539,11 +2546,13 @@ function render() {
   gl.disable(gl.BLEND);
   const maskCapsules = state.settings.robot_overlay_enabled && state.settings.robot_overlay_mask_scanned_robot
     ? robotMaskCapsules() : null;
-  const meshMode = state.settings.geometry_mode === "mesh";
+  const pointPreview = state.settings.point_preview_enabled===true&&!state.pointPreviewUnavailable;
+  const meshMode = !pointPreview&&state.settings.geometry_mode === "mesh";
   const now = performance.now();
   let cached = false;
-  state.stats.renderWarning = "";
-  if (state.cameras.length) {
+  state.stats.renderWarning = state.settings.point_preview_enabled&&state.pointPreviewUnavailable
+    ? `20k preview unavailable: ${state.pointPreviewUnavailable}; using full detail` : "";
+  if (!pointPreview&&state.cameras.length) {
     try {
       gl.bindFramebuffer(gl.FRAMEBUFFER,null);
       gl.bindVertexArray(null);
@@ -2597,10 +2606,12 @@ function render() {
     state.blendPCR.clearTargets();
   }
   state.stats.renderMethod = blended ? "blendpcr" : (state.settings.blendpcr_enabled ? "independent_mesh" : state.settings.display_mode || "independent_mesh");
+  if(!pointPreview) {
+  state.stats.pointPreview=null;
   const unified = meshMode && state.settings.overlap_suppression_enabled && cached && state.cameras.length >= 2;
   const fusionReference = !cached && state.settings.camera_color_fusion_enabled ? chooseColorReference(state.cameras, now) : null;
   const originalProgram=state.program,originalUniforms=state.uniforms;
-  const cropBounds = modeledWorkspaceBounds(state.settings, workspaceCropBounds(state.settings));
+  const cropBounds = modeledWorkspaceBounds(state.settings);
   let sourceCells = 0, submittedCells = 0;
   const indexedMesh=!blended&&meshMode&&cached&&!maskCapsules&&!state.settings.overlap_suppression_enabled
     &&!state.settings.camera_color_fusion_enabled&&state.useIndexedMeshes!==false
@@ -2632,7 +2643,7 @@ function render() {
   gl.uniform1i(state.uniforms.rigEnabled, unified ? 1 : 0);
   gl.uniform1i(state.uniforms.rigColorEnabled, cached && state.settings.camera_color_fusion_enabled ? 1 : 0);
   gl.uniform1f(state.uniforms.fusionDepthTolerance, 0.035);
-  bindWorkspaceCrop(gl, state.program, workspaceCropBounds(state.settings));
+
   bindModeledWorkspace(gl, state.program, state.settings);
   gl.vertexAttribI4ui(0,0,0,0,0);
   gl.vertexAttribI4ui(1,0,0,0,0);
@@ -2708,6 +2719,18 @@ function render() {
   }
   } finally {state.program=originalProgram;state.uniforms=originalUniforms;}
   state.stats.workspaceCrop = blended ? state.blendPCR.cropStats : {enabled: Boolean(cropBounds), sourceCells, submittedCells};
+  } else {
+    try {
+      state.sampledPointPreview ||= new SampledPointPreview(gl);
+      state.stats.pointPreview=state.sampledPointPreview.render(state.cameras,{...dimensions,now,viewProjection},maskCapsules,state.settings);
+      state.stats.pointPreview.transport=state.cameras.every(c=>c.metadata.preview_native===true)?'camera buffers':state.cameras.every(c=>c.metadata.depth_encoding==='u16_mm_sparse_points_deflate')?'host sampled':'local fallback';
+      state.stats.renderMethod='sampled_points';state.stats.workspaceCrop=null;
+    } catch(error) {
+      state.sampledPointPreview?.dispose();state.sampledPointPreview=null;
+      state.pointPreviewUnavailable=String(error.message||error);
+      state.stats.pointPreview=null;state.stats.renderWarning=`20k preview unavailable: ${state.pointPreviewUnavailable}; using full detail`;
+    }
+  }
   const stage=modeledWorkspace(state.settings);
   if (stage) {
     state.modeledWorkspace ||= new ModeledWorkspaceRenderer(gl);
@@ -2717,7 +2740,7 @@ function render() {
     try {
       state.sceneShadow ||= new SceneShadowRenderer(gl);
       const center=stage?.center||robotBasePosition(),extent=Math.max(1,stage?.width||0,stage?.depth||0,stage?.tableHeight||0);
-      const signature=JSON.stringify([stage?.key,state.settings.modeled_workspace_light_angle,state.settings.robot_overlay_enabled,state.settings.robot_overlay_style,state.robotTransforms,state.stats.robotModelsLoaded]);
+      const signature=JSON.stringify([stage?.key,state.settings.modeled_workspace_light_angle,state.settings.robot_overlay_enabled,state.settings.robot_overlay_style,state.settings.robot_overlay_scope,state.robotTransforms,state.stats.robotModelsLoaded]);
       state.sceneShadow.update(state.settings,center,extent,signature,(program,model)=>{
         state.modeledWorkspace?.drawDepth(state.settings,program,model);
         drawRobotShadow(program,model);
@@ -2725,7 +2748,6 @@ function render() {
     } catch(error){state.sceneShadow?.dispose();state.sceneShadow=null;state.sceneShadowUnavailable=true;state.stats.shadowWarning='CAD shadows unavailable; scene lighting remains active.';}
   }
   if(stage)state.modeledWorkspace.render(state.settings,viewProjection,viewerTransform.slice(12,15),state.sceneShadow);
-  drawWorkspaceGuide(viewProjection);
   drawCameraGuides(viewProjection);
   drawRobotOverlay(viewProjection);
   state.stats.renderFrames += 1;
@@ -2858,6 +2880,17 @@ function waitMilliseconds(milliseconds) {
 }
 
 function trimIndependentFrameQueue(queue, limit = 4) {
+  if(queue.every(frame=>frame.payloads.length===1&&frame.payloads[0].metadata.depth_encoding==='u16_mm_sparse_points_deflate')) {
+    const counts=new Map(),now=performance.now();
+    const keep=new Set();
+    for(let index=queue.length-1;index>=0;index--){
+      const frame=queue[index],meta=frame.payloads[0].metadata,id=String(meta.id||meta.serial||meta.model||'camera');
+      const count=counts.get(id)||0;counts.set(id,count+1);
+      if(count<3&&(count===0||now-frame.receivedAtMs<=50))keep.add(index);
+    }
+    const frames=queue.filter((_frame,index)=>keep.has(index)),dropped=queue.length-frames.length;
+    queue.splice(0,queue.length,...frames);return dropped;
+  }
   // Keep recent captures and their named references. Also retain the newest
   // keyframe for each camera, since its next delta may not have arrived yet.
   const keep = new Set();
@@ -2905,6 +2938,7 @@ function handleRgbdPacket(arrayBuffer, transport) {
     state.stats.status = `packet error: ${error.message || error}`;
     return;
   }
+  if(parsed.metadata.preview_transport==='host_sampled_points_v1'&&(!state.settings.point_preview_enabled||parsed.payloads.some(p=>p.metadata.preview_budget!==(state.settings.point_preview_budget===0?0:state.settings.point_preview_budget===40000?40000:20000))))return;
   // Parallel HTTPS requests can complete in small bursts. Preserve complete
   // chronological frames instead of overwriting one while its predecessor is
   // decoding. The hard cap still prevents latency from accumulating.
@@ -3033,6 +3067,10 @@ function closeRgbdSocket() {
 function rgbdSocketUrl(options) {
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
   const query = new URLSearchParams({
+    native_points: state.settings.point_preview_enabled===true?"1":"0",
+    native_mesh: state.settings.mesh_preview_enabled===true?'balanced':'0',
+    point_predictor: state.settings.point_preview_enabled===true&&state.settings.point_preview_budget!==0?"shuffle_delta_v2":"delta_v1",
+    point_budget: String(state.settings.point_preview_budget===0?0:state.settings.point_preview_budget===40000?40000:20000),
     w: String(options.width || 384),
     fps: String(options.fps || 30),
     context_fps: String(options.contextFps || options.fps || 30),
@@ -3052,7 +3090,11 @@ function startRgbdWebSocket(options) {
   if (!state.running || document.hidden || state.rgbdPaused) return;
   stopRgbdHttpLatest();
   closeRgbdSocket();
-  const socket = new WebSocket(rgbdSocketUrl(options));
+  const independent=(state.settings.point_preview_enabled===true||state.settings.mesh_preview_enabled===true)
+    &&new URLSearchParams(window.location.search).get('independent_cameras')!=='0';
+  const url=rgbdSocketUrl(options);
+  const lanes=new URLSearchParams(window.location.search).get('camera_lanes')==='1'?'1':'2';
+  const socket = independent?new IndependentCameraSocket(`${url}&camera_lanes=${lanes}`):new WebSocket(url);
   state.socket = socket;
   socket.binaryType = "arraybuffer";
   state.stats.connected = false;
@@ -3128,7 +3170,7 @@ function scheduleRgbdSocketRecovery(options) {
 
 function startConfiguredRgbdFallback(options) {
   if (state.rgbdPaused) return;
-  if ((options || {}).transport === "websocket") {
+  if (state.settings.point_preview_enabled===true || state.settings.mesh_preview_enabled===true || (options || {}).transport === "websocket") {
     startRgbdWebSocket(options || {});
   } else {
     startRgbdHttpLatest(options || {});
@@ -3244,6 +3286,7 @@ function startRgbdHttpLatest(options) {
 
 function attachRgbdDataChannel(channel, options) {
   if (!channel) return false;
+  const assembler=channel.nativePointStream?new NativePointAssembler():null;
   state.dataChannel = channel;
   channel.binaryType = "arraybuffer";
   const onOpen = () => {
@@ -3262,7 +3305,8 @@ function attachRgbdDataChannel(channel, options) {
   };
   const onMessage = (event) => {
     if (!state.running || state.dataChannel !== channel || document.hidden) return;
-    handleRgbdPacket(event.data, "WebRTC latest-frame");
+    const packet=assembler?assembler.accept(event.data):event.data;
+    if(packet)handleRgbdPacket(packet, "WebRTC latest-frame");
   };
   const onClose = () => {
     if (!state.running || state.dataChannel !== channel) return;
@@ -3402,7 +3446,10 @@ export async function startGodotHybridRenderer(options = {}) {
   state.lastPacketMs = 0;
   state.visibilityHandler = handleRgbdVisibilityChange;
   document.addEventListener("visibilitychange", state.visibilityHandler);
-  if (attachRgbdDataChannel(options.dataChannel, state.socketOptions)) {
+  const pointChannel=state.settings.point_preview_enabled===true;
+  const compatibleChannel=!state.settings.mesh_preview_enabled&&!(pointChannel&&state.settings.point_preview_budget===0)&&options.dataChannel&&Boolean(options.dataChannel.nativePointStream)===pointChannel;
+  if(options.dataChannel&&!compatibleChannel)options.dataChannel.close();
+  if (compatibleChannel&&attachRgbdDataChannel(options.dataChannel, state.socketOptions)) {
     state.dataChannelFallbackTimer = window.setTimeout(() => {
       state.dataChannelFallbackTimer = 0;
       if (!state.dataChannel || state.dataChannel.readyState !== "open") {
@@ -3418,6 +3465,8 @@ export async function startGodotHybridRenderer(options = {}) {
 
 export function stopGodotHybridRenderer() {
   state.running = false;
+  state.robotLoadController?.abort();
+  state.robotLoadController = null;
   for (const fence of state.renderFences || []) state.gl?.deleteSync(fence);
   state.renderFences = [];
   clearPendingCameraUploads();
@@ -3473,12 +3522,12 @@ export function stopGodotHybridRenderer() {
   state.cameras = [];
   state.blendPCR?.dispose();
   state.blendPCR = null;
+  state.sampledPointPreview?.dispose();state.sampledPointPreview=null;state.pointPreviewUnavailable='';
   state.cameraFusion?.clear();
   state.cameraFusion = null;
   state.pointColors?.dispose();state.pointColors=null;state.pointColorCacheUnavailable=false;
   state.robotMaskCache?.dispose();state.robotMaskCache=null;state.robotMaskCacheUnavailable=false;
   const gl = state.gl;
-  deleteWorkspaceGuide(gl);
   state.modeledWorkspace?.dispose();
   state.sceneShadow?.dispose();state.sceneShadow=null;state.sceneShadowUnavailable=false;
   state.modeledWorkspace = null;
@@ -3499,14 +3548,17 @@ export function stopGodotHybridRenderer() {
   state.robotProgram = null;
   state.robotUniforms = null;
   state.robotVao = null;
-  state.workspaceGuide = null;
   state.robotTransforms = {};
+  state.robotPosePreview.reset();
   state.robotRegistration=null;
+  state.robotJointAnimation.reset();
   state.robotRenderer = EMPTY_ROBOT_RENDERER;
   state.baseViewer = null;
   state.currentViewer = null;
   state.focusWorld = null;
   state.focusPicked = false;
+  state.orbitReference = null;
+  state.orbitAimOffset = null;
   state.orbitAnchorDirection = null;
   state.orbitAnchorHeadDelta = null;
   state.lastHeadDelta = [0, 0, 0];
@@ -3519,14 +3571,21 @@ export function stopGodotHybridRenderer() {
 }
 
 export function setGodotHybridViewSettings(settings = {}) {
-  if(settings.display_mode==='rgb_camera'&&state.workspaceEditor?.active)state.workspaceEditor.finish(true);
+  const pointTransportChanged=['point_preview_enabled','mesh_preview_enabled'].some(key=>Object.hasOwn(settings,key)&&settings[key]!==state.settings[key])
+    ||(Object.hasOwn(settings,'point_preview_budget')&&settings.point_preview_budget!==state.settings.point_preview_budget
+      &&(settings.point_preview_budget===0||state.settings.point_preview_budget===0));
+  if(["blendpcr_relaxed","blendpcr_depth_tolerance","blendpcr_support","blendpcr_max_edge"].some(key=>Object.hasOwn(settings,key)&&settings[key]!==state.settings[key])){state.cameraFusion?.clear();state.blendPCR?.clearTargets();}
+  if(Object.hasOwn(settings,'point_preview_enabled')&&settings.point_preview_enabled!==state.settings.point_preview_enabled)
+    state.pointPreviewUnavailable='';
+  if(settings.display_mode==='rgb_camera'&&state.workspaceEditor?.active)state.workspaceEditor.finish(!state.workspaceEditor.geometry?.planar);
   const overlayStyle = settings.robot_overlay_style;
   state.settings = {
     ...state.settings,
     ...settings,
-    robot_overlay_style: overlayStyle === "solid" ? "solid" : overlayStyle === "alignment"
-      ? "alignment"
-      : state.settings.robot_overlay_style,
+    robot_overlay_style: ["solid", "alignment", "realistic"].includes(overlayStyle)
+      ? overlayStyle : state.settings.robot_overlay_style,
+    robot_overlay_scope: ["full", "claw"].includes(settings.robot_overlay_scope)
+      ? settings.robot_overlay_scope : state.settings.robot_overlay_scope,
   };
   if (["point_cloud", "shader_mesh", "independent_mesh", "unified_mesh", "blendpcr"].includes(settings.display_mode)) {
     state.settings.geometry_mode = settings.display_mode === "point_cloud" ? "points" : "mesh";
@@ -3535,6 +3594,20 @@ export function setGodotHybridViewSettings(settings = {}) {
     state.settings.blendpcr_enabled = settings.display_mode === "blendpcr";
   }
   if (settings.recenter) recenterGodotHybridRenderer();
+  if(pointTransportChanged&&!state.settings.point_preview_enabled){
+    state.cameras=state.cameras.filter(camera=>{if(!camera.previewSamples?.depths)return true;deleteCameraTextures(camera);return false;});
+    clearPendingCameraUploads();
+  }
+  if(pointTransportChanged&&state.running&&state.socketOptions
+      &&!(state.settings.point_preview_enabled&&state.settings.point_preview_budget!==0&&state.dataChannel?.nativePointStream
+        &&['connecting','open'].includes(state.dataChannel.readyState))){
+    if(state.dataChannelFallbackTimer)clearTimeout(state.dataChannelFallbackTimer);state.dataChannelFallbackTimer=0;
+    if((state.settings.point_preview_enabled||state.settings.mesh_preview_enabled)&&state.dataChannel){const channel=state.dataChannel;state.dataChannel=null;channel.close();}
+    state.pendingFrameQueue.length=0;
+    closeRgbdSocket();stopRgbdHttpLatest();
+    startConfiguredRgbdFallback(state.socketOptions);
+  }
+
   configureOriginalRgb();
 }
 
@@ -3566,15 +3639,6 @@ export function setGodotHybridRgbCamera(id) {
   state.rawRgbViewer?.setCamera(id);
 }
 
-export function centerGodotHybridWorkspaceCrop() {
-  if (!state.baseViewer) return null;
-  const center = currentOrbitFocus(state.baseViewer.transform);
-  const old = workspaceCropBounds({...state.settings, workspace_crop_enabled: true});
-  const half = old ? old.size.map(v=>v*0.5) : [0.6, 0.45, 0.6];
-  return {workspace_crop_min: center.map((v, i) => v - half[i]),
-    workspace_crop_max: center.map((v, i) => v + half[i])};
-}
-
 export function alignGodotModeledWorkspace(options={}) {
   if (!state.baseViewer) return null;
   const base=transformDictionaryMatrix(state.robotTransforms[state.robotRenderer.baseLink]);
@@ -3585,9 +3649,32 @@ export function alignGodotModeledWorkspace(options={}) {
   return {modeled_workspace_center: currentOrbitFocus(state.baseViewer.transform).slice()};
 }
 
+export function frameGodotHeadTrackingView() {
+  const center = state.settings.modeled_workspace_center;
+  const robot = robotBasePosition();
+  const claw = transformDictionaryMatrix(state.robotTransforms.gripper_link);
+  if (!state.baseViewer || !robot || !claw || !Array.isArray(center) || center.length !== 3 || !center.every(Number.isFinite)) return false;
+  const tip = transformPoint(claw, [-0.0079, -0.000218121, -0.0981274]);
+  let back = [center[0] - robot[0], 0, center[2] - robot[2]];
+  if (Math.hypot(...back) < .03) back = [center[0] - tip[0], 0, center[2] - tip[2]];
+  if (Math.hypot(...back) < .001) back = [0, 0, 1];
+  state.focusWorld = center.slice(); state.focusPicked = true;
+  state.manualPan = [0, 0, 0]; state.manualOrbitYaw = 0; state.manualOrbitPitch = 0; state.manualDolly = 0;
+  state.orbitAnchorDirection = normalize(back); state.orbitAnchorHeadDelta = [0, 0, 0];
+  state.orbitAimOffset = tip.map((v, i) => v - center[i]);
+  state.orbitReference = {distance: Math.max(.1, Number(state.settings.orbit_distance || .65)),
+    height: Math.max(.15, Number(state.settings.focus_vertical_offset || .35), tip[1] - center[1] + .15),
+    pitch: Number(state.settings.orbit_pitch_offset || 0)};
+  state.headBaseline = {x: 0, y: 0, z: Number(window.godotWebcamTrackerLatest?.neutral_z_cm || 35)};
+  state.lastHeadActive = false;
+  return true;
+}
+
 export function recenterGodotHybridRenderer() {
   state.headBaseline = null;
   state.lastHeadActive = false;
+  state.orbitReference = null;
+  state.orbitAimOffset = null;
   state.orbitAnchorDirection = null;
   state.orbitAnchorHeadDelta = null;
   state.focusPicked = false;
@@ -3595,6 +3682,7 @@ export function recenterGodotHybridRenderer() {
   state.manualOrbitPitch = 0;
   state.manualDolly = 0;
   state.manualPan = [0, 0, 0];
+  if (state.settings.head_tracking_enabled && frameGodotHeadTrackingView()) return;
   if (state.baseViewer) state.focusWorld = defaultOrbitFocus(state.baseViewer.transform);
 }
 
@@ -3614,7 +3702,9 @@ export function getGodotHybridNavigationState(options = {}) {
     base: Array.from(base), fov: state.baseViewer.fov, near: state.baseViewer.near, far: state.baseViewer.far,
     focus: state.focusWorld?.slice() || null, picked: state.focusPicked,
     pan: state.manualPan.slice(), headBaseline: state.headBaseline && { ...state.headBaseline },
-    lastHeadActive: state.lastHeadActive,
+    lastHeadActive: state.lastHeadActive, lastHeadDelta: state.lastHeadDelta.slice(),
+    orbitReference: state.orbitReference && {...state.orbitReference}, orbitAimOffset: state.orbitAimOffset?.slice() || null,
+    orbitAnchorDirection: state.orbitAnchorDirection?.slice() || null, orbitAnchorHeadDelta: state.orbitAnchorHeadDelta?.slice() || null,
   };
   return navigation;
 }
@@ -3640,27 +3730,39 @@ export function setGodotHybridNavigationState(value = {}) {
     state.headBaseline = view.headBaseline && [view.headBaseline.x, view.headBaseline.y, view.headBaseline.z].every(Number.isFinite)
       ? { ...view.headBaseline } : null;
     state.lastHeadActive = Boolean(view.lastHeadActive);
+    state.lastHeadDelta = vector(view.lastHeadDelta, 3) ? view.lastHeadDelta.slice() : [0, 0, 0];
+    const ref = view.orbitReference;
+    state.orbitReference = ref && [ref.distance, ref.height, ref.pitch].every(Number.isFinite) && ref.distance > 0 ? {...ref} : null;
+    state.orbitAimOffset = vector(view.orbitAimOffset, 3) ? view.orbitAimOffset.slice() : null;
+    state.orbitAnchorDirection = vector(view.orbitAnchorDirection, 3) ? view.orbitAnchorDirection.slice() : null;
+    state.orbitAnchorHeadDelta = vector(view.orbitAnchorHeadDelta, 3) ? view.orbitAnchorHeadDelta.slice() : null;
   }
   return true;
 }
 
 export function focusGodotHybridRendererAt(clientX, clientY) {
-  if (!state.canvas || !state.viewProjection || state.cameras.length === 0) return false;
+  if (!state.canvas || !state.viewProjection) return false;
   const rect = state.canvas.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return false;
   const targetX = ((clientX - rect.left) / rect.width) * 2 - 1;
   const targetY = 1 - ((clientY - rect.top) / rect.height) * 2;
-  let bestPoint = null;
+  const table = modeledWorkspace(state.settings);
+  const ray = state.currentViewer ? screenRay(clientX-rect.left,clientY-rect.top,{
+    width:rect.width,height:rect.height,viewer:state.currentViewer,
+    fov:Number(state.settings.fov || state.baseViewer?.fov || 60),
+  }) : null;
+  const tableHit = raycastModeledWorkspace(ray,table);
+  const blocker = raycastModeledWorkspaceOccluder(ray,table);
+  const armHit = raycastRobotOverlay(ray,blocker?blocker.distance+.001:Infinity);
+  const sceneHit = armHit&&(!tableHit||armHit.distance<tableHit.distance)?armHit:tableHit;
+  let bestPoint = sceneHit?.point || null;
+  const visibleDistance = Math.min(sceneHit?.distance??Infinity,blocker?.distance??Infinity);
   let bestScore = 0.03 * 0.03;
-  const crop = workspaceCropBounds(state.settings);
   for (const camera of state.cameras) {
     const intrinsics = camera.metadata.intrinsics;
     const stride = Math.max(1, Math.floor(Math.max(camera.width, camera.height) / 180));
     const combined = multiplyMatrix(state.viewProjection, camera.modelMatrix);
-    for (let y = 0; y < camera.height; y += stride) {
-      for (let x = 0; x < camera.width; x += stride) {
-        const depthMm = camera.depth[y * camera.width + x];
-        if (!depthMm) continue;
+    for (const [x,y,depthMm] of cameraDepthSamples(camera,stride)) {
         const z = depthMm * 0.001;
         const local = [
           (x - intrinsics[2]) * z / intrinsics[0],
@@ -3674,16 +3776,19 @@ export function focusGodotHybridRendererAt(clientX, clientY) {
         const score = (ndcX - targetX) ** 2 + (ndcY - targetY) ** 2;
         if (score < bestScore) {
           const world = transformPoint(camera.modelMatrix, local);
-          if (crop && world.some((v,i) => v < crop.min[i] || v > crop.max[i])) continue;
+          if (modeledWorkspaceOutside(world, table)) continue;
+          // A visible measured object above the table can still be selected;
+          // samples hidden behind the modeled geometry must not steal its hit.
+          if (ray && world.reduce((sum,v,i)=>sum+(v-ray.origin[i])*ray.direction[i],0)>visibleDistance+.001) continue;
           bestScore = score;
           bestPoint = world;
         }
-      }
     }
   }
   if (!bestPoint) return false;
   // Only move the target. The orbit inputs remain unchanged, so the complete
   // camera rig translates without changing its viewing angle.
+  state.orbitReference = null; state.orbitAimOffset = null;
   state.focusWorld = bestPoint;
   state.focusPicked = true;
   state.manualPan = [0, 0, 0];
@@ -3692,7 +3797,7 @@ export function focusGodotHybridRendererAt(clientX, clientY) {
 }
 
 export function getGodotHybridRendererStatus() {
-  if (state.rawRgbViewer) return { ...state.stats, ...state.rawRgbViewer.status() };
+  if (state.rawRgbViewer) return { ...state.stats, ...state.rawRgbViewer.status(), pointPreview: null };
   const captureAgeMs = state.stats.captureUnixMs > 0
     ? Math.max(0, Date.now() - state.stats.captureUnixMs)
     : -1;
@@ -3700,7 +3805,11 @@ export function getGodotHybridRendererStatus() {
     ? Math.max(0, performance.now() - state.lastPacketMs)
     : -1;
   const stalled = state.stats.connected === true && packetAgeMs > 1500;
-  return { ...state.stats, captureAgeMs, packetAgeMs, stalled, queueDepth: state.pendingFrameQueue.length, decodeBusy: state.decoding };
+  const expected = state.stats.robotModelsExpected || 0, loaded = state.stats.robotModelsLoaded || 0;
+  const robotModelWarning = state.settings.robot_overlay_enabled && loaded < expected
+    ? `Arm overlay ${loaded}/${expected} links${state.stats.robotModelsPending?.length ? ' loading' : ' loaded'}${state.stats.robotLoadError ? `: ${state.stats.robotLoadError}` : ''}` : '';
+  const pointCounts=Object.fromEntries(state.cameras.map(c=>[String(c.metadata.id),c.metadata.mesh_preview?Number(c.metadata.preview_source_points||0):Number.isFinite(c.validPoints)?c.validPoints:(c.depth?.reduce((n,z)=>n+(z>0),0)||0)]));
+  return { ...state.stats, pointCounts, pointCountTotal:Object.values(pointCounts).reduce((a,b)=>a+b,0), robotModelWarning, captureAgeMs, packetAgeMs, stalled, queueDepth: state.pendingFrameQueue.length, decodeBusy: state.decoding };
 }
 
 window.startGodotHybridRenderer = startGodotHybridRenderer;
@@ -3708,15 +3817,34 @@ window.setGodotHybridRgbCamera = setGodotHybridRgbCamera;
 window.stopGodotHybridRenderer = stopGodotHybridRenderer;
 window.setGodotHybridViewSettings = setGodotHybridViewSettings;
 window.recenterGodotHybridRenderer = recenterGodotHybridRenderer;
+window.frameGodotHeadTrackingView = frameGodotHeadTrackingView;
 window.getGodotHybridNavigationState = getGodotHybridNavigationState;
 window.setGodotHybridNavigationState = setGodotHybridNavigationState;
 window.focusGodotHybridRendererAt = focusGodotHybridRendererAt;
 window.getGodotHybridRendererStatus = getGodotHybridRendererStatus;
-window.centerGodotHybridWorkspaceCrop = centerGodotHybridWorkspaceCrop;
+// Compact passive timing snapshot, carried by existing keyboard diagnostics.
+window.getGodotHybridTimingTrace = () => {
+  if (!state.running) return [];
+  const now = Date.now();
+  const times = state.cameras.map(c => Number(c.metadata.geometry_capture_unix_ms || 0)).filter(t => t > 0);
+  return [{label: 'display.pipeline', ms: 0, ageMs: 0, stack: JSON.stringify({
+    cameraAgeMinMs: times.length ? now - Math.max(...times) : null,
+    cameraAgeMaxMs: times.length ? now - Math.min(...times) : null,
+    packetAgeMs: state.lastPacketMs > 0 ? performance.now() - state.lastPacketMs : null,
+    cameraSpreadMs: times.length ? Math.max(...times) - Math.min(...times) : null,
+    animationMode: state.robotJointAnimation.status.mode,
+    animationErrorMs: state.robotJointAnimation.status.errorMs ?? null,
+  })}];
+};
+window.updateGodotRobotOverlay = acceptRobotOverlayState;
+window.setGodotRobotPreviewActive = enabled=>state.robotPosePreview.setManual(enabled);
+window.previewGodotRobotBase = pose=>{state.robotPosePreview.setBaseTarget(pose,state.robotRenderer.baseLink);state.robotTransforms=state.robotPosePreview.sample(performance.now());};
 window.alignGodotModeledWorkspace = alignGodotModeledWorkspace;
 window.editGodotWorkspace = (target) => {
-  if(!state.baseViewer||!state.canvas||!['crop','table'].includes(target))return false;
+  if(!state.baseViewer||!state.canvas||target!=='table')return false;
+  if(state.workspaceEditor?.geometry?.planar&&state.workspaceEditor.active)return false;
   state.workspaceEditor ||= new WorkspaceEditor({getSettings:()=>state.settings,
+    getCoverage:()=>({cameras:state.cameras,table:modeledWorkspace(state.settings)}),
     onChange:(settings,phase)=>{
       setGodotHybridViewSettings(settings);
       window.dispatchEvent(new CustomEvent('workspace-edit-change',{detail:{settings,phase}}));
@@ -3731,4 +3859,23 @@ window.editGodotWorkspace = (target) => {
       state.manualDolly=Math.sqrt(Math.max(.01,radius*radius-height*height))-Number(state.settings.orbit_distance||.65);
     }});
   state.workspaceEditor.begin(target);return true;
+};
+
+// Robot modules supply the pose and transaction; the shared viewer supplies
+// only the same scene-space handles used by the workspace editor.
+window.editGodotPlanarPose = (options) => {
+  if(!state.baseViewer||!state.canvas||state.settings.display_mode==='rgb_camera'||state.workspaceEditor?.active)return null;
+  state.workspaceEditor?.dispose();
+  const geometry={planar:true,verticalTranslation:options.verticalTranslation===true,title:options.title,saveLabel:options.saveLabel,
+    getBox:()=>{const pose=options.getPose();return orientedBox(pose.origin,[.12,.012,.12],[0,pose.yaw,0]);},
+    toSettings:box=>({origin:box.center.slice(),yaw:box.rotation[1]}),
+    readout:options.readout,onReset:options.onReset,
+  };
+  const editor=new WorkspaceEditor({getSettings:()=>({}),geometry,
+    onChange:options.onChange,onRequestFinish:options.onRequestFinish,
+    onFinish:commit=>{state.workspaceEditor=null;editor.dispose();options.onFinish?.(commit);},
+    onWheel:event=>state.pointerNavigation?.wheel(event),
+    onFrame:box=>{state.focusWorld=box.center.slice();state.focusPicked=true;state.manualPan=[0,0,0];},
+  });
+  state.workspaceEditor=editor;editor.begin('pose');return editor;
 };

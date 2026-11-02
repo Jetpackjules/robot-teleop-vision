@@ -31,6 +31,9 @@ const {resolve} = require('node:path');
   }
 
   const arm = simulatedArm();
+  arm.setIdleReturn(true);
+  assert.equal(arm.idleReturnTimeoutSeconds, 300, 'auto-rest defaults to five minutes');
+  assert.deepEqual(arm.sent.pop(), {type: 'arm_idle_return_settings', enabled: true, timeout_seconds: 300});
   await arm.pauseTrial();
   assert.equal(arm.latest.armed, false);
   assert.equal(arm.latest.state, 'hold');
@@ -38,6 +41,7 @@ const {resolve} = require('node:path');
   assert.equal(arm.keyboardKeys.size, 0, 'keys held before Pause must be released');
   assert.equal(arm.sent[0].type, 'arm_idle_return_settings');
   assert.equal(arm.sent[0].enabled, false, 'optional idle return cannot move a paused arm');
+  assert.equal(arm.sent[0].timeout_seconds, 300);
   const pauseCount = arm.sent.length;
   arm.enableArm();
   arm.send({type: 'arm_return_to_rest'});
@@ -53,6 +57,7 @@ const {resolve} = require('node:path');
   assert.deepEqual(velocity.linear, [0, 0, 0], 'Resume starts with fresh keyboard input');
   assert.equal(arm.sent.filter(m => m.type === 'arm_enable').length, 1);
   assert.equal(arm.sent.at(-1).enabled, true, 'resume restores configured idle return');
+  assert.equal(arm.sent.at(-1).timeout_seconds, 300, 'resume retains the five-minute timer');
 
   const unarmed = simulatedArm(false);
   await unarmed.pauseTrial();

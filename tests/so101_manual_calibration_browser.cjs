@@ -20,7 +20,7 @@ window.calibration = {state:'failed',manual_calibration:{supported:true,register
 window.getSo101ArmStatus = () => ({state:'hold',serverConnected:true,followerConnected:true,status:{measured_feedback_fresh:true,robot_calibration:window.calibration}});
 window.sent=[]; window.failSave=false; window.failImport=false; window.connected=true;
 window.fixture={type:'so101_visual_calibration',schema_version:1,robot:'so101',registration:{joint_angle_offsets_degrees:[40,80,0,-70,0,0]}};
-function sendFixtureSettings(payload){
+function sendFixtureSettings(payload=module.extendViewSettings({})){
   if(!window.connected)return false;
   window.sent.push(payload);
   const a=payload.robot_visual_calibration_action;
@@ -57,10 +57,23 @@ const server = http.createServer((req, res) => {
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.waitForFunction(()=>window.testModule);
+    await page.locator('#so101-overlay-scope').selectOption('claw');
+    assert(await page.locator('#so101-overlay-occlusion-enabled').isDisabled(),'claw-only keeps the scanned arm visible');
+    assert.equal(await page.evaluate(()=>testModule.extendViewSettings({}).robot_overlay_scope),'claw');
+    await page.evaluate(()=>testModule.restoreViewSettings({robot_overlay_scope:'full'}));
+    assert.equal(await page.locator('#so101-overlay-scope').inputValue(),'full');
+    assert(await page.locator('#so101-overlay-occlusion-enabled').isEnabled(),'full-arm masking remains accessible');
     await page.getByText('Recovery tools',{exact:true}).click();
     await page.getByRole('button',{name:'Manual Joint Tuning',exact:true}).click();
     const panel=page.locator('#so101-manual-workspace');
     await panel.waitFor({state:'visible'});
+    const continuous=await page.evaluate(async()=>{
+      const input=document.querySelector('[data-manual-key="manual_elbow_flex_trim_degrees"]');
+      const before=sent.filter(p=>p.robot_visual_calibration_action?.operation==='preview').length;
+      for(let i=0;i<24;i++){input.value=String(i);input.dispatchEvent(new Event('input',{bubbles:true}));await new Promise(r=>setTimeout(r,16));}
+      return sent.filter(p=>p.robot_visual_calibration_action?.operation==='preview').length-before;
+    });
+    assert(continuous>=5,'continuous slider input must send previews before the drag stops');
     const shoulder=page.getByRole('spinbutton',{name:'Shoulder lift (J2) offset in degrees',exact:true});
     await shoulder.fill('12.5');
     await page.waitForFunction(()=>window.sent.some(p=>p.manual_shoulder_lift_trim_degrees===12.5));

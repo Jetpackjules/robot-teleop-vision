@@ -63,7 +63,12 @@ const server = http.createServer((req,res) => {
       const controls = page.locator('#robot-view-root');
       assert((await controls.innerText()).trim(),`${name}: setup must never be blank`);
       if(name === 'so101') {
-        assert.equal(await controls.getByRole('button',{name:'Calibrate Full Arm',exact:true}).count(),1);
+        const style=controls.locator('#so101-overlay-style');
+        assert.equal(await style.inputValue(),'realistic');
+        await style.selectOption('alignment');
+        await style.selectOption('solid');
+        await style.selectOption('realistic');
+        assert.equal(await controls.getByRole('button',{name:'Align Arm',exact:true}).count(),1);
         assert.equal(await controls.getByRole('checkbox',{name:'Robot overlay',exact:true}).count(),1);
         await page.screenshot({path:resolve(output,'so101.png'),fullPage:true});
       } else {

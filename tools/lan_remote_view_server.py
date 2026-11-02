@@ -58,8 +58,14 @@ from robot_teleop.operator import RobotCommandError, load_robot_operator
 from robot_teleop.recording import CaptureRgbSource, HostEpisodeRecorder, RecordingError, camera_id
 from robot_teleop.trial_protocol import load_protocol, save_protocol
 from robot_teleop.state import godot_app_userdata_root
+from robot_teleop.robot_joint_animation import MeasuredJointHistory
 from tools.godot_desktop_stream import DesktopStreamConfig, GodotDesktopStream
 from tools.workspace_stream_crop import STREAM_SETTING_KEYS, WorkspaceStreamCropper
+from tools.sparse_point_stream import sparse_point_packet_for_view
+from tools.native_sparse_stream import NativeSparseSession, discover_native_cameras
+from tools.native_sparse_workers import create_native_sparse_session
+from tools.native_point_rtc import publish_native_points
+from tools.webrtc_ice import ice_servers
 
 h264.MAX_BITRATE = 24_000_000
 h264.DEFAULT_BITRATE = 4_000_000
@@ -73,6 +79,7 @@ MAX_FFMPEG_PROCESSES = 2
 MAX_RGBD_HTTP_REQUESTS = 48
 MAX_ROBOT_VIEW_STREAMS = 4
 MAX_REMEMBERED_RGBD_CLIENTS = 1024
+RGBD_CAMERA_CHANNELS = tuple(f"rgbd-camera-{index}" for index in range(16))
 MAX_ROBOT_TRANSPORT_AGE_MS = 250
 ROBOT_CLOCK_REBASE_SAMPLE_COUNT = 4
 ROBOT_CLOCK_REBASE_RANGE_MS = 40
@@ -98,17 +105,7 @@ CORE_PERSISTENT_VIEW_SETTINGS = frozenset(
         "depth_only_enabled",
         "persistent_temporal_reference_enabled",
         "full_rgb_frame_updates_enabled",
-        "workspace_surface_enabled",
-        "workspace_boundary_enabled",
         "camera_locations_enabled",
-        "workspace_surface_offset",
-        "workspace_surface_size",
-        "workspace_surface_opacity",
-        "workspace_crop_enabled",
-        "workspace_crop_show_box",
-        "workspace_crop_rotation",
-        "workspace_crop_min",
-        "workspace_crop_max",
         "modeled_workspace_enabled",
         "modeled_workspace_center",
         "modeled_workspace_width",
@@ -123,6 +120,7 @@ CORE_PERSISTENT_VIEW_SETTINGS = frozenset(
         "robot_overlay_enabled",
         "robot_overlay_mask_scanned_robot",
         "robot_overlay_style",
+        "robot_overlay_scope",
         "display_mode",
         "stream_preset",
     }
@@ -1891,6 +1889,7 @@ class LanRemoteServer(ThreadingHTTPServer):
         self.browser_client_handlers: dict[str, object | None] = {
             "rgbd": None,
             "robot": None,
+            **dict.fromkeys(RGBD_CAMERA_CHANNELS),
         }
         self.browser_superseded_clients: set[str] = set()
         self.browser_superseded_order: deque[str] = deque()
@@ -1933,6 +1932,7 @@ class LanRemoteServer(ThreadingHTTPServer):
         self.robot_restart_requested_at = 0.0
         self.robot_restart_baseline_count = 0
         self.robot_status_lock = threading.Lock()
+        self.robot_joint_history = MeasuredJointHistory()
         self.robot_status_received_at = 0.0
         self.robot_status: dict = self.robot_operator.default_status()
         self.robot_status_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1969,7 +1969,8 @@ class LanRemoteServer(ThreadingHTTPServer):
                 value = json.loads(self.site_settings_path.read_text(encoding="utf-8"))
             except (FileNotFoundError, OSError, json.JSONDecodeError):
                 return {}
-        return value if isinstance(value, dict) else {}
+        return {key: item for key, item in value.items()
+                if not key.startswith(("workspace_crop_", "workspace_surface_", "workspace_boundary_"))} if isinstance(value, dict) else {}
 
     def save_site_settings(self, value: dict) -> None:
         encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
@@ -2007,7 +2008,13 @@ class LanRemoteServer(ThreadingHTTPServer):
     def crop_rgbd_packet(self, packet: bytes, client_id: str) -> bytes:
         with self.stream_crop_lock:
             state = self.stream_crop_clients.get(client_id)
-        return state[1].crop(packet, state[0]) if state else packet
+        if not state:
+            return packet
+        settings, cropper = state
+        budget = settings.get("point_preview_budget", 20000)
+        if settings.get("point_preview_enabled") is True and type(budget) is int and budget in (0, 20000, 40000) and settings.get("display_mode") != "rgb_camera":
+            return sparse_point_packet_for_view(packet, budget, cropper, settings)
+        return cropper.crop(packet, settings)
 
     def forward_robot(self, message: dict) -> None:
         if self.robot_operator.is_motion(message):
@@ -2167,7 +2174,7 @@ class LanRemoteServer(ThreadingHTTPServer):
                     if active is not None and active is not handler
                 ]
                 self.browser_client_id = client_id
-                self.browser_client_handlers = {"rgbd": None, "robot": None}
+                self.browser_client_handlers = {"rgbd": None, "robot": None, **dict.fromkeys(RGBD_CAMERA_CHANNELS)}
             else:
                 active = self.browser_client_handlers[channel]
                 if handler is not None and active is not None and active is not handler:
@@ -2256,6 +2263,7 @@ class LanRemoteServer(ThreadingHTTPServer):
                 self.robot_status = status
                 self.robot_status_received_at = time.monotonic()
             self.episode_recorder.observe_robot(status)
+            self.robot_joint_history.observe(status)
 
     def _listen_for_robot_calibration_status(self) -> None:
         while self.robot_calibration_running:
@@ -2409,6 +2417,17 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             except (OSError, ValueError) as exc:
                 self.send_error(503, 'Saved trial settings could not be read: '+str(exc)[:120])
             return
+        if parsed.path == "/api/v1/ice-servers":
+            try:
+                body=json.dumps({'iceServers':ice_servers()}).encode()
+            except (OSError,ValueError,TypeError,KeyError):
+                self.send_error(503,'ICE configuration unavailable')
+                return
+            self.send_response(200)
+            self.send_header('Content-Type','application/json')
+            self.send_header('Content-Length',str(len(body)))
+            self.end_headers();self.wfile.write(body)
+            return
         if parsed.path == "/api/v1/recording":
             self.serve_recording_status(parsed.query)
             return
@@ -2461,7 +2480,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     if levels.get("white_balance_state") in ("warming up", "ready"):
                         entry["image_levels"]["white_balance_state"] = levels["white_balance_state"]
                 public.append(entry)
-            self.serve_json({"cameras": public})
+            self.serve_json({"cameras": public, "independent_native_preview": True, "independent_native_preview_lanes": 2})
         except (OSError, ValueError, TypeError, AttributeError):
             self.send_error(503, "Camera list not ready")
         finally:
@@ -3249,6 +3268,10 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         jpeg_quality = clamp_int(str(payload.get("quality", 35)), 1, 100)
         bitrate_kbps = clamp_int(str(payload.get("bitrateKbps", 2500)), 250, 24000)
         source = str(payload.get("source", "raw")).strip().lower()
+        point_budget=payload.get('pointBudget',0)
+        if source=='native_points' and (type(point_budget)is not int or point_budget not in(20000,40000)):
+            self.send_error(400,'Invalid native point budget')
+            return
         client_id = str(payload.get("client", ""))
         if len(client_id) > 64 or any(not (c.isascii() and (c.isalnum() or c in "-_")) for c in client_id):
             self.send_error(400, "Invalid RGB-D page ID")
@@ -3266,6 +3289,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 bitrate_kbps,
                 source,
                 client_id,
+                point_budget,
             ),
             self.server.async_loop,
         )
@@ -3292,8 +3316,10 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         bitrate_kbps: int,
         source: str,
         client_id: str = "",
+        point_budget: int = 0,
     ) -> RTCSessionDescription:
-        config = RTCConfiguration(iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])])
+        servers=await asyncio.get_running_loop().run_in_executor(None,ice_servers)
+        config = RTCConfiguration(iceServers=[RTCIceServer(**item)for item in servers])
         pc = RTCPeerConnection(configuration=config)
         with self.server.peer_lock:
             if len(self.server.peer_connections) >= MAX_WEBRTC_PEERS:
@@ -3301,7 +3327,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 raise RuntimeError("WebRTC peer capacity reached")
             self.server.peer_connections.add(pc)
         sender = None
-        if source not in ("control_only", "rgbd_data"):
+        if source not in ("control_only", "rgbd_data", "native_points"):
             raw_url = f"http://{self.server.stream_host}:{self.server.stream_port}/raw?w={width}&fps={fps}"
             mjpeg_url = f"http://{self.server.stream_host}:{self.server.stream_port}/stream?w={width}&q={jpeg_quality}&fps={fps}"
             if source in ("mjpeg", "quality", "legacy"):
@@ -3326,7 +3352,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
 
         @pc.on("datachannel")
         def on_datachannel(channel):
-            if channel.label == "rgbd-stream" and source == "rgbd_data":
+            if channel.label == "rgbd-stream" and source in ("rgbd_data","native_points"):
                 source_url = (
                     f"http://{self.server.stream_host}:{self.server.capture_port}"
                     f"/rgbd?w={width}&fps={fps}&context_fps={context_fps}"
@@ -3339,10 +3365,16 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                     if started:
                         return
                     started = True
-                    task = asyncio.create_task(
-                        publish_latest_rgbd_datachannel(channel, pc, source_url,
+                    if source=='native_points':
+                        if channel.ordered or channel.maxRetransmits!=0:
+                            channel.close()
+                            return
+                        publisher=publish_native_points(channel,pc,self.server,client_id,fps,point_budget,
+                            godot_app_userdata_root()/"Robot Teleop Vision"/"robot_overlay_render_state.json")
+                    else:
+                        publisher=publish_latest_rgbd_datachannel(channel,pc,source_url,
                             lambda packet: crop_rgbd_for_client(self.server, packet, client_id))
-                    )
+                    task = asyncio.create_task(publisher)
                     rgbd_tasks.add(task)
                     task.add_done_callback(rgbd_tasks.discard)
 
@@ -3757,7 +3789,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 peer_thread.join(timeout=1.0)
             self.server.ffmpeg_slots.release()
 
-    def watch_stream_peer(self, stop: threading.Event, conditions: list, send_lock, on_text=None) -> threading.Thread:
+    def watch_stream_peer(self, stop: threading.Event, conditions: list, send_lock, on_text=None, on_event=None) -> threading.Thread:
         """Release capture readers promptly when the browser closes a stream.
 
         Sending frames alone never consumes the peer's close/pong messages.
@@ -3772,14 +3804,18 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                         continue
                     frame = self.read_ws_frame()
                     if frame is None or frame[0] == 0x8:
+                        if on_event:
+                            payload=frame[1] if frame else b''
+                            on_event('peer_close',code=struct.unpack('!H',payload[:2])[0] if len(payload)>=2 else None,
+                                     reason=payload[2:122].decode('utf-8',errors='replace') if len(payload)>2 else '')
                         break
                     if frame[0] == 0x9:
                         with send_lock:
                             self.send_ws_frame(frame[1], 0xA)
                     elif frame[0] == 0x1 and on_text is not None:
                         on_text(frame[1])
-            except (ConnectionError, OSError, ValueError):
-                pass
+            except (ConnectionError, OSError, ValueError) as error:
+                if on_event:on_event('peer_error',error=str(error))
             finally:
                 stop.set()
                 for condition in conditions:
@@ -3789,8 +3825,173 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         thread.start()
         return thread
 
+    def handle_native_points_websocket(self, params) -> bool:
+        client=params.get("client",[""])[0]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}",client):
+            self.send_error(400,"Invalid native preview client")
+            return True
+        tracing=os.environ.get('ROBOT_TELEOP_TRACE_PREVIEW')=='1'
+        def trace(event,**fields):
+            if tracing:print(json.dumps({'preview_trace':event,'at':time.time(),'client':client[-8:],**fields}),flush=True)
+        trace('discovery_start')
+        try:
+            cameras=discover_native_cameras(self.server.stream_host,self.server.capture_port)
+        except (OSError,ValueError,KeyError,TypeError) as error:
+            trace('discovery_error',error=str(error))
+            cameras=[]
+        if not cameras:
+            if params.get("camera_id", [""])[0]:
+                self.send_error(503, "Independent native preview unavailable")
+                return True
+            trace('legacy_fallback')
+            return False  # Backward-compatible compressed preview fallback.
+        primary=min(cameras,key=lambda entry:entry[0]["priority"])
+        camera_id=params.get("camera_id",[""])[0]
+        lane_count=params.get("camera_lanes",["1"])[0]
+        lane=params.get("camera_lane",["0"])[0]
+        if lane_count not in ("1","2") or lane not in ("0","1") or int(lane)>=int(lane_count) or (lane_count!="1" and not camera_id):
+            self.send_error(400,"Invalid native preview frame lane")
+            return True
+        lane_count,lane=int(lane_count),int(lane)
+        stream_channel="rgbd"
+        if camera_id:
+            matching=[(index,entry) for index,entry in enumerate(cameras) if entry[0]["id"]==camera_id]
+            if not matching or matching[0][0]>=len(RGBD_CAMERA_CHANNELS)//2:
+                self.send_error(400,"Unknown native preview camera")
+                return True
+            index,entry=matching[0]
+            cameras=[entry]
+            stream_channel=RGBD_CAMERA_CHANNELS[index*2+lane]
+        initial_budget=clamp_int(params.get("point_budget",["20000"])[0],0,40000)
+        if initial_budget not in (0,20000,40000):initial_budget=20000
+        fps=clamp_int(params.get("fps",["30"])[0],1,60)
+        point_predictor=params.get("point_predictor",[""])[0]
+        predictor=point_predictor in ("delta_v1","shuffle_delta_v2")
+        mesh_preview=params.get('native_mesh',[''])[0]=='balanced'
+        def settings():
+            with self.server.stream_crop_lock:
+                current=self.server.stream_crop_clients.get(client)
+            value=current[0] if current else {"point_preview_enabled":True,"point_preview_budget":initial_budget}
+            if mesh_preview:value={**value,'point_preview_enabled':True,'_mesh_profile':'balanced'}
+            return {**value,'_sparse_predictor':point_predictor if predictor else None}
+        def robot():
+            try:
+                path=godot_app_userdata_root()/"Robot Teleop Vision"/"robot_overlay_render_state.json"
+                value=json.loads(path.read_text())
+                if Path(value.get("project_root","")).resolve()==self.server.root.parent.resolve() and 0<=time.time()-float(value.get("updated",0))<2:
+                    return value.get("robot",{"available":False})
+            except (OSError,ValueError,TypeError):pass
+            return {"available":False}
+        viewer={"transform":primary[0]["_viewer"],"fov":60,"near":.05,"far":100}
+        session=create_native_sparse_session(cameras,settings,robot,fps,viewer,
+            frame_lane=lane if lane_count>1 else None,frame_lanes=lane_count,owner=client,
+            adaptive_delivery=not mesh_preview and fps>=50 and lane_count>1
+                and params.get('camera_delivery',['adaptive'])[0]!='striped')
+        delivery_ack=getattr(session,'note_delivery_ack',lambda _seconds:None)
+        delivery_window=getattr(session,'note_delivery_window',lambda _oldest:None)
+        self.rgbd_preempted=threading.Event()
+        self.rgbd_send_lock=threading.Lock()
+        outstanding=deque()
+        wire_sequence=0
+        credit_limit=(24 if predictor else 12)//lane_count
+        minimum_rtt=None
+        last_ack=time.monotonic()
+        def ack(payload):
+            nonlocal credit_limit,minimum_rtt,last_ack
+            if len(payload)>256:return
+            try:
+                data=json.loads(payload)
+                if data.get("type")!="rgbd-ack" or type(data.get("sequence"))is not int:return
+                sequence=data["sequence"]
+                with session.condition:
+                    if not outstanding or not outstanding[0][0]<=sequence<=wire_sequence:return
+                    ack_gap=(time.monotonic()-last_ack)*1000
+                    last_ack=time.monotonic()
+                    if ack_gap>100:trace('ack_gap',ms=round(ack_gap,1),outstanding=len(outstanding),credit=credit_limit)
+                    while outstanding and outstanding[0][0]<=sequence:
+                        number,sent=outstanding.popleft()
+                        if number==sequence:
+                            elapsed=max(.001,time.monotonic()-sent)
+                            minimum_rtt=elapsed if minimum_rtt is None else min(minimum_rtt,elapsed)
+                            delivery_ack(elapsed)
+                    delivery_window(outstanding[0][1] if outstanding else None)
+                    if minimum_rtt is not None:
+                        # One minimum-RTT window repeatedly starves on normal
+                        # intercontinental jitter. Delta packets are about half
+                        # the size, so allow two windows within a bounded count.
+                        headroom=2 if predictor else 1
+                        credit_limit=max(4,min(96 if predictor else 48,
+                            math.ceil(minimum_rtt*(fps/lane_count)*len(cameras)*headroom)+len(cameras)*headroom))
+                    session.condition.notify_all()
+            except (ValueError,TypeError,AttributeError):pass
+        peer=None
+        try:
+            if not self.accept_websocket():return True
+            if not self.server.claim_browser_client(client,stream_channel,self):
+                self.send_ws_frame(struct.pack("!H",4001)+b"superseded by newer browser",0x8)
+                return True
+            self.connection.setsockopt(socket.SOL_SOCKET,socket.SO_SNDBUF,256*1024)
+            peer=self.watch_stream_peer(session.stop_event,[session.condition],self.rgbd_send_lock,on_text=ack,on_event=trace)
+            session.start()
+            trace('connected',fps=fps,predictor=predictor,cameras=len(cameras))
+            last_send=time.monotonic();last_heartbeat=last_send
+            while not session.stop_event.is_set():
+                wait_started=time.monotonic()
+                with session.condition:
+                    session.condition.wait_for(lambda:len(outstanding)<credit_limit or session.stop_event.is_set(),1)
+                    waited=(time.monotonic()-wait_started)*1000
+                    if waited>100:trace('credit_wait',ms=round(waited,1),outstanding=len(outstanding),credit=credit_limit,pending=len(session.pending))
+                    if len(outstanding)>=credit_limit:continue
+                camera_wait=time.monotonic()
+                packet=session.take()
+                waited=(time.monotonic()-camera_wait)*1000
+                if waited>100:trace('camera_wait',ms=round(waited,1),errors=dict(session.errors))
+                if packet is None:continue
+                if self.rgbd_preempted.is_set():break
+                # Attach measured feedback without waiting for another motor
+                # sample or another camera's acquisition to complete.
+                attached=time.monotonic()
+                packet=self.server.robot_joint_history.attach(packet,wait_for_bracket_ms=0)
+                if time.monotonic()-attached>.1:trace('joint_attach',ms=round((time.monotonic()-attached)*1000,1))
+                with self.rgbd_send_lock:
+                    sending=time.monotonic()
+                    if sending-last_send>.1:trace('send_gap',ms=round((sending-last_send)*1000,1),ack_age_ms=round((sending-last_ack)*1000,1),outstanding=len(outstanding),credit=credit_limit,pending=len(session.pending))
+                    wire_sequence+=1
+                    with session.condition:
+                        outstanding.append((wire_sequence,time.monotonic()))
+                        delivery_window(outstanding[0][1])
+                    self.send_ws_frame(json.dumps({"type":"rgbd-sequence","sequence":wire_sequence}).encode(),0x1)
+                    self.send_ws_frame(packet,0x2)
+                    sent=time.monotonic()
+                    if sent-sending>.1:trace('socket_block',ms=round((sent-sending)*1000,1))
+                    last_send=sent
+                    if sent-last_heartbeat>5:
+                        trace('progress',sequence=wire_sequence,outstanding=len(outstanding),credit=credit_limit,pending=len(session.pending),ack_age_ms=round((sent-last_ack)*1000,1))
+                        last_heartbeat=sent
+        except (OSError,ConnectionError,ValueError) as error:
+            print("native sparse stream ended:",str(error),flush=True)
+        finally:
+            trace('ended',errors=dict(session.errors),preempted=self.rgbd_preempted.is_set())
+            session.close()
+            if peer is not None:peer.join(timeout=1)
+            self.server.release_browser_client(client,stream_channel,self)
+        return True
+
     def handle_rgbd_websocket(self) -> None:
         params = parse_qs(urlsplit(self.path).query)
+        native_request=params.get("native_points",[None])[0]
+        if params.get('native_mesh',[''])[0]=='balanced':native_request='1'
+        if native_request is None:
+            # Existing sparse-preview tabs can upgrade without changing their
+            # wire decoder or disturbing robot control. Full-detail stays full.
+            for _ in range(20):
+                with self.server.stream_crop_lock:
+                    current=self.server.stream_crop_clients.get(params.get("client",[""])[0])
+                if current is not None:break
+                time.sleep(.025)
+            native_request="1" if current and current[0].get("point_preview_enabled")is True else "0"
+        if native_request=="1" and self.handle_native_points_websocket(params):
+            return
         client_id = params.get("client", [""])[0]
         if (
             not client_id
@@ -4050,6 +4251,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                         newest_lock.notify_all()
                 if not packet:
                     continue
+                packet = self.server.robot_joint_history.attach(packet, wait_for_bracket_ms=100)
                 with self.rgbd_send_lock:
                     if self.rgbd_preempted.is_set():
                         raise ConnectionError("superseded by newer browser")
@@ -4409,9 +4611,6 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             "max_distance": (0.2, 20.0),
             "fov": (25.0, 110.0),
             "orbit_pitch_offset": (-80.0, 80.0),
-            "workspace_surface_offset": (-1.0, 1.0),
-            "workspace_surface_size": (0.2, 10.0),
-            "workspace_surface_opacity": (0.01, 0.8),
             "modeled_workspace_width": (0.1, 4.0),
             "modeled_workspace_table_height": (0.1, 4.0),
             "modeled_workspace_depth": (0.1, 4.0),
@@ -4441,14 +4640,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             "head_tracking_enabled",
             "persistent_temporal_reference_enabled",
             "full_rgb_frame_updates_enabled",
-            "workspace_surface_enabled",
-            "workspace_boundary_enabled",
-            "workspace_crop_enabled",
-            "workspace_crop_show_box",
             "modeled_workspace_enabled",
             "scene_lighting_enabled",
             "scene_shadows_enabled",
             "workspace_stream_crop_enabled",
+            "point_preview_enabled",
             "camera_locations_enabled",
         }
         boolean_settings.update(self.server.robot_operator.boolean_view_settings())
@@ -4457,6 +4653,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 if not isinstance(data[key], bool):
                     raise ValueError(f"{key} must be boolean")
                 packet[key] = data[key]
+        if "point_preview_budget" in data:
+            budget = data["point_preview_budget"]
+            if type(budget) is not int or budget not in (0, 20000, 40000):
+                raise ValueError("point_preview_budget must be 0 (all), 20000 or 40000")
+            packet["point_preview_budget"] = budget
         if "rgbd_client_id" in data:
             client = data["rgbd_client_id"]
             if not isinstance(client, str) or not 1 <= len(client) <= 64 or any(
@@ -4464,7 +4665,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             ):
                 raise ValueError("invalid RGB-D page ID")
             packet["rgbd_client_id"] = client
-        for key in ("workspace_crop_min", "workspace_crop_max", "modeled_workspace_center"):
+        for key in ("modeled_workspace_center",):
             if key not in data:
                 continue
             value = data[key]
@@ -4474,20 +4675,16 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             )):
                 raise ValueError(f"{key} must contain three finite coordinates between -20 and 20")
             packet[key] = [float(v) for v in value]
-        if "workspace_crop_rotation" in data:
-            value = data["workspace_crop_rotation"]
-            if not isinstance(value,list) or len(value)!=3 or any(isinstance(v,bool) or not isinstance(v,(int,float)) or not np.isfinite(v) or abs(v)>360 for v in value):
-                raise ValueError("workspace_crop_rotation must contain three finite angles between -360 and 360")
-            packet["workspace_crop_rotation"] = [float(v) for v in value]
-        if "workspace_crop_min" in packet and "workspace_crop_max" in packet and any(
-            lo >= hi for lo, hi in zip(packet["workspace_crop_min"], packet["workspace_crop_max"])
-        ):
-            raise ValueError("workspace crop minimum must be below maximum on every axis")
         if "robot_overlay_style" in data:
             style = data["robot_overlay_style"]
-            if not isinstance(style, str) or style not in ("alignment", "solid"):
-                raise ValueError("robot_overlay_style must be alignment or solid")
+            if not isinstance(style, str) or style not in ("alignment", "solid", "realistic"):
+                raise ValueError("robot_overlay_style must be alignment, solid or realistic")
             packet["robot_overlay_style"] = style
+        if "robot_overlay_scope" in data:
+            scope = data["robot_overlay_scope"]
+            if not isinstance(scope, str) or scope not in ("full", "claw"):
+                raise ValueError("robot_overlay_scope must be full or claw")
+            packet["robot_overlay_scope"] = scope
         if "display_mode" in data:
             display_mode = data["display_mode"]
             if not isinstance(display_mode, str) or display_mode not in (
@@ -5106,7 +5303,9 @@ class MultipartRawFrameReader:
 
 def crop_rgbd_for_client(server, packet: bytes, client_id: str) -> bytes:
     crop = getattr(server, "crop_rgbd_packet", None)
-    return crop(packet, client_id) if crop is not None else packet
+    packet = crop(packet, client_id) if crop is not None else packet
+    history = getattr(server, "robot_joint_history", None)
+    return history.attach(packet) if history is not None else packet
 
 
 async def publish_latest_rgbd_datachannel(channel, pc: RTCPeerConnection, source_url: str, packet_filter=None) -> None:

@@ -43,10 +43,11 @@ def test_persistent_reference_encoder_overlaps_send_and_keeps_order(monkeypatch)
     monkeypatch.setattr(remote,"MultipartRawFrameReader",Reader)
     monkeypatch.setattr(remote,"TemporalRgbdDepthEncoder",Encoder)
     handler=object.__new__(remote.LanRemoteHandler)
-    handler.path="/rgbd-stream?client=test&temporal_depth=1&persistent_reference=1"
+    handler.path="/rgbd-stream?native_points=0&client=test&temporal_depth=1&persistent_reference=1"
     handler.client_address=("127.0.0.1",1)
     handler.server=SimpleNamespace(stream_host="127.0.0.1",capture_port=8781,
-        claim_rgbd_client=lambda *_:True,release_rgbd_client=lambda *_:None)
+        claim_rgbd_client=lambda *_:True,release_rgbd_client=lambda *_:None,
+        robot_joint_history=SimpleNamespace(attach=lambda packet,**_:packet))
     handler.connection=SimpleNamespace(settimeout=lambda _:None,setsockopt=lambda *_:None)
     handler.accept_websocket=lambda:True
     # This transport stub exercises encoding/sending, not the separately tested socket reader.

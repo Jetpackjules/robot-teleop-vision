@@ -202,6 +202,32 @@ def require_positions(values: Any) -> None:
             raise ArmProtocolError("positions must contain finite numbers")
 
 
+def _input_timing(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    result = {}
+    for key in ("gapMs", "maxGapMs", "longTaskMs", "bufferedBytes", "delayedCount", "readMs", "sampleAgeMs"):
+        value = data.get(key)
+        if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1_000_000:
+            result[key] = round(value, 2)
+    for key in ("hidden", "focused"):
+        if type(data.get(key)) is bool:
+            result[key] = data[key]
+    trace = data.get("workTrace")
+    if isinstance(trace, list):
+        result["workTrace"] = []
+        for event in trace[-6:]:
+            if not isinstance(event, dict):
+                continue
+            clean = {key: event[key][:400] for key in ("label", "stack") if isinstance(event.get(key), str)}
+            for key in ("ms", "ageMs"):
+                value = event.get(key)
+                if type(value) in (int, float) and 0 <= value <= 1_000_000 and math.isfinite(value):
+                    clean[key] = round(value, 2)
+            result["workTrace"].append(clean)
+    return result
+
+
 def validate_browser_arm_message(data: Any, *, now_ms: int | None = None) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ArmProtocolError("arm message must be an object")
@@ -218,7 +244,8 @@ def validate_browser_arm_message(data: Any, *, now_ms: int | None = None) -> dic
             raise ArmProtocolError("seq must be a non-negative integer")
         if isinstance(sent_ms, bool) or not isinstance(sent_ms, (int, float)):
             raise ArmProtocolError("sent_unix_ms must be numeric")
-        return {"type": kind, "seq": seq, "sent_unix_ms": int(sent_ms), "positions": raw}
+        return {"type": kind, "seq": seq, "sent_unix_ms": int(sent_ms), "positions": raw,
+                **({"input_timing": _input_timing(data["input_timing"])} if "input_timing" in data else {})}
     if kind == "arm_cartesian_velocity":
         linear = data.get("linear")
         angular = data.get("angular")
@@ -268,6 +295,7 @@ def validate_browser_arm_message(data: Any, *, now_ms: int | None = None) -> dic
             "angular_frame": angular_frame,
             "precision": bool(data.get("precision", False)),
             "deadman": deadman,
+            **({"input_timing": _input_timing(data["input_timing"])} if "input_timing" in data else {}),
         }
     if kind in ("arm_joint_velocity", "arm_tool_velocity"):
         field = "motions" if kind == "arm_tool_velocity" else "velocities"

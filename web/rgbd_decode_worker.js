@@ -1,6 +1,7 @@
 // Stateless native Quality frames: preserve every depth sample and JPEG pixel.
 import {colorFrameDimensions} from './hybrid_color_projection.js?v=20261021_original_rgb';
-import {workspaceDepthTiles} from './workspace_crop.js?v=20261021_original_rgb';
+import {workspaceDepthTiles} from './table_geometry.js?v=20261021_original_rgb';
+import {sampleDepthPoints} from './point_preview_sampling.js?v=20261027_point_options';
 import {decodeExactJpegRgba,preferExactJpegDecode} from './jpeg_rgba_decoder.js?v=20261026_exact_color';
 export async function decodeIndependentDepth(bytes, metadata) {
   const width = Number(metadata.width), height = Number(metadata.height);
@@ -27,7 +28,25 @@ export async function decodeIndependentDepth(bytes, metadata) {
 let rgbaCanvas, rgbaContext;
 if (typeof self !== "undefined") self.onmessage = async ({data}) => {
   const started=performance.now();
-  const {id, metadata, color, depth, rgbaPixels, workspaceTiles,softwareColor=true} = data;
+  const {id, metadata, color, depth, rgbaPixels, workspaceTiles,pointPreview=false,pointPreviewBudget=20000,softwareColor=true} = data;
+  if(metadata.depth_encoding==='u16_mm_sparse_points_deflate'){
+    try{
+      const width=Number(metadata.width),height=Number(metadata.height),count=Number(metadata.preview_count),budget=Number(metadata.preview_budget);
+      if(!Number.isInteger(width)||!Number.isInteger(height)||width<1||height<1||width*height>16*1024*1024||![0,20000,40000].includes(budget)||!Number.isInteger(count)||count<0||(budget===0?count!==metadata.preview_source_points:count>budget)||count>width*height)throw Error('invalid sparse point dimensions');
+      const packed=await new Response(new Blob([depth]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();
+      if(packed.byteLength!==count*9)throw Error('invalid sparse point payload');
+      const view=new DataView(packed),values=new Uint16Array(width*height),rgba=new Uint8Array(width*height*4),indices=new Uint32Array(count);
+      let previous=-1;
+      for(let i=0;i<count;i++){
+        const index=view.getUint32(i*4,true),z=view.getUint16(count*4+i*2,true);
+        if(index<=previous||index>=values.length||!z)throw Error('invalid sparse point sample');
+        previous=index;indices[i]=index;values[index]=z;
+        const color=count*6+i*3;rgba.set([view.getUint8(color),view.getUint8(color+1),view.getUint8(color+2),255],index*4);
+      }
+      self.postMessage({id,depth:values.buffer,rgba:rgba.buffer,previewIndices:indices.buffer,previewValid:metadata.preview_source_points,previewBudget:budget,workerMs:performance.now()-started},[values.buffer,rgba.buffer,indices.buffer]);
+    }catch(error){self.postMessage({id,error:String(error?.message||error)});}
+    return;
+  }
   let colorWidth,colorHeight;
   try {[colorWidth,colorHeight]=colorFrameDimensions(metadata);}catch(error){self.postMessage({id,error:error.message});return;}
   const [depthResult, colorResult] = await Promise.allSettled([
@@ -52,9 +71,13 @@ if (typeof self !== "undefined") self.onmessage = async ({data}) => {
   }
   try {
     const tiles=workspaceTiles?workspaceDepthTiles(values,width,height):null;
+    const preview=pointPreview?sampleDepthPoints(values,pointPreviewBudget):null;
+    let validPoints=preview?.valid;if(validPoints===undefined){validPoints=0;for(let i=0;i<values.length;i++)if(values[i])validPoints++;}
+    const previewData={previewValid:validPoints,...(preview?{previewIndices:preview.indices.buffer,previewBudget:pointPreviewBudget}:{})};
     const transfer=[values.buffer];if(tiles)transfer.push(tiles.buffer);
+    if(preview)transfer.push(preview.indices.buffer);
     if(rgba){
-      self.postMessage({id,depth:values.buffer,depthTiles:tiles?.buffer,rgba:rgba.buffer,workerMs:performance.now()-started},[...transfer,rgba.buffer]);
+      self.postMessage({id,...previewData,depth:values.buffer,depthTiles:tiles?.buffer,rgba:rgba.buffer,workerMs:performance.now()-started},[...transfer,rgba.buffer]);
     }else if(rgbaPixels && typeof OffscreenCanvas === "function") {
       if(!rgbaCanvas) {
         rgbaCanvas=new OffscreenCanvas(colorWidth,colorHeight);
@@ -66,8 +89,8 @@ if (typeof self !== "undefined") self.onmessage = async ({data}) => {
       rgbaContext.drawImage(bitmap,0,0);
       const pixels=rgbaContext.getImageData(0,0,colorWidth,colorHeight).data;
       bitmap.close();
-      self.postMessage({id,depth:values.buffer,depthTiles:tiles?.buffer,rgba:pixels.buffer,workerMs:performance.now()-started},[...transfer,pixels.buffer]);
-    } else self.postMessage({id, depth: values.buffer,depthTiles:tiles?.buffer, bitmap,workerMs:performance.now()-started}, [...transfer, bitmap]);
+      self.postMessage({id,...previewData,depth:values.buffer,depthTiles:tiles?.buffer,rgba:pixels.buffer,workerMs:performance.now()-started},[...transfer,pixels.buffer]);
+    } else self.postMessage({id,...previewData,depth: values.buffer,depthTiles:tiles?.buffer, bitmap,workerMs:performance.now()-started}, [...transfer, bitmap]);
   } catch (error) {
     bitmap?.close();self.postMessage({id, error: String(error?.message || error)});
   }

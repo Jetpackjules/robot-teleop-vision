@@ -135,6 +135,10 @@ else:
     try:
         subprocess.check_call(["pkg-config", "--exists", "realsense2"])
         env.ParseConfig("pkg-config --cflags --libs realsense2")
+        if platform == "linux":
+            # Prefer the optional, locally built V4L2 correction after a normal
+            # host restart; fall back to the system SDK when it is absent.
+            env.Append(LINKFLAGS=["-Wl,-R,'$$ORIGIN/../../../.local_deps/realsense-v4l2-fixed/lib'"])
         env.Append(CPPDEFINES=["REALSENSE_DIRECT_ENABLED"])
         realsense_enabled = True
         print("RealSense direct capture enabled from pkg-config realsense2.")

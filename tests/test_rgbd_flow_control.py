@@ -33,10 +33,11 @@ def test_independent_rgbd_waits_for_browser_and_resumes_at_latest_capture(monkey
     monkeypatch.setattr(remote, "MultipartRawFrameReader", Reader)
     monkeypatch.setattr(remote, "crop_rgbd_for_client", lambda _server, packet, _client: packet)
     handler = object.__new__(remote.LanRemoteHandler)
-    handler.path = "/rgbd-stream?client=flow&fps=30&flow_control=1&temporal_depth=0&temporal_color=0"
+    handler.path = "/rgbd-stream?native_points=0&client=flow&fps=30&flow_control=1&temporal_depth=0&temporal_color=0"
     handler.client_address = ("127.0.0.1", 1)
     handler.server = SimpleNamespace(stream_host="127.0.0.1", capture_port=8781,
-        claim_rgbd_client=lambda *_: True, release_rgbd_client=lambda *_: None)
+        claim_rgbd_client=lambda *_: True, release_rgbd_client=lambda *_: None,
+        robot_joint_history=SimpleNamespace(attach=lambda packet,**_:packet))
     handler.connection = SimpleNamespace(settimeout=lambda _: None, setsockopt=lambda *_: None)
     handler.accept_websocket = lambda: True
 

@@ -18,13 +18,13 @@ from concurrent.futures import ThreadPoolExecutor, wait
 import av
 import cv2
 import numpy as np
+from tools.workspace_stream_crop_native import bounds_bytes, clip_plane, compress_depth, crop_cells, decode_predictive, decompress_depth, retain_cells, retain_depth
 
 _CROP_WORKERS = ThreadPoolExecutor(max_workers=3, thread_name_prefix='workspace-crop')
 
 DEPTH_ENCODINGS = {"u16_mm_deflate", "u16_mm_vpredict_shuffle_deflate"}
 STREAM_SETTING_KEYS = frozenset({
-    "workspace_stream_crop_enabled", "display_mode", "workspace_crop_enabled",
-    "workspace_crop_min", "workspace_crop_max", "workspace_crop_rotation",
+    "workspace_stream_crop_enabled", "display_mode", "point_preview_enabled", "point_preview_budget",
     "modeled_workspace_enabled", "modeled_workspace_center", "modeled_workspace_width",
     "modeled_workspace_depth", "modeled_workspace_height", "modeled_workspace_heading",
     "modeled_workspace_clearance",
@@ -50,11 +50,6 @@ def crop_volumes(settings):
     if settings.get("workspace_stream_crop_enabled") is not True or settings.get("display_mode") == "rgb_camera":
         return []
     volumes = []
-    if settings.get("workspace_crop_enabled") is True:
-        lo, hi = _vector(settings.get("workspace_crop_min"), 3), _vector(settings.get("workspace_crop_max"), 3)
-        if np.any(lo >= hi) or np.any(np.abs([lo, hi]) > 20):
-            raise ValueError("invalid crop bounds")
-        volumes.append(((lo+hi)/2, _rotation(settings.get("workspace_crop_rotation", [0, 0, 0])).T, (hi-lo)/2))
     if settings.get("modeled_workspace_enabled") is True:
         center = _vector(settings.get("modeled_workspace_center"), 3)
         width, depth, height, clearance, heading = [settings.get("modeled_workspace_"+name, default) for name, default in
@@ -72,12 +67,17 @@ def _decode_depth(data, camera):
     width, height = int(camera["width"]), int(camera["height"])
     if width < 1 or height < 1 or width*height > 16*1024*1024:
         raise ValueError("invalid source dimensions")
-    decoder = zlib.decompressobj()
-    raw = decoder.decompress(data, width*height*2+1)
-    if len(raw) != width*height*2 or not decoder.eof or decoder.unconsumed_tail:
-        raise ValueError("invalid source depth")
+    raw = decompress_depth(data, width*height*2)
+    if raw is None:
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(data, width*height*2+1)
+        if len(raw) != width*height*2 or not decoder.eof or decoder.unconsumed_tail:
+            raise ValueError("invalid source depth")
     if camera["depth_encoding"] == "u16_mm_deflate":
         return np.frombuffer(raw, dtype="<u2").reshape(height, width)
+    native = decode_predictive(raw, width, height)
+    if native is not None:
+        return native
     shuffled = np.frombuffer(raw, dtype=np.uint8)
     count = width*height
     zigzag = shuffled[:count].astype(np.uint16) | (shuffled[count:].astype(np.uint16) << 8)
@@ -106,6 +106,10 @@ def _depth_clip_planes(shape, camera, volumes):
             direction = basis[axis,0]*x+basis[axis,1]*y-basis[axis,2]
             for coefficient,limit in [(direction,half[axis]+1e-5-origin[axis]),
                                       (-direction,half[axis]+1e-5+origin[axis])]:
+                native = clip_plane(coefficient, limit)
+                if native is not None:
+                    planes.append(native)
+                    continue
                 ratio = np.divide(limit*1000,coefficient,out=np.zeros_like(coefficient),where=coefficient!=0)
                 kind = np.where(coefficient>0,1,np.where(coefficient<0,2,0)).astype(np.uint8)
                 kind[((coefficient>0)&(ratio<0))|((coefficient<0)&(ratio>65535))|((coefficient==0)&(limit<0))] = 3
@@ -118,20 +122,26 @@ def _depth_clip_planes(shape, camera, volumes):
 
 def retained_depth(depth, camera, volumes, bounds=None):
     bounds = bounds if bounds is not None else _depth_clip_planes(depth.shape,camera,volumes)
-    cells = np.ones(depth.shape,dtype=np.uint8)
-    for planes in bounds:
-        outcode = np.zeros(depth.shape,dtype=np.uint8)
-        for index,(threshold,kind) in enumerate(planes):
-            outside = ((kind==1)&(depth>threshold))|((kind==2)&(depth<threshold))|(kind==3)
-            np.bitwise_or(outcode,np.uint8(1<<index),out=outcode,where=outside)
-        outcode[depth==0] = 255
-        # A quad is safely outside only when every valid vertex shares an
-        # outside half-plane. This also retains crossing triangles whose
-        # vertices are individually outside different sides of the volume.
-        quad = outcode.copy()
-        quad[:-1] &= outcode[1:]
-        quad[:,:-1] &= quad[:,1:]
-        cells &= quad==0
+    native = retain_depth(depth,bounds)
+    if native is not None:
+        return native
+    cells = crop_cells(depth, bounds)
+    if cells is None:
+        cells = np.ones(depth.shape,dtype=np.uint8)
+        for planes in bounds:
+            outcode = np.zeros(depth.shape,dtype=np.uint8)
+            for index,(threshold,kind) in enumerate(planes):
+                outside = ((kind==1)&(depth>threshold))|((kind==2)&(depth<threshold))|(kind==3)
+                np.bitwise_or(outcode,np.uint8(1<<index),out=outcode,where=outside)
+            outcode[depth==0] = 255
+            # Retain crossing triangles, including those without an inside vertex.
+            quad = outcode.copy()
+            quad[:-1] &= outcode[1:]
+            quad[:,:-1] &= quad[:,1:]
+            cells &= quad==0
+    native = retain_cells(depth, cells)
+    if native is not None:
+        return native
     tiles = cv2.dilate(cells,np.ones((8,16),np.uint8),anchor=(0,0),
                       borderType=cv2.BORDER_CONSTANT,borderValue=0)[::8,::16]
     mask = np.repeat(np.repeat(tiles,8,axis=0),16,axis=1)[:depth.shape[0],:depth.shape[1]]
@@ -173,10 +183,10 @@ class WorkspaceStreamCropper:
             self.bounds.move_to_end(key)
             return self.bounds[key]
         bounds = _depth_clip_planes(depth.shape,camera,volumes)
-        size = sum(a.nbytes for planes in bounds for pair in planes for a in pair)
+        size = bounds_bytes(bounds)
         while self.bounds and self.bounds_bytes+size>128*1024*1024:
             _,old = self.bounds.popitem(last=False)
-            self.bounds_bytes -= sum(a.nbytes for planes in old for pair in planes for a in pair)
+            self.bounds_bytes -= bounds_bytes(old)
         if size<=128*1024*1024:
             self.bounds[key] = bounds
             self.bounds_bytes += size
@@ -293,7 +303,7 @@ class WorkspaceStreamCropper:
         camera["stream_depth_origin"] = [x0, y0]
         camera["depth_encoding"] = "u16_mm_deflate"
         raw = kept[y0:y1, x0:x1].astype("<u2").tobytes()
-        packed = zlib.compress(raw, 1)
+        packed = compress_depth(raw)
         # For legacy aligned RGB, an expensive lossless PNG can cost more than
         # the whole original JPEG. Keep that JPEG and the native grid instead.
         if not original_rgb and len(color)+len(packed) >= original["color_length"]+len(encoded_depth):
@@ -301,7 +311,7 @@ class WorkspaceStreamCropper:
             camera.update(original)
             color = original_color
             camera["depth_encoding"] = "u16_mm_deflate"
-            packed = zlib.compress(kept.astype("<u2").tobytes(), 1)
+            packed = compress_depth(kept.astype("<u2").tobytes())
             color_box = (0, 0, cw, ch)
         camera["color_length"], camera["depth_length"] = len(color), len(packed)
         return color, packed, {"source_depth_pixels": depth.size, "depth_pixels": camera["width"]*camera["height"],

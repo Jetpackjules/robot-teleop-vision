@@ -163,6 +163,27 @@ The mode probe verifies legacy settings and the CPU fallback. This does not
 validate device capture, real calibration accuracy, performance or visual
 quality on physical cameras.
 
+## Host crop acceleration
+
+The per-viewer host crop keeps the same depth samples, RGB pixels, calibrated
+projection and geometry halo. Optional integer kernels accelerate predictive
+depth decoding and clipping; an installed `libdeflate` accelerates the same
+standard zlib transport without changing decoded depth. Neither reduces sensor
+resolution or JPEG quality. The NumPy/zlib path remains available when the native
+components are absent, or with `ROBOT_TELEOP_DISABLE_NATIVE_CROP=1`.
+
+Build on the host with its C++ compiler before restarting the gateway:
+
+```sh
+.venv/bin/python tools/workspace_stream_crop_native.py
+```
+
+The source-keyed binary stays under `.teleop/native/` and uses that host's CPU
+instructions; build separately on each host. Capture and the robot runtime do
+not need restarting. Browser visibility retains full native triangles, skips
+only empty source tiles in cropped streams, and rotates the self/peer depth
+buffers instead of copying full RGB-sized history maps.
+
 ## Licence and attribution
 
 The files in this directory are provided under **EUPL-1.2**, including the adapted

@@ -17,9 +17,8 @@ export function setup() {
   Object.assign(state,{canvas,gl,running:true,cameras:[],blendPCR:null,program:createProgram(gl),cameraFusion:new MultiCameraFusion(gl),
     baseViewer:{transform:identityMatrix(),fov:55,near:0.01,far:10}});
   state.uniforms=findUniforms(gl,state.program);
-  Object.assign(state.settings,{inspect_enabled:false,robot_overlay_enabled:false,workspace_surface_enabled:false,workspace_boundary_enabled:false,
+  Object.assign(state.settings,{inspect_enabled:false,robot_overlay_enabled:false,
     modeled_workspace_enabled:false,
-    workspace_crop_enabled:false,workspace_crop_show_box:false,workspace_crop_rotation:[0,0,0],
     camera_locations_enabled:false,white_background_enabled:false,depth_only_enabled:false,mesh_depth_delta:0.035,mesh_max_edge:0.08});
   gl.useProgram(state.program);
   for(const [name,unit] of [['depth',0],['color',1],['fusionDepth',2],['fusionColor',3],['rigDepth',4],['rigData',5],['rigQuality',6],['rigColor',7]])
@@ -111,9 +110,9 @@ export async function runRenderingChecks() {
   // primitive IDs, source-row offsets, and stale BlendPCR composite caches.
   fixture([1000,1000,1000],[128,128,128],(x,y,i,w,h,value)=>({...value,
     z:x>90&&y>90?0:950+Math.floor(x/12),color:[120+x%80,80+y%80,60+i*40]}));
-  const cropSettings={workspace_crop_enabled:true,workspace_crop_min:[-.14,-.16,-1.05],workspace_crop_max:[.15,.13,-.85]};
+  const cropSettings={modeled_workspace_enabled:true,modeled_workspace_center:[.005,-.16,-.95],modeled_workspace_width:.29,modeled_workspace_depth:.2,modeled_workspace_height:.29,modeled_workspace_clearance:0};
   for(const mode of ['point_cloud','shader_mesh','independent_mesh','unified_mesh','blendpcr']) {
-    Object.assign(state.settings,{workspace_crop_enabled:false,depth_only_enabled:false});
+    Object.assign(state.settings,{modeled_workspace_enabled:false,depth_only_enabled:false});
     draw(mode);const original=image();
     Object.assign(state.settings,cropSettings);
     state.useWorkspaceCulling=false;if(state.blendPCR)state.blendPCR.useWorkspaceCulling=false;
@@ -122,22 +121,22 @@ export async function runRenderingChecks() {
     state.useWorkspaceCulling=true;if(state.blendPCR)state.blendPCR.useWorkspaceCulling=true;
     draw(mode);const clipped=image();
     check(reference.every((v,i)=>v===clipped[i]),`${mode}: early crop matches exact full-grid crop at every pixel`);
-    for(const rotation of [[0,37,0],[18,-29,12]]) {
-      state.settings.workspace_crop_rotation=rotation;state.useWorkspaceCulling=false;if(state.blendPCR)state.blendPCR.useWorkspaceCulling=false;draw(mode);const rotatedReference=image();
+    for(const rotation of [37,-29]) {
+      state.settings.modeled_workspace_heading=rotation;state.useWorkspaceCulling=false;if(state.blendPCR)state.blendPCR.useWorkspaceCulling=false;draw(mode);const rotatedReference=image();
       state.useWorkspaceCulling=true;if(state.blendPCR)state.blendPCR.useWorkspaceCulling=true;draw(mode);const rotatedCrop=image();
       check(rotatedReference.every((v,i)=>v===rotatedCrop[i]),`${mode}: rotated crop preserves every interior pixel at ${rotation}`);
     }
-    state.settings.workspace_crop_rotation=[0,0,0];draw(mode);
+    state.settings.modeled_workspace_heading=0;draw(mode);
 
     let removed=0,kept=0;
     for(let i=0;i<original.length;i+=4) {
       const bg=[8,9,10],outside=bg.every((v,c)=>clipped[i+c]===v),wasBg=bg.every((v,c)=>original[i+c]===v);
       if(!wasBg&&outside)removed++;if(!outside)kept++;
     }
-    check(removed>1000&&kept>100,`${mode}: workspace crop removes surroundings and retains its interior`);
+    check(removed>1000&&kept>100,`${mode}: table removes surroundings and retains its interior`);
     check(state.stats.workspaceCrop.submittedCells<state.stats.workspaceCrop.sourceCells*.7,
       `${mode}: outside source geometry is skipped before shading`);
-    Object.assign(state.settings,{workspace_crop_enabled:false});draw(mode);const restored=image();
+    Object.assign(state.settings,{modeled_workspace_enabled:false});draw(mode);const restored=image();
     check(original.every((v,i)=>v===restored[i]),`${mode}: disabling the crop restores the original full-detail image`);
   }
   state.useWorkspaceCulling=true;
@@ -412,7 +411,7 @@ export async function runRenderingChecks() {
     maskErrors.push({pixel:i/4,reference:Array.from(maskedReference.subarray(i,i+4)),blend:Array.from(maskedBlend.subarray(i,i+4))});
   check(maskErrors.length===0,'robot masking preserves the original per-triangle coverage: '+JSON.stringify({count:maskErrors.length,first:maskErrors.slice(0,5)}));
   fixture([1000],[[128,128]]);draw('blendpcr');
-  Object.assign(state.settings,{workspace_crop_enabled:true,workspace_crop_min:[-.12,-.15,-1.01],workspace_crop_max:[.12,.15,-.99]});
+  Object.assign(state.settings,{modeled_workspace_enabled:true,modeled_workspace_center:[0,-.15,-1],modeled_workspace_width:.24,modeled_workspace_depth:.1,modeled_workspace_height:.3,modeled_workspace_clearance:0});
   const maskedView={...view,now:performance.now()};
   state.blendPCR.indexedMetadata=false;
   state.blendPCR.useWorkspaceCulling=false;
@@ -424,7 +423,7 @@ export async function runRenderingChecks() {
   const maskedCrop=image();
   check(maskedCrop.every((v,i)=>Math.abs(v-maskedCropReference[i])<=3),'tiled arm-masked crop preserves original full-grid pixels');
   check(state.blendPCR.cropStats.submittedCells<state.blendPCR.cropStats.sourceCells*.7,'arm masking retains workspace tile culling instead of submitting the full grid');
-  state.settings.workspace_crop_enabled=false;
+  state.settings.modeled_workspace_enabled=false;
   const maskedCompositions=state.blendPCR.compositions;
   state.blendPCR.render(state.cameraFusion,state.cameras,view,null,state.settings);
   check(state.blendPCR.compositions===maskedCompositions+1,'changing robot masks invalidates cached color and depth');
@@ -578,6 +577,54 @@ export async function runOriginalRgbChecks() {
   const changed=window.probe.uploadCamera({metadata:p,width:64,height:64,depth,colorPixels:new Uint8Array(192*96*3).fill(255),modelMatrix:original.modelMatrix});state.cameras=[changed];draw('blendpcr');
   check(close(center(),[255,255,255])&&changed.colorWidth===192,'RGB-only resolution changes reallocate textures without changing depth resolution');
   check(gl.getError()===gl.NO_ERROR,'mixed color/depth dimensions leave valid WebGL state');
+  scene([{rgb:[220,30,10],depth:(x,y)=>x<4||y<4?0:1000+2*y},
+    {rgb:[20,220,40],x:.15,depth:(x,y)=>x>26&&x<38&&y>24&&y<40?700:1100},
+    {rgb:[30,40,230],x:-.15,depth:(x,y)=>x>55?0:1010+2*y}]);
+  for(const c of state.cameras)c.metadata.stream_depth_origin=[0,0];
+  state.cameraFusion.visibility.tiled=false;state.cameraFusion.clear();draw('blendpcr');
+  const fullVisibility=image();
+  state.cameraFusion.visibility.tiled=true;state.cameraFusion.clear();draw('blendpcr');
+  check(image().every((v,i)=>v===fullVisibility[i]),'tiled RGB visibility preserves every rendered pixel through holes, slopes and cross-camera occluders');
+  const oldBlit=gl.blitFramebuffer.bind(gl);let blits=0;
+  gl.blitFramebuffer=(...args)=>{blits++;return oldBlit(...args);};
+  try {
+    for(let i=0;i<3;i++){
+      const previous=state.cameraFusion.visibility.layers.slice();
+      for(const c of state.cameras)c.uploadRevision++;
+      draw('blendpcr');
+      check(state.cameraFusion.visibility.layers.every((layer,j)=>j%4<2||layer===previous[j-2]),'visibility history retains the preceding observation without copying');
+      check(image().every((v,j)=>v===fullVisibility[j]),'rotating visibility storage preserves the exact rendered image');
+    }
+    check(blits===0,'fresh original-RGB visibility performs no full-image framebuffer copies');
+    for(const target of [0,1,2,0]){
+      const visibility=state.cameraFusion.visibility,previous=visibility.layers.slice(),passes=visibility.passes;
+      state.cameras[target].uploadRevision++;draw('blendpcr');
+      check(visibility.passes-passes===5,'one fresh camera redraws five required visibility projections instead of nine');
+      check(visibility.layers.every((layer,j)=>j%4<2||layer===previous[j-2]),'partial updates preserve the previous complete rig observation');
+      check(visibility.layers[target*4]===previous[target*4],"a camera update reuses that target's unchanged peer map");
+      check(visibility.layers.every((layer,j)=>j%4!==1||Math.floor(j/4)===target||layer===previous[j]),'partial updates reuse every unchanged self-occlusion map');
+      check(image().every((v,j)=>v===fullVisibility[j]),'partial visibility rebuilds preserve the exact rendered image');
+    }
+  } finally {gl.blitFramebuffer=oldBlit;}
+  const replayVisibilityUpdates=(forceAll)=>{
+    scene([{rgb:[220,30,10],depth:1000},{rgb:[20,220,40],x:.08,depth:1008},
+      {rgb:[30,40,230],x:-.08,depth:1014}]);draw('blendpcr');
+    const frames=[];
+    for(let step=0;step<9;step++){
+      const target=step%3,camera=state.cameras[target];
+      camera.depth.fill(1000+target*7);
+      for(let y=18;y<45;y++)for(let x=12+step*2;x<22+step*2;x++)camera.depth[y*64+x]=step%2?700:1015;
+      gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,camera.depthTexture);
+      gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,64,64,gl.RED_INTEGER,gl.UNSIGNED_SHORT,camera.depth);
+      if(forceAll)for(const c of state.cameras)c.uploadRevision++;else camera.uploadRevision++;
+      draw('blendpcr');frames.push(image());
+    }
+    return frames;
+  };
+  const rebuiltFrames=replayVisibilityUpdates(true),incrementalFrames=replayVisibilityUpdates(false);
+  for(let i=0;i<rebuiltFrames.length;i++)check(incrementalFrames[i].every((v,j)=>v===rebuiltFrames[i][j]),
+    'partial updates match complete visibility rebuilds through moving occluders and temporal boundary evidence');
+  check(gl.getError()===gl.NO_ERROR,'partial visibility updates preserve valid WebGL state');
   return {success:true,checks:checks.length,details:checks};
 }
 

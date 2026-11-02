@@ -5,7 +5,7 @@ import {ExperimentalGpuVisibility} from './experimental_gpu_visibility.js';
 import {blendPcrShaders} from './webgpu_blendpcr_shaders.js';
 import {rgbVisibilityProjection,rgbVisibilityMultiply} from './hybrid_rgb_visibility.js?v=20261021_original_rgb';
 import {validatedColorProjection} from './hybrid_color_projection.js?v=20261021_original_rgb';
-import {workspaceCropBounds,WORKSPACE_CROP_CONTEXT,workspaceVisibleTiles} from './workspace_crop.js?v=20261021_original_rgb';
+import {TABLE_CONTEXT_MARGIN,workspaceVisibleTiles} from './table_geometry.js?v=20261021_original_rgb';
 import {modeledWorkspace,modeledWorkspaceBounds} from './modeled_workspace.js?v=20261021_original_rgb';
 import {visibleNativeTiles,nativeSourceTiles} from './native_geometry.js?v=20261026_native_render';
 const mul=rgbVisibilityMultiply;
@@ -71,8 +71,7 @@ export class ExperimentalWebGpuBlendPCR{
  }
  frameData(view,settings,capsules){
   const f=this.frameFloats,u=this.frameInts;f.fill(0);f.set(view.viewProjection,0);f.set(view.viewer,16);f.set(view.inverseViewer,32);f.set(view.projection,48);u.set([view.width,view.height,this.count,settings.depth_only_enabled===true?1:0],64);
-  const crop=workspaceCropBounds(settings),stage=modeledWorkspace(settings);
-  if(crop){const context=workspaceCropBounds(settings,WORKSPACE_CROP_CONTEXT);f.set([...crop.localMin,1],68);f.set(crop.localMax,72);f.set(crop.center,76);for(let c=0;c<3;c++)f.set(crop.inverse.slice(c*3,c*3+3),80+c*4);f.set(context.localMin,156+4*this.count);f.set(context.localMax,160+4*this.count);}
+  const stage=modeledWorkspace(settings);
   if(stage){f.set([...stage.center,1],92);f.set([stage.width/2,stage.depth/2,stage.clearance,stage.height],96);f.set([stage.cos,stage.sin,0,0],100);}
   if(capsules){f.set(capsules.starts,104);f.set(capsules.ends,128);}u.set(this.layerIndices,152);u.set([capsules?1:0,0,settings.white_background_enabled?1:0,0],152+this.count*4);
   this.device.queue.writeBuffer(this.frame,0,this.frameBytes);
@@ -112,7 +111,7 @@ export class ExperimentalWebGpuBlendPCR{
  render(cameras,view,capsules,settings){
   this.targets(view.width,view.height);this.update(cameras,view,settings,capsules);
   if(settings.depth_only_enabled!==true&&cameras.some((c,i)=>view.now-c.lastUpdateMs<1000&&!this.rgbReady.has(i)))throw Error('Native RGB upload is not ready');
-  const crop=modeledWorkspaceBounds(settings,workspaceCropBounds(settings)),context=modeledWorkspaceBounds(settings,workspaceCropBounds(settings,WORKSPACE_CROP_CONTEXT),WORKSPACE_CROP_CONTEXT),key=`${this.version}:${view.viewProjection}:${capsules?.starts}:${capsules?.ends}:${settings.white_background_enabled}:${settings.depth_only_enabled}:${crop?.key}`;
+  const crop=modeledWorkspaceBounds(settings),context=modeledWorkspaceBounds(settings,TABLE_CONTEXT_MARGIN),key=`${this.version}:${view.viewProjection}:${capsules?.starts}:${capsules?.ends}:${settings.white_background_enabled}:${settings.depth_only_enabled}:${crop?.key}`;
   if(key===this.cacheKey)return false;
   const d=this.device,encoder=d.createCommandEncoder();this.cropStats={enabled:Boolean(crop),sourceCells:0,submittedCells:0};
   const constants=encoder.beginComputePass();constants.setPipeline(this.constantsPipeline);constants.setBindGroup(0,this.constantsGroup);constants.dispatchWorkgroups(1);constants.end();

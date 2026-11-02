@@ -238,6 +238,8 @@ private:
     bool capture_only = false;
     godot::String publish_shared_memory_name;
     RealSenseSharedMemoryWriter snapshot_writer;
+    RealSenseSharedMemoryWriter native_snapshot_writer;
+    bool native_snapshot_writer_open = false;
     bool snapshot_writer_open = false;
     godot::Vector4 current_intrinsics;
     godot::Ref<godot::Image> current_depth_image;
@@ -316,6 +318,7 @@ private:
         int color_height = 0;
         godot::Image::Format color_format = godot::Image::FORMAT_RGB8;
         godot::PackedByteArray color_data;
+		NativeColorSnapshot native_color;
 		godot::Vector4 intrinsics;
 		godot::Vector4 crop_rect = godot::Vector4(0.0, 0.0, 1.0, 1.0);
 		double min_depth = 0.2;
@@ -373,6 +376,7 @@ private:
     uint64_t rgbd_dropped_completed = 0;
     int rgbd_last_submitted_width = 0;
     int rgbd_last_submitted_quality = 0;
+    bool rgbd_last_native_snapshot = false;
 
     struct FrameSnapshot {
         uint64_t sequence = 0;
@@ -402,7 +406,7 @@ private:
     void ensure_rgbd_encoder_worker();
     void stop_rgbd_encoder_worker();
     void rgbd_encoder_worker_loop();
-    static RgbdEncodeResult encode_rgbd_job(const RgbdEncodeJob &p_job);
+    static RgbdEncodeResult encode_rgbd_job(RgbdEncodeJob p_job);
     int rebuild_cpu_connected_mesh(const godot::Ref<godot::Image> &p_depth_image, const godot::Ref<godot::Image> &p_color_image);
     int rebuild_gpu_connected_mesh(const godot::Ref<godot::Image> &p_depth_image);
     void release_gpu_mesh_compute_resources();

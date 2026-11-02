@@ -256,8 +256,8 @@ const DORMANT_OAKD_PROPERTIES := [
 	set(value):
 		robot_overlay_mask_scanned_robot = value
 		_update_robot_overlay_settings()
-## Runs the selected module's full calibration workflow, when supported.
-@export_tool_button("Calibrate Robot") var calibrate_robot_position_action: Callable = _start_robot_position_calibration
+## Places the selected module's configured robot in the camera/world scene.
+@export_tool_button("Align Robot") var calibrate_robot_position_action: Callable = _start_robot_position_calibration
 ## Runs the selected module's optional refinement workflow.
 @export_tool_button("Refine Robot Calibration") var refine_robot_joint_alignment_action: Callable = _start_robot_joint_refinement
 ## Opens visual joint tuning with local save and portable JSON import/export.
@@ -318,31 +318,6 @@ const DORMANT_OAKD_PROPERTIES := [
 	set(value):
 		edge_feather_min_alpha = value
 		_update_camera_renderers()
-
-## Crops rendered geometry in world coordinates. Native camera data remains complete.
-@export_group("Workspace Crop")
-@export var workspace_crop_enabled: bool = false:
-	set(value):
-		workspace_crop_enabled = value
-		_update_camera_renderers()
-@export var workspace_crop_min: Vector3 = Vector3(-0.6, -0.45, -0.6):
-	set(value):
-		workspace_crop_min = value
-		_update_camera_renderers()
-@export var workspace_crop_max: Vector3 = Vector3(0.6, 0.45, 0.6):
-	set(value):
-		workspace_crop_max = value
-		_update_camera_renderers()
-@export var workspace_crop_rotation: Vector3 = Vector3.ZERO:
-	set(value):
-		workspace_crop_rotation = value
-		_update_camera_renderers()
-@export var workspace_crop_show_box: bool = false:
-	set(value):
-		workspace_crop_show_box = value
-		_update_camera_renderers()
-var _workspace_crop_guide: MeshInstance3D
-var _workspace_crop_guide_key: Array = []
 
 @export_group("RealSense Camera")
 ## Auto-detects RealSense devices by serial and creates one renderer per discovered camera. Settings are stored per serial in Realsense Device Registry.
@@ -1359,7 +1334,7 @@ func _apply_close_robot_rig_defaults() -> void:
 			settings["max_depth_m"] = 1.2
 			settings["emitter_enabled"] = true
 			settings["laser_power_percent"] = 100.0
-			settings["workspace_crop_enabled"] = true
+			settings["image_crop_enabled"] = true
 			settings["crop_left_percent"] = 11.0
 			settings["crop_right_percent"] = 11.0
 			settings["crop_top_percent"] = 14.0
@@ -1370,7 +1345,7 @@ func _apply_close_robot_rig_defaults() -> void:
 			settings["max_depth_m"] = 1.5
 			settings["emitter_enabled"] = false
 			settings["laser_power_percent"] = 70.0
-			settings["workspace_crop_enabled"] = false
+			settings["image_crop_enabled"] = false
 		realsense_device_registry[serial] = settings
 		var anchor := _find_realsense_camera_anchor_existing(camera_id)
 		if anchor != null and anchor.has_method("apply_settings"):
@@ -1446,7 +1421,7 @@ func _ensure_realsense_registry_entry(serial: String, info: Dictionary) -> void:
 	var model_lower := str(settings.get("model", "")).to_lower()
 	_realsense_default_setting(settings, "emitter_enabled", not model_lower.contains("455"))
 	_realsense_default_setting(settings, "laser_power_percent", 100.0)
-	_realsense_default_setting(settings, "workspace_crop_enabled", false)
+	_realsense_default_setting(settings, "image_crop_enabled", bool(settings.get("workspace_crop_enabled", false)))
 	_realsense_default_setting(settings, "crop_left_percent", 0.0)
 	_realsense_default_setting(settings, "crop_right_percent", 0.0)
 	_realsense_default_setting(settings, "crop_top_percent", 0.0)
@@ -1585,10 +1560,12 @@ func _realsense_settings(camera_id: String) -> Dictionary:
 	return realsense_device_registry[serial] as Dictionary
 
 func _realsense_setting(camera_id: String, key: String, fallback):
-	if key == "stream_profile" and not _remote_capture_profile.is_empty():
-		return _remote_capture_profile
+	# The startup profile is only a fallback. Once the editor supplies camera
+	# settings, its live preset must also reach the independent capture owner.
 	if _capture_publisher() and _capture_control_settings.has(camera_id):
 		return (_capture_control_settings[camera_id] as Dictionary).get(key,fallback)
+	if key == "stream_profile" and not _remote_capture_profile.is_empty():
+		return _remote_capture_profile
 	var node_settings := _realsense_camera_node_settings(camera_id)
 	if node_settings.has(key):
 		return node_settings.get(key, fallback)
@@ -1979,8 +1956,16 @@ func _apply_pending_capture_profile() -> void:
 	_remote_capture_profile = _requested_capture_profile
 
 func get_remote_stream_preset() -> String:
-	if _remote_capture_profile == "highres30": return "quality"
-	if _remote_capture_profile == "fast60": return "latency"
+	var profile := _remote_capture_profile
+	if _capture_publisher() and not _capture_control_settings.is_empty():
+		var profiles: Array = []
+		for value in _capture_control_settings.values():
+			if value is Dictionary and value.has("stream_profile") and not profiles.has(str(value.stream_profile)):
+				profiles.append(str(value.stream_profile))
+		if profiles.size() == 1: profile = profiles[0]
+		elif profiles.size() > 1: return "custom"
+	if profile == "highres30": return "quality"
+	if profile == "fast60": return "latency"
 	return "custom"
 
 func _shared_capture_preview() -> bool:
@@ -3220,7 +3205,6 @@ func _update_camera_renderers() -> void:
 	_update_unified_mesh_fusion()
 	_update_mesh_quality()
 	_update_robot_renderer_masks()
-	_update_workspace_crop()
 	_update_blendpcr_rendering()
 	_update_camera_guides()
 
@@ -3241,60 +3225,6 @@ func get_camera_stream_info() -> Array[Dictionary]:
 			"capture_fps": float(source.call("get_direct_realsense_capture_fps")),
 			"render_fps": float(source.call("get_render_fps"))})
 	return info
-
-func apply_remote_workspace_crop(payload: Dictionary) -> void:
-	var lo: Variant = payload.get("workspace_crop_min", [workspace_crop_min.x, workspace_crop_min.y, workspace_crop_min.z])
-	var hi: Variant = payload.get("workspace_crop_max", [workspace_crop_max.x, workspace_crop_max.y, workspace_crop_max.z])
-	if not lo is Array or not hi is Array or lo.size() != 3 or hi.size() != 3:
-		return
-	for axis in range(3):
-		if not (lo[axis] is float or lo[axis] is int) or not (hi[axis] is float or hi[axis] is int):
-			return
-		if not is_finite(float(lo[axis])) or not is_finite(float(hi[axis])) or absf(float(lo[axis])) > 20.0 or absf(float(hi[axis])) > 20.0 or float(lo[axis]) >= float(hi[axis]):
-			return
-	var rotation: Variant = payload.get("workspace_crop_rotation", [workspace_crop_rotation.x, workspace_crop_rotation.y, workspace_crop_rotation.z])
-	if not rotation is Array or rotation.size() != 3:
-		return
-	for value in rotation:
-		if not (value is float or value is int) or not is_finite(float(value)) or absf(float(value)) > 360.0:
-			return
-	workspace_crop_rotation = Vector3(float(rotation[0]), float(rotation[1]), float(rotation[2]))
-	workspace_crop_min = Vector3(float(lo[0]), float(lo[1]), float(lo[2]))
-	workspace_crop_max = Vector3(float(hi[0]), float(hi[1]), float(hi[2]))
-	workspace_crop_enabled = bool(payload.get("workspace_crop_enabled", workspace_crop_enabled))
-	workspace_crop_show_box = bool(payload.get("workspace_crop_show_box", workspace_crop_show_box))
-	_update_workspace_crop()
-
-func _update_workspace_crop() -> void:
-	var crop := preload("res://godot/runtime/point_cloud/workspace_crop.gd")
-	var enabled := workspace_crop_enabled and workspace_crop_min.x < workspace_crop_max.x and workspace_crop_min.y < workspace_crop_max.y and workspace_crop_min.z < workspace_crop_max.z
-	# Keep seam context for BlendPCR; its final composite clips to exact bounds.
-	var margin := Vector3.ONE * 0.05 if render_mode == "blendpcr" else Vector3.ZERO
-	for renderer_variant in _camera_nodes.values():
-		var renderer := renderer_variant as MeshInstance3D
-		if not is_instance_valid(renderer):
-			continue
-		var material := renderer.get_active_material(0) as ShaderMaterial if renderer.mesh != null else renderer.material_override as ShaderMaterial
-		crop.apply_to_material(material, enabled, workspace_crop_min - margin, workspace_crop_max + margin, workspace_crop_rotation)
-	var show := enabled and workspace_crop_show_box
-	if not show:
-		if is_instance_valid(_workspace_crop_guide): _workspace_crop_guide.visible = false
-		return
-	if not is_instance_valid(_workspace_crop_guide):
-		_workspace_crop_guide = MeshInstance3D.new()
-		_workspace_crop_guide.name = "WorkspaceCropBox"
-		add_child(_workspace_crop_guide)
-		_workspace_crop_guide.top_level = true
-		_workspace_crop_guide.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		var material := StandardMaterial3D.new()
-		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		material.albedo_color = Color(0.22, 0.84, 1.0)
-		_workspace_crop_guide.material_override = material
-	_workspace_crop_guide.visible = true
-	var key := [workspace_crop_min, workspace_crop_max, workspace_crop_rotation]
-	if _workspace_crop_guide_key != key:
-		_workspace_crop_guide.mesh = crop.box_mesh(workspace_crop_min, workspace_crop_max, workspace_crop_rotation)
-		_workspace_crop_guide_key = key
 
 func _update_camera_guides() -> void:
 	if not is_inside_tree():
@@ -3434,7 +3364,6 @@ func _update_blendpcr_rendering() -> void:
 	var viewer := _blendpcr_viewer()
 	var scale := [0.75, 1.0, 0.5][clampi(blendpcr_quality, 0, 2)] as float
 	_blendpcr.update_surfaces(surfaces, viewer, scale, blendpcr_surface_tolerance_m, blendpcr_seam_radius,_mesh_quality_rig)
-	_blendpcr.set_workspace_crop(workspace_crop_enabled, workspace_crop_min, workspace_crop_max, workspace_crop_rotation)
 	_set_mesh_fusion_status(_blendpcr.status)
 
 func _set_mesh_fusion_status(message: String) -> void:
@@ -3554,14 +3483,20 @@ func _capture_active_after_recovery(camera_id: String, node: MeshInstance3D, act
 	if not active or _capture_paused or not node.has_method("get_display_frame_age_ms"):
 		return active
 	var now := Time.get_ticks_msec()
-	if float(node.call("get_display_frame_age_ms")) <= 5000.0 or now-int(_capture_recovery_at.get(camera_id,-5000)) < 5000:
+	var depth_stalled:=float(node.call("get_display_frame_age_ms"))>5000.0
+	var rgb_stalled:=false
+	if node.has_method("get_color_diagnostics"):
+		var color:Dictionary=node.call("get_color_diagnostics")
+		rgb_stalled=bool(color.get("rgb_enabled",false)) and float(color.get("rgb_frame_age_ms",-1.0))>5000.0
+	if (not depth_stalled and not rgb_stalled) or now-int(_capture_recovery_at.get(camera_id,-5000)) < 5000:
 		return active
 	_capture_recovery_at[camera_id]=now
 	# A silent SDK stall can leave is_open() true forever. This runs in the
 	# configuration group after all capture workers complete. Close here and
 	# reopen on the main thread next frame, as during serialized cold startup.
 	node.call("set_direct_realsense_enabled",false)
-	push_warning("Restarting stalled camera capture: %s" % camera_id)
+	if node.has_method("restart_direct_realsense"): node.call("restart_direct_realsense")
+	push_warning("Restarting stalled camera capture: %s (%s)" % [camera_id,"RGB" if rgb_stalled else "depth"])
 	return false
 
 func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) -> void:
@@ -3634,7 +3569,7 @@ func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) ->
 		if node.has_method("set_direct_realsense_laser_power_percent"):
 			node.call("set_direct_realsense_laser_power_percent", float(_realsense_setting(camera_id, "laser_power_percent", 100.0)))
 		if node.has_method("set_direct_realsense_crop_rect"):
-			var crop_enabled := bool(_realsense_setting(camera_id, "workspace_crop_enabled", false))
+			var crop_enabled := bool(_realsense_setting(camera_id, "image_crop_enabled", false))
 			var crop_rect := Vector4(0.0, 0.0, 1.0, 1.0)
 			if crop_enabled:
 				crop_rect = Vector4(

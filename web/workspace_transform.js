@@ -1,4 +1,4 @@
-// Shared, unit-tested geometry for the crop volume and its direct-manipulation UI.
+// Geometry for table placement and the shared table/robot pose handles.
 export const identity3 = () => [1,0,0,0,1,0,0,0,1];
 export const vadd = (a,b) => a.map((v,i)=>v+b[i]);
 export const vsub = (a,b) => a.map((v,i)=>v-b[i]);
@@ -48,22 +48,17 @@ export function screenRay(x,y,view) {
   return {origin:Array.from(m.slice(12,15)),direction:vunit(transform3([m[0],m[1],m[2],m[4],m[5],m[6],m[8],m[9],m[10]],local))};
 }
 
-export function workspaceEditBox(settings,target) {
-  if(target==='table') {
-    const h=settings.modeled_workspace_table_height??.72,c=settings.modeled_workspace_center||[0,0,0];
-    return orientedBox([c[0],c[1]-h/2,c[2]],[settings.modeled_workspace_width||1.2,h,settings.modeled_workspace_depth||.8],[0,settings.modeled_workspace_heading||0,0]);
-  }
-  const lo=settings.workspace_crop_min||[-.6,-.45,-.6],hi=settings.workspace_crop_max||[.6,.45,.6];
-  return orientedBox(lo.map((v,i)=>(v+hi[i])/2),hi.map((v,i)=>v-lo[i]),settings.workspace_crop_rotation||[0,0,0]);
+export function workspaceEditBox(settings) {
+  const h=settings.modeled_workspace_table_height??.72,c=settings.modeled_workspace_center||[0,0,0];
+  return orientedBox([c[0],c[1]-h/2,c[2]],[settings.modeled_workspace_width||1.2,h,settings.modeled_workspace_depth||.8],[0,settings.modeled_workspace_heading||0,0]);
 }
-export function workspaceEditSettings(box,target) {
-  if(target==='table')return {modeled_workspace_center:[box.center[0],box.center[1]+box.size[1]/2,box.center[2]],
+export function workspaceEditSettings(box) {
+  return {modeled_workspace_center:[box.center[0],box.center[1]+box.size[1]/2,box.center[2]],
     modeled_workspace_width:box.size[0],modeled_workspace_table_height:box.size[1],modeled_workspace_depth:box.size[2],modeled_workspace_heading:box.rotation[1]};
-  return {workspace_crop_min:box.center.map((v,i)=>v-box.size[i]/2),workspace_crop_max:box.center.map((v,i)=>v+box.size[i]/2),workspace_crop_rotation:box.rotation.slice()};
 }
 // Opposite face/corner stays fixed. No snapping or change to scene detail.
 export function resizeWorkspaceBox(start,signs,localDelta,target) {
-  const minimum=target==='table'?.1:.02,maximum=target==='table'?4:20;
+  const minimum=.1,maximum=4;
   const size=start.size.map((v,i)=>signs[i]?Math.min(maximum,Math.max(minimum,v+signs[i]*localDelta[i])):v);
   const shift=size.map((v,i)=>(v-start.size[i])*signs[i]/2);
   return orientedBox(vadd(start.center,transform3(start.matrix,shift)),size,start.rotation);

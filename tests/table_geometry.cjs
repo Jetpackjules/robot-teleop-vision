@@ -3,15 +3,10 @@ const fs=require('node:fs');
 const path=require('node:path');
 (async()=>{
   const geometry='data:text/javascript;base64,'+Buffer.from(fs.readFileSync(path.join(__dirname,'../web/workspace_transform.js'),'utf8')).toString('base64');
-  const source=fs.readFileSync(path.join(__dirname,'../web/workspace_crop.js'),'utf8').replace(/'\.\/workspace_transform.js[^']*'/,JSON.stringify(geometry));
-  const {workspaceCropBounds,workspaceSourceWindow,workspaceCropLines,workspaceDepthTiles,workspaceVisibleTiles}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+  const source=fs.readFileSync(path.join(__dirname,'../web/table_geometry.js'),'utf8').replace(/'\.\/workspace_transform.js[^']*'/,JSON.stringify(geometry));
+  const {workspaceSourceWindow,workspaceDepthTiles,workspaceVisibleTiles}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
   let checks=0;const check=(test,message)=>{assert.ok(test,message);checks++;};
-  const settings={workspace_crop_enabled:true,workspace_crop_min:[-.1,-.2,-1.1],workspace_crop_max:[.1,.2,-.9]};
-  const bounds=workspaceCropBounds(settings);
-  check(bounds&&workspaceCropLines(bounds).length===72,'world box has all twelve edges');
-  check(!workspaceCropBounds({...settings,workspace_crop_enabled:false}),'disabled crop preserves the full scene');
-  for(const value of [[0,0],['0',0,-1],[0,NaN,-1],[0,Infinity,-1],[0,0,-2]])
-    check(!workspaceCropBounds({...settings,workspace_crop_max:value}),'invalid or inverted bounds never crop');
+  const bounds={min:[-.1,-.2,-1.1],max:[.1,.2,-.9]};
   const identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
   const camera={width:1280,height:720,modelMatrix:identity,intrinsicsArray:[640,640,639.5,359.5]};
   const window=workspaceSourceWindow(camera,bounds);
@@ -49,5 +44,5 @@ const path=require('node:path');
       check(x>=r.x&&x<r.x+r.width&&y>=r.y&&y<r.y+r.height,'rotated camera retains every in-box native sample');
     }
   }
-  process.stdout.write(`${checks} workspace crop checks passed\n`);
+  process.stdout.write(`${checks} table geometry checks passed\n`);
 })().catch(error=>{console.error(error);process.exitCode=1;});

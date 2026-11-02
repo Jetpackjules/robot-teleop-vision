@@ -32,6 +32,21 @@ solve is not a claim of zero depth noise or millimetre absolute accuracy.
 
 This stage reads the existing local RGB-D stream with capture running. It does
 not open another camera pipeline, change stream presets, or require a marker.
+With the explicit `recover_capture_after_calibration` policy enabled in
+`user://camera_color_policy.json`, it first waits for fresh RGB from every camera.
+If one remains stalled after calibration releases the sensors, it makes one
+bounded recovery attempt: stop only the identified capture process, reset only
+the stalled camera serials, and relaunch capture with the same settings. Robot
+control and the Godot editor stay running. Validation then uses new frames; a
+failed recovery preserves the saved alignment.
+Device reset recovery uses the existing `realsense` Python extra
+(`python -m pip install -e ".[calibration,realsense]"`).
+
+The same policy file stores explicit per-camera white-balance choices, for
+example `{"schema_version":1,"cameras":{"SERIAL":{"auto_white_balance":true}}}`.
+The capture pipeline reapplies these choices when it opens or reconnects, and
+the calibration worker reapplies them before validation. Unlisted cameras keep
+their existing manual or automatic mode. This file contains no camera poses.
 Install the Python calibration dependencies (`python -m pip install -e ".[calibration]"`),
 including ONNX Runtime, in the project's `.venv`; that interpreter is preferred.
 The same packaged SuperPoint/LightGlue model is reused. Keep the entire scene
@@ -112,12 +127,24 @@ to tune tabletop height, then **Done** to keep it or **Cancel** to restore it.
 These edits never change camera or robot calibration. The table is level in
 world Y; tilted tables need a later plane-fitting implementation.
 
-**Scene lighting** shares RoboCade-style dark ambient light, a white main light
-and a blue fill light across the table and the **Solid** robot overlay. **CAD
+The modeled environment uses a matte slate-blue table, darker blue-gray legs,
+a light blue-gray floor, and a pale mist-gray background. Its colors do not change
+the saved table dimensions, placement, or camera RGB. **White background** still
+provides its explicit white override; switching the table off restores the dark scene.
+
+**Scene lighting** shares brighter neutral ambient light, a white main light
+and a restrained cool fill across the table and the **Solid** and **Realistic materials** robot overlays. **CAD
 shadows** enables a cached 1024-square shadow map with filtered edges; changing
 the light angle moves the main light and its shadows together. Table, floor
 and legs have separate roughness/metalness. Camera RGB retains its measured
 lighting. The calibration overlay keeps its contrast-oriented material.
+
+The SO-101 **Robot overlay style** selector defaults to **Realistic materials**:
+matte charcoal printed parts and slightly shinier dark servo housings. Stable
+surface materials and generated mesh normals provide shading without projecting
+camera RGB onto the robot. **Alignment** retains transparent surfaces and outlines;
+**Solid yellow** remains available. Changing style does not change the mesh,
+joint settings, measured pose, or saved registration.
 
 Live geometry is retained above the tabletop, within its footprint and object
 height. **Tabletop exclusion** defaults to 6 mm: lower it for thin objects or
@@ -133,8 +160,7 @@ robot or calibration actions. Server cropping pauses while the 3D placement
 handles are active, then resumes on Done or Cancel so moving the workspace
 cannot discard its new surroundings. The gateway filters independent native
 RGB-D packets for that page before HTTPS,
-WebSocket or direct WebRTC transmission. It intersects the rotated crop box
-with the above-table volume, retaining conservative source tiles and a two-pixel
+WebSocket or direct WebRTC transmission. It filters the above-table volume, retaining conservative source tiles and a two-pixel
 boundary halo. Depth stays exact uint16 at native sampling density; cropped
 intrinsics retain world positions. Original RGB is projected separately and
 cropped losslessly to PNG only for bounded candidates that save bytes; large
@@ -145,8 +171,7 @@ and experimental temporal transport pass through unchanged.
 
 The GPU clips the exact volume. Status separately reports transmitted-byte and
 submitted-geometry percentages when the server acknowledges filtering. These
-are measured ratios, not FPS promises. Switching both crop and modeled workspace
-off restores the original packet, and **Original RGB** bypasses the stream crop.
+are measured ratios, not FPS promises. Switching modeled workspace off restores the original packet, and **Original RGB** bypasses the stream crop.
 Remote rendered-frame views are unaffected. Placement and lighting are remembered
 in the browser and can be saved as installation defaults. Deploy the updated
 gateway and refresh the page to enable stream filtering; cameras need no restart.
@@ -211,23 +236,54 @@ visual-calibration diagnosis.
 
 ### Automatic visual calibration
 
-The SO-101 module's **Calibrate Full Arm** button performs a transactional outward solve:
+The SO-101 module's **Align Arm** button locates the already-configured arm.
+It preserves joint signs and offsets, model dimensions, wrist corrections and
+the claw opening map. **Manual Joint Tuning** remains an explicit way to change
+the model when needed; servo refinement is not exposed as a routine UI action.
 
-1. Preflight fresh D455 depth, telemetry, and a modeled-clearance-safe sweep.
-2. Rediscover the base from shoulder-pan motion instead of trusting its old position.
-3. Lock the validated base candidate.
-4. Sweep and solve shoulder, elbow, wrist flex, wrist roll, and claw evidence progressively.
-5. Check convergence/evidence against the selected reference camera.
-6. Atomically save a complete candidate, or Hold and restore the prior registration.
+1. Preflight fresh encoder feedback, depth and a clearance-checked base sweep.
+2. Capture the actual overlay meshes at each measured pose, using its current
+   joint mapping rather than the Python kinematics defaults.
+3. Determine the support plane and pan axis from motion. Search the whole
+   heading range, then refine table-plane translation within 25 mm of the
+   measured pivot using the visible links together, including the claw.
+4. Search using visible geometry across cameras, sampling each link's own
+   visual mesh without its child joints. Ignore out-of-frame, missing-depth
+   and occluded samples; weight small visible fragments less. Require enough
+   combined coverage per pose, rather than three links in every camera.
+   Exclude disagreeing auxiliary cameras and re-search the accepted views.
+   Balance links and viewpoints; validate separate withheld poses.
+   An optional exact-mesh surface/edge pass then refines the same placement,
+   keeping every joint setting fixed. It is selected only when training and
+   withheld poses improve and the original geometry and pivot checks still
+   pass. Otherwise the validated coarse placement is retained; missing optional
+   refinement dependencies cannot discard that placement.
+5. Reject ambiguous headings, unsupported visible links, boundary solutions or
+   concurrent model/registration edits. Save only the common placement,
+   atomically, with the previous registration backed up.
 
-Physically moving that robot invalidates registration but does not require source edits; a fresh run rediscovers the base. The custom wrist bracket is deliberately omitted because its exact mesh is unavailable. Distal solving uses mapped jaw evidence and excludes the attachment region.
+The sweep physically moves the arm; alignment does not change its joint mapping.
+Moving the base requires registration again, while the configured geometry can
+be reused. The custom wrist bracket has no mesh and is excluded from modeled
+geometry. Depth occlusion checks prevent hidden link surfaces from requiring
+matches. Capture and result evidence are written to
+`user://so101_whole_arm_capture.json` and `user://so101_whole_arm_fit.json`.
+These gates do not establish physical accuracy without a live visual check.
+
+The older staged mechanical-calibration implementation remains available as
+`start_automated_arm_calibration` for deliberate module calibration work; the
+standard alignment control does not invoke it.
 
 The SO-101 manual wrist/claw workspace overlays exact projected geometry on aligned RGB without moving hardware. Save is the only operation that modifies current registration. Translation/rotation trims, wrist zero/direction, and opening offset/scale apply to the united physical claw hierarchy.
+
+For base placement, use **Settings → Arm → Adjust Base in 3D**. Drag the center or X/Z handles across the table, use **Y** to raise or lower the base, or choose **Yaw** to rotate around the vertical axis. Tilt and joint calibration stay unchanged. **Save Base** persists the placement; **Reset** returns to the start of the preview, and **Cancel** or Escape restores the original placement. This works before or after automatic calibration and never commands the physical arm. A disconnected preview expires and restores its starting placement.
+
+Manual adjustments use small pose updates over the control connection, independently of RGB-D frame rate. The browser previews base placement immediately and interpolates joint poses in their parent frames between updates. This display smoothing is limited to manual calibration; ordinary measured robot motion retains its existing timing.
 
 ### Web calibration and local ports
 
 Normally keep `[godot] launch_runtime = true`, start `robot-teleop`, and use
-**Calibrate Full Arm** in the operator website. No Godot editor is required.
+**Align Arm** in the operator website. No Godot editor is required.
 The website loads these controls from the host's selected robot module. If the
 section reports **Vision only mode**, check that the running operator server
 selects `so101`; a preview gateway launched with `--robot-module disabled` can
@@ -262,7 +318,7 @@ than incorrectly claiming that web calibration always needs editor UDP 4252.
 
 For editor-only calibration, temporarily set `launch_runtime = false`, restart
 the launcher (which still runs the follower), then reopen `godot/Main.tscn` and
-use **View → Robot Module → Calibrate Robot** without pressing Play. The editor
+use **View → Robot Module → Align Robot** without pressing Play. The editor
 reads the launcher's ignored `.teleop/runtime_config.json`; reopen the scene after
 changing its settings. The file contains port settings, not credentials, and does
 not prove the follower is alive: fresh encoder telemetry and depth are still
@@ -351,3 +407,24 @@ required; do not bypass these checks to obtain a saved overlay.
 - **Geometrically indistinct path**: measured poses did not span enough angle to identify the intended axis.
 - **Hardware process faulted**: remove power/support the robot, inspect power/USB/mechanics, and clear the underlying fault before requesting another sweep.
 - **Stage rejected**: the last complete registration remains active by design.
+
+### Browser animation from measured joints
+
+The SO-101 web overlay evaluates the live exported kinematic chain from measured
+encoder history, at the capture timestamp of the newest displayed point-cloud
+camera. This preserves the current world base transform, joint directions/zeros,
+model scale, gripper linkage curve and tool corrections. It does not command the
+robot, change calibration, or increase serial-bus feedback frequency.
+
+Encoder read time is inferred from the follower's host timestamp minus read age;
+camera and encoder timestamps therefore share the host clock. Bracketing readings
+are interpolated; missing/stale feedback is held without extrapolating targets.
+`getGodotHybridRendererStatus().robotJointAnimation` reports interpolation/hold
+state, timing error and camera timestamp spread. Older capture services expose
+only a packet capture timestamp, which is used as the fallback camera clock.
+Independent camera exposures can still disagree during motion; one overlay pose
+cannot exactly match multiple differently timed point clouds. This is software
+timestamp alignment, not hardware camera synchronization.
+
+Manual alignment retains its existing preview path. To compare with the previous
+Godot-published animation, add `&robot_animation=legacy` to the controller URL.

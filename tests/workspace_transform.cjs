@@ -10,13 +10,11 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
   for(const p of box.corners){const local=g.transform3(box.inverse,g.vsub(p,box.center));check(local.every((v,a)=>near(Math.abs(v),box.half[a])),'rotated corner remains in the same local volume');}
   for(let axis=0;axis<3;axis++)for(const sign of [-1,1]){
    const signs=[0,0,0],delta=[0,0,0];signs[axis]=sign;delta[axis]=.13;
-   const resized=g.resizeWorkspaceBox(box,signs,delta,'crop');
+   const resized=g.resizeWorkspaceBox(box,signs,delta,'table');
    const oldAnchor=g.vadd(box.center,g.transform3(box.matrix,box.half.map((v,a)=>a===axis?-sign*v:0)));
    const newAnchor=g.vadd(resized.center,g.transform3(resized.matrix,resized.half.map((v,a)=>a===axis?-sign*v:0)));
    check(oldAnchor.every((v,a)=>near(v,newAnchor[a])),'face resizing preserves its opposite face under arbitrary rotation');
   }
-  const saved=g.workspaceEditSettings(box,'crop'),restored=g.workspaceEditBox(saved,'crop');
-  check(box.corners.every((p,i)=>p.every((v,a)=>near(v,restored.corners[i][a]))),'save/reload preserves rotated crop corners');
  }
  const table=g.workspaceEditBox({modeled_workspace_center:[.1,.07,-.5],modeled_workspace_width:.8,modeled_workspace_depth:.6,modeled_workspace_table_height:.72,modeled_workspace_heading:130},'table');
  const settings=g.workspaceEditSettings(table,'table');check(near(settings.modeled_workspace_center[1],.07)&&near(settings.modeled_workspace_heading,130),'table pivot uses the actual tabletop and keeps headings beyond 90 degrees');

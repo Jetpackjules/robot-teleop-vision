@@ -35,6 +35,10 @@ const server=createTestServer();
    const mask=state.cameraFusion.maskTexture;state.settings.robot_overlay_mask_scanned_robot=false;image();
    check(!state.cameraFusion.maskTexture,'mask off uses the original unmasked material');
    state.settings.robot_overlay_mask_scanned_robot=true;image();check(state.cameraFusion.maskTexture===mask,'mask on restores the measured cache');
+   window.setGodotHybridViewSettings({robot_overlay_scope:'claw'});image();
+   check(!state.cameraFusion.maskTexture,'claw-only leaves the scanned arm unmasked');
+   window.setGodotHybridViewSettings({robot_overlay_scope:'full'});image();
+   check(state.cameraFusion.maskTexture===mask,'full-arm mode restores the mask after claw-only');
    for(const shift of [0,.2,-.4]){
     state.baseViewer.transform[12]=shift;
     state.cameraFusion.visibility.tiled=false;state.cameraFusion.clear();state.blendPCR.useViewCulling=false;state.blendPCR.cacheKey='';const original=image();

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 import { FULLSCREEN_VERTEX_SHADER, RIG_SAMPLING_SHADER, compileGpuProgram, gpuTexture } from "./hybrid_camera_quality.js?v=20261021_original_rgb";
 import { DEPTH_SHADING_SHADER } from "./depth_shading.js?v=20261020_depth_only";
-import { WORKSPACE_CROP_CONTEXT, WORKSPACE_CROP_SHADER, bindWorkspaceCrop, workspaceCropBounds, workspaceSourceWindow, workspaceVisibleTiles, bindWorkspaceTiles, unbindWorkspaceTiles } from './workspace_crop.js?v=20261021_original_rgb';
+import { TABLE_CONTEXT_MARGIN, workspaceSourceWindow, workspaceVisibleTiles, bindWorkspaceTiles, unbindWorkspaceTiles } from './table_geometry.js?v=20261021_original_rgb';
 import { MODELED_WORKSPACE_SHADER, modeledWorkspaceBounds, bindModeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
 import {visibleNativeTiles} from './native_geometry.js?v=20261026_native_render';
 
@@ -14,12 +14,10 @@ precision highp int;
 in float v_valid;
 in vec3 v_world_position;
 flat in uint v_triangle_id;
-${WORKSPACE_CROP_SHADER}
 ${MODELED_WORKSPACE_SHADER}
 layout(location=0) out highp uint out_primitive;
 void main() {
   if(v_valid<0.9999||v_triangle_id==0u)discard;
-  if(workspace_crop_outside(v_world_position))discard;
   out_primitive=v_triangle_id;
 }`;
 
@@ -207,7 +205,6 @@ precision highp int;
 ${CAMERA_SAMPLES_SHADER}
 uniform highp sampler2DArray u_weights;
 uniform highp int u_depth_only_enabled;
-${WORKSPACE_CROP_SHADER}
 ${MODELED_WORKSPACE_SHADER}
 out vec4 out_color;
 ${DEPTH_SHADING_SHADER}
@@ -222,7 +219,7 @@ void main() {
   for(int camera=0;camera<u_rig_count;camera++) {
     RigHit hit;float z;
     valid[camera]=sample_usable(camera,uv,hit,z);
-    if(valid[camera]&&(workspace_crop_outside(hit.world)||modeled_workspace_outside(hit.world)))valid[camera]=false;
+    if(valid[camera]&&(modeled_workspace_outside(hit.world)))valid[camera]=false;
     samples[camera]=hit;depths[camera]=z;
     if(valid[camera])nearest=min(nearest,z);
   }
@@ -473,8 +470,8 @@ export class BrowserBlendPCR {
     const gl=this.gl;
     this.prepare(view.width,view.height,cameras.length,cameras.every(c=>c.metadata.color_space==='original_rgb'),Boolean(rig.maskTexture));
     this.maskCapsules=maskCapsules;
-    const crop=modeledWorkspaceBounds(settings,workspaceCropBounds(settings));
-    const contextCrop=modeledWorkspaceBounds(settings,workspaceCropBounds(settings,WORKSPACE_CROP_CONTEXT),WORKSPACE_CROP_CONTEXT);
+    const crop=modeledWorkspaceBounds(settings);
+    const contextCrop=modeledWorkspaceBounds(settings,TABLE_CONTEXT_MARGIN);
     this.cropStats={enabled:Boolean(crop),sourceCells:0,submittedCells:0};
     for(const camera of cameras) {
       const source=workspaceSourceWindow(camera,this.useWorkspaceCulling===false?null:contextCrop);
@@ -499,7 +496,7 @@ export class BrowserBlendPCR {
         const indexed=this.indexedMetadata;
         const instanced=indexed&&this.instancedMetadata;
         const u=this.use(instanced?"metadataInstanced":indexed?"metadataIndexed":"metadata",rig,view);
-        bindWorkspaceCrop(gl,this.programs[instanced?'metadataInstanced':indexed?'metadataIndexed':'metadata'].program,workspaceCropBounds(settings,WORKSPACE_CROP_CONTEXT));
+
         for(const [name,unit] of [["u_depth",0],["u_color",1],["u_fusion_depth",2],["u_fusion_color",3],["u_rig_quality",6]])gl.uniform1i(u[name],unit);
         gl.uniform1i(u.u_fusion_enabled,0);gl.uniform1i(u.u_quality_enabled,1);
         gl.activeTexture(gl.TEXTURE6);gl.bindTexture(gl.TEXTURE_2D_ARRAY,rig.quality);
@@ -583,7 +580,7 @@ export class BrowserBlendPCR {
         gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);
         gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
         const composite=this.use("composite",rig,view);
-        bindWorkspaceCrop(gl,this.programs.composite.program,workspaceCropBounds(settings));
+
         bindModeledWorkspace(gl,this.programs.composite.program,settings);
         gl.uniform1i(composite.u_depth_only_enabled,settings.depth_only_enabled===true?1:0);
         gl.activeTexture(gl.TEXTURE10);gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.weights);

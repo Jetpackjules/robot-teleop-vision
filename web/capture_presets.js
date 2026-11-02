@@ -5,8 +5,7 @@ export function nativeStreamPreset(preset) {
 
 // Workspace filtering must also work when head tracking and WebRTC are off.
 // Only viewing bounds enter this reconnect queue, never robot/calibration actions.
-const WORKSPACE_KEYS = ['workspace_stream_crop_enabled', 'display_mode', 'workspace_crop_enabled',
-  'workspace_crop_min', 'workspace_crop_max', 'workspace_crop_rotation', 'modeled_workspace_enabled',
+const WORKSPACE_KEYS = ['workspace_stream_crop_enabled', 'display_mode', 'point_preview_enabled', 'point_preview_budget', 'modeled_workspace_enabled',
   'modeled_workspace_center', 'modeled_workspace_width', 'modeled_workspace_depth',
   'modeled_workspace_height', 'modeled_workspace_heading', 'modeled_workspace_clearance'];
 
@@ -15,7 +14,12 @@ export class WorkspaceStreamControl {
 
   update(settings) {
     if (this.closed || !/^[A-Za-z0-9_-]{1,64}$/.test(settings.rgbd_client_id || '')) return false;
-    const payload = {type: 'view_settings', rgbd_client_id: settings.rgbd_client_id};
+    // A point-detail update may arrive before the bounds socket opens. Keep
+    // earlier bounds in that same client's queued packet instead of replacing
+    // them with a partial update. Only whitelisted viewing keys enter it.
+    const previous=this.latest?JSON.parse(this.latest):null;
+    const payload = {...(previous?.rgbd_client_id===settings.rgbd_client_id?previous:{}),
+      type: 'view_settings', rgbd_client_id: settings.rgbd_client_id};
     for (const key of WORKSPACE_KEYS) if (Object.hasOwn(settings, key)) payload[key] = settings[key];
     const latest = JSON.stringify(payload);
     if (latest === this.latest) return true;

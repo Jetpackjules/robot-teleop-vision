@@ -84,9 +84,7 @@ def test_cached_ray_bounds_preserve_every_measured_point_inside_rotated_volumes(
     depth=rng.integers(500,2000,shape,dtype=np.uint16);depth[rng.random(shape)<.1]=0
     h,w=shape;camera={'intrinsics':[float(w),float(w),(w-1)/2,(h-1)/2],
                     'transform':np.eye(4).flatten(order='F').tolist()}
-    settings={'workspace_stream_crop_enabled':True,'workspace_crop_enabled':True,
-              'workspace_crop_min':[-.2,-.2,-1.6],'workspace_crop_max':[.3,.25,-.6],
-              'workspace_crop_rotation':[15,25,-10]}
+    settings={'workspace_stream_crop_enabled':True,'modeled_workspace_enabled':True, 'modeled_workspace_center':[.05,-.2,-1.1], 'modeled_workspace_width':.5,'modeled_workspace_depth':1.,'modeled_workspace_height':.45, 'modeled_workspace_heading':25,'modeled_workspace_clearance':0}
     volumes=crop_volumes(settings);result=retained_depth(depth,camera,volumes)
     yy,xx=np.indices(shape);z=depth*.001
     points=np.stack(((xx-camera['intrinsics'][2])*z/w,-(yy-camera['intrinsics'][3])*z/w,-z),axis=-1)
@@ -99,8 +97,7 @@ def test_cached_ray_bounds_preserve_every_measured_point_inside_rotated_volumes(
 def test_triangle_crossing_workspace_survives_when_its_vertices_are_outside():
     depth=np.full((64,128),1000,np.uint16)
     camera={'intrinsics':[100.,100.,63.5,31.5],'transform':np.eye(4).flatten(order='F').tolist()}
-    settings={'workspace_stream_crop_enabled':True,'workspace_crop_enabled':True,
-              'workspace_crop_min':[-.001,-.2,-1.01],'workspace_crop_max':[.001,.2,-.99]}
+    settings={'workspace_stream_crop_enabled':True,'modeled_workspace_enabled':True, 'modeled_workspace_center':[0,-.2,-1.],'modeled_workspace_width':.1,'modeled_workspace_depth':.1,'modeled_workspace_height':.4,'modeled_workspace_clearance':0}
     result=retained_depth(depth,camera,crop_volumes(settings))
     assert result[30,63]==result[30,64]==1000
 
@@ -175,9 +172,9 @@ def test_empty_workspace_sends_empty_camera_updates_instead_of_stale_objects():
     assert len(result)<len(source)*.1
 
 
-def test_rotated_box_intersects_table_and_invalid_settings_fail_open():
+def test_legacy_box_is_ignored_and_invalid_table_settings_fail_open():
     assert len(crop_volumes({**SETTINGS,'workspace_crop_enabled':True,'workspace_crop_min':[-.1,0,-1.2],
-        'workspace_crop_max':[.2,.3,-.8],'workspace_crop_rotation':[15,35,5]}))==2
+        'workspace_crop_max':[.2,.3,-.8],'workspace_crop_rotation':[15,35,5]}))==1
     source=packet();cropper=WorkspaceStreamCropper()
     assert cropper.crop(source,{**SETTINGS,'modeled_workspace_center':[float('nan'),0,0]}) is source
     assert cropper.crop(source,{**SETTINGS,'modeled_workspace_height':-1}) is source
@@ -229,6 +226,7 @@ def test_native_websocket_filters_before_sending(monkeypatch):
     handler.path='/rgbd-stream?client=page-a&temporal_depth=0';handler.client_address=('127.0.0.1',1)
     seen=[]
     handler.server=SimpleNamespace(stream_host='127.0.0.1',capture_port=8781,claim_rgbd_client=lambda *_:True,
+        robot_joint_history=SimpleNamespace(attach=lambda data,**_:data),
         release_rgbd_client=lambda *_:None,crop_rgbd_packet=lambda data,page:(seen.append((data,page)) or filtered))
     handler.connection=SimpleNamespace(settimeout=lambda _:None,setsockopt=lambda *_:None)
     handler.accept_websocket=lambda:True;handler.watch_stream_peer=lambda *_:None

@@ -14,11 +14,25 @@ official LeRobot dataset writer in a separate optional environment.
 1. Start the normal supervised stack with the SO-101 module. Confirm live original
    RGB and fresh measured robot feedback. The recorder needs an applied position
    target as well as measured positions; the module supplies their definitions.
-2. The study task is preconfigured as **Place the block in the cup** (placeholder).
+2. Enter a session name in the top bar and select **Set up session**. Select the
+   physical leader arm's USB port if requested. Setup waits for fresh leader and
+   follower feedback and enables leader control; it does not start recording.
+   The name receives a Berlin date/time and UTC-offset suffix, saved in every
+   episode's `trial.session_name`. Then select **Start first trial**.
+   The study task is preconfigured as **Place the block in the cup** (placeholder).
    A facilitator can override it in **Settings → Session**. Select **Start trial**;
    preparation checks the RGB streams before creating an episode. The status must
    say **Recording** and its host frame count must advance. The preset carries
-   across all three conditions; participants do not retype it.
+   across both rounds of all three conditions; participants do not retype it.
+   Each activity has six trials, with the three view conditions independently
+   shuffled within each round by default. Finish both rounds before the next
+   activity. Two configured activities give twelve trials; naming task 3 gives
+   eighteen. Refresh preserves an existing plan; **New session** generates a new
+   randomized plan and leaves all host recordings intact.
+   After the final trial is saved and any required block count is entered,
+   **Restart session** appears in the top bar. It prepares a fresh named session
+   and waits for **Start first trial**. Each explicit Start trial also checks
+   leader readiness and re-enables a held follower when needed.
 3. Perform the task with the existing controls. Select **Success**, **Failure**, or
    leave **Not rated**, then select **Finish trial**. Wait for the saved status,
    then select **Next trial** explicitly. Outside guided trials, the recording
@@ -41,7 +55,7 @@ and never resume the arm. Reconnecting or reloading the page does not re-enable
 the arm. Physical Hold/Resume behavior still needs supervised hardware validation.
 
 Recording uses full original sensor RGB JPEGs, independent of browser viewpoint,
-workspace crop, modeled table and point-cloud mode. It preserves the incoming
+modeled table and point-cloud mode. It preserves the incoming
 JPEG bytes; the capture service encodes original RGB at quality 95 or the higher
 quality another active RGB consumer requests. RGB subscribers share the highest
 requested image width and quality. No depth or rendered point-cloud view is
@@ -83,8 +97,8 @@ The incremental JSONL journal and individual JPEGs preserve evidence even if the
 process ends before finalization.
 
 Camera capture Unix timestamps are mapped to the host monotonic clock. Each
-sample uses nearby measured feedback, with at most 100 ms of camera-to-camera
-or camera-to-robot skew. Auxiliary wrist timestamps identify host JPEG receipt,
+sample uses measured feedback within 100 ms of every selected camera, with at
+most 100 ms of camera-to-camera skew. Auxiliary wrist timestamps identify host JPEG receipt,
 not a hardware exposure timestamp. Repeated source frames remain identifiable
 by their sequence numbers. Inputs older than 350 ms, invalid feedback, calibration
 sweeps, rest-return motion, profile changes and slow disk/capture stop the episode
@@ -97,6 +111,11 @@ these capture bounds.
 Only **complete** episodes are eligible for export. A process crash leaves an
 unfinalized episode, which is excluded. Discarded and incomplete captures are
 retained for recovery; there is no automatic deletion or upload.
+A short capture without advancing source RGB timestamps is also incomplete,
+even if repeated samples were written. Export independently checks the saved
+camera/robot alignment, frame counters and relative capture clock before creating
+a dataset. Missing required source timing, including in historical test captures,
+is rejected rather than inferred.
 
 ## Export with LeRobot
 

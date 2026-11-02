@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 import { COLOR_PROJECTION_SHADER, bindColorProjection, validatedColorProjection } from './hybrid_color_projection.js?v=20261021_original_rgb';
 
-import {RgbVisibility} from './hybrid_rgb_visibility.js?v=20261021_original_rgb';
-import {workspaceCropBounds,WORKSPACE_CROP_CONTEXT} from './workspace_crop.js?v=20261021_original_rgb';
+import {RgbVisibility} from './hybrid_rgb_visibility.js?v=20261027_blend_limits';
+import {TABLE_CONTEXT_MARGIN} from './table_geometry.js?v=20261021_original_rgb';
 import {modeledWorkspaceBounds} from './modeled_workspace.js?v=20261021_original_rgb';
 
 export const FULLSCREEN_VERTEX_SHADER = `#version 300 es
@@ -60,6 +60,9 @@ uniform ivec2 u_size;
 uniform vec4 u_intrinsics;
 uniform float u_mesh_depth_delta;
 uniform float u_mesh_max_edge;
+uniform float u_relaxed;
+uniform float u_depth_tolerance;
+uniform float u_support;
 ${COLOR_PROJECTION_SHADER}
 layout(location=0) out vec4 out_quality;
 layout(location=1) out vec4 out_color;
@@ -76,7 +79,7 @@ vec3 support(ivec2 p,uint z,float noise_a,float noise_b) {
   vec3 n=vec3(0);
   float range=float(z)*0.001;
   float footprint=range/max(min(u_intrinsics.x,u_intrinsics.y),1.0);
-  float valid_delta=min(u_mesh_depth_delta*float(z),max(4.0,6.0*range*range+2000.0*footprint));
+  float valid_delta=u_depth_tolerance*min(u_mesh_depth_delta*float(z),max(4.0,6.0*range*range+2000.0*footprint));
   for(int i=0;i<4;i++) {
     uint neighbor=depth_mm(p+offsets[i]);
     if(neighbor==0u)continue;
@@ -91,7 +94,7 @@ bool geometry(uint za,uint zb,uint zc,vec3 pa,vec3 pb,vec3 pc) {
   uint lo=min(za,min(zb,zc)),hi=max(za,max(zb,zc));
   float range=float(hi)*0.001;
   float footprint=range/max(min(u_intrinsics.x,u_intrinsics.y),1.0);
-  float limit_mm=min(u_mesh_depth_delta*float(hi),max(4.0,6.0*range*range+2000.0*footprint));
+  float limit_mm=u_depth_tolerance*min(u_mesh_depth_delta*float(hi),max(4.0,6.0*range*range+2000.0*footprint));
   if(lo==0u || float(hi-lo)>limit_mm)return false;
   float limit=u_mesh_max_edge*u_mesh_max_edge;
   return max(dot(pa-pb,pa-pb),max(dot(pb-pc,pb-pc),dot(pc-pa,pc-pa)))<=limit;
@@ -114,8 +117,8 @@ void main() {
   vec3 sa=first?support(p,za,noise_a,noise_b):vec3(0);
   vec3 sd=second?support(d,zd,noise_a,noise_b):vec3(0);
   vec3 sb=support(b,zb,noise_a,noise_b),sc=support(c,zc,noise_a,noise_b);
-  first=first&&min(sa.x,min(sb.x,sc.x))>=2.0;
-  second=second&&min(sb.x,min(sd.x,sc.x))>=2.0;
+  first=first&&min(sa.x,min(sb.x,sc.x))>=u_support;
+  second=second&&min(sb.x,min(sd.x,sc.x))>=u_support;
   float a=min(sa.y,min(sb.y,sc.y))*0.25,bn=min(sb.z,min(sd.z,sc.z))*0.25;
   out_quality=vec4(first?1.0:0.0,second?1.0:0.0,first?0.25+0.75*a*a:0.0,second?0.25+0.75*bn*bn:0.0);
 
@@ -470,7 +473,7 @@ export class GpuCameraRig {
     gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,c.colorTexture);
     gl.bindFramebuffer(gl.FRAMEBUFFER,replay.framebuffer);gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,replay.quality,0,index);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
     gl.bindVertexArray(this.vao);gl.useProgram(this.program);gl.disable(gl.DEPTH_TEST);gl.disable(gl.BLEND);gl.disable(gl.CULL_FACE);gl.disable(gl.SCISSOR_TEST);gl.viewport(0,0,c.width,c.height);
-    gl.uniform1i(u.u_depth,0);gl.uniform1i(u.u_color,1);gl.uniform2i(u.u_size,c.width,c.height);gl.uniform4fv(u.u_intrinsics,c.intrinsicsArray);gl.uniform1f(u.u_mesh_depth_delta,snapshot.delta);gl.uniform1f(u.u_mesh_max_edge,snapshot.edge);bindColorProjection(gl,this.program,c);gl.drawArrays(gl.TRIANGLES,0,3);
+    gl.uniform1i(u.u_depth,0);gl.uniform1i(u.u_color,1);gl.uniform2i(u.u_size,c.width,c.height);gl.uniform4fv(u.u_intrinsics,c.intrinsicsArray);gl.uniform1f(u.u_mesh_depth_delta,snapshot.delta);gl.uniform1f(u.u_mesh_max_edge,snapshot.edge);gl.uniform1f(u.u_relaxed,snapshot.relaxed?1:0);gl.uniform1f(u.u_depth_tolerance,snapshot.tolerance??1);gl.uniform1f(u.u_support,snapshot.support??(snapshot.relaxed?1:2));bindColorProjection(gl,this.program,c);gl.drawArrays(gl.TRIANGLES,0,3);
     return replay;
   }
 
@@ -500,7 +503,7 @@ export class GpuCameraRig {
         this.vao = gl.createVertexArray();
         this.program = compileGpuProgram(gl,FULLSCREEN_VERTEX_SHADER,QUALITY_FRAGMENT_SHADER);
         this.uniforms = {};
-        for (const name of ["u_depth","u_color","u_size","u_intrinsics","u_mesh_depth_delta","u_mesh_max_edge"])
+        for (const name of ["u_depth","u_color","u_size","u_intrinsics","u_mesh_depth_delta","u_mesh_max_edge","u_relaxed","u_depth_tolerance","u_support"])
           this.uniforms[name] = gl.getUniformLocation(this.program,name);
         // The immutable attachments have identical dimensions at every layer.
         // Validate once, rather than synchronizing the GPU on every capture.
@@ -519,7 +522,13 @@ export class GpuCameraRig {
     }
     this.count = cameras.length;
     this.originalRgb=originalRgb;
-    const delta = Number(settings.mesh_depth_delta || 0.045), edge = Number(settings.mesh_max_edge || 0.08);
+    const relaxed=settings.blendpcr_enabled===true&&settings.blendpcr_relaxed===true;
+    const bounded=(v,min,max,fallback)=>Number.isFinite(Number(v))?Math.max(min,Math.min(max,Number(v))):fallback;
+    const active=settings.blendpcr_enabled===true;
+    const tolerance=active?bounded(settings.blendpcr_depth_tolerance,1,100,1):1;
+    const support=active?bounded(settings.blendpcr_support,0,4,relaxed?1:2):2;
+    const edgeOverride=active?bounded(settings.blendpcr_max_edge,.02,1,Number(settings.mesh_max_edge||.08)):Number(settings.mesh_max_edge||.08);
+    const delta = Number(settings.mesh_depth_delta || 0.045), edge = edgeOverride;
     const metadata = new Float32Array(cameras.length * 52);
     const changed = [];
     cameras.forEach((camera,index) => {
@@ -532,14 +541,14 @@ export class GpuCameraRig {
         metadata.set([e[0],e[3],e[6],e[9],e[1],e[4],e[7],e[10],e[2],e[5],e[8],e[11],
           ...p.intrinsics,...p.size,camera.metadata.color_space==='original_rgb'?1:0,1],index*52+32);
       }
-      const revision = `${camera.uploadRevision ?? camera.lastUpdateMs}:${delta}:${edge}:${camera.intrinsicsArray}`;
+      const revision = `${camera.uploadRevision ?? camera.lastUpdateMs}:${delta}:${edge}:${relaxed}:${tolerance}:${support}:${camera.intrinsicsArray}`;
       const previous = this.uploads[index];
       if (!previous || previous.camera !== camera || previous.revision !== revision) changed.push({camera,index,revision});
     });
     // A continuous resize would otherwise replay old captures every time the
     // sample window expands. Full maps keep active drags at the ordinary cost.
     const regions=originalRgb&&this.visibility.useRegions===true&&!restoreState?.workspaceEditing;
-    const visibilityBounds=regions?modeledWorkspaceBounds(settings,workspaceCropBounds(settings,WORKSPACE_CROP_CONTEXT),WORKSPACE_CROP_CONTEXT):null;
+    const visibilityBounds=regions?modeledWorkspaceBounds(settings,TABLE_CONTEXT_MARGIN):null;
     const baseKey=metadata.toString()+":"+(settings.depth_only_enabled===true?"gray":"color");
     // A crop edit alone must not advance the current/previous observation pair.
     const regionOnly=!changed.length&&this.visibilityBaseKey===baseKey;
@@ -557,7 +566,7 @@ export class GpuCameraRig {
       gl.uniform1i(u.u_depth,0);
       gl.uniform1i(u.u_color,1);
       gl.uniform1f(u.u_mesh_depth_delta,delta);
-      gl.uniform1f(u.u_mesh_max_edge,edge);
+      gl.uniform1f(u.u_mesh_max_edge,edge);gl.uniform1f(u.u_relaxed,relaxed?1:0);gl.uniform1f(u.u_depth_tolerance,tolerance);gl.uniform1f(u.u_support,support);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
       changed.forEach(({camera,index,revision}) => {
         // Upload revision is monotonic even when two packets share a timer tick.
@@ -596,7 +605,7 @@ export class GpuCameraRig {
         gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,13,cameras.length,gl.RGBA,gl.FLOAT,metadata);
         this.metadataSignature = key;
       }
-      this.visibility.update(cameras,this.quality,inverseTransform,originalRgb,now,settings.depth_only_enabled!==true,this.uploads.map(entry=>entry.revision),{regions,bounds:visibilityBounds,delta,edge,regionOnly});
+      this.visibility.update(cameras,this.quality,inverseTransform,originalRgb,now,settings.depth_only_enabled!==true,this.uploads.map(entry=>entry.revision),{regions,bounds:visibilityBounds,delta,edge,relaxed,tolerance,support,regionOnly});
       this.visibilityBaseKey=baseKey;
       this.version++;
     } catch (error) {

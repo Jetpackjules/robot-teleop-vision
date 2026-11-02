@@ -7,8 +7,10 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../web/hybrid_rgbd_renderer.js'), 'utf8')
   .replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, '');
 const context = vm.createContext({window: {}, performance, FUSION_FRAGMENT_SHADER: '', COLOR_PROJECTION_SHADER: '', DEPTH_SHADING_SHADER: '',SCENE_LIGHTING_SHADER:''});
+vm.runInContext('globalThis.RobotPosePreview=(()=>{'+fs.readFileSync(path.join(__dirname,'../web/robot_pose_preview.js'),'utf8').replace(/^export /gm,'')+';return RobotPosePreview;})();',context);
+vm.runInContext('globalThis.MeasuredJointAnimation=(()=>{'+fs.readFileSync(path.join(__dirname,'../web/robot_joint_animation.js'),'utf8').replace(/^export /gm,'')+';return MeasuredJointAnimation;})();',context);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/point_preview_sampling.js'),'utf8').replace(/^export /gm,''),context);
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/workspace_transform.js'), 'utf8').replace(/^export /gm, ''), context);
-vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/workspace_crop.js'), 'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm, ''), context);
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/modeled_workspace.js'), 'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm, ''), context);
 vm.runInContext(source + '\nwindow.navigationProbe = {state, orbitViewer, attachPointerNavigation, identityMatrix, cameraMarkerGeometry, trimIndependentFrameQueue};', context);
 const {state, orbitViewer, attachPointerNavigation, identityMatrix, cameraMarkerGeometry, trimIndependentFrameQueue} = context.window.navigationProbe;
@@ -86,11 +88,7 @@ state.cameras = [{width:2,height:2,metadata:{intrinsics:[1,1,0,0]},depth:new Uin
 check(vm.runInContext('focusGodotHybridRendererAt(100,100)',context), 'a real depth point can be picked');
 check(state.manualPan.every(v=>v===0), 'picking a point clears the previous pan translation');
 check(state.focusWorld.every((v,i)=>Math.abs(v-[0,0,-1][i])<1e-6), 'the picked world point is the actual pivot');
-state.settings.workspace_crop_enabled=true;state.settings.workspace_crop_min=[1,1,-2];state.settings.workspace_crop_max=[2,2,0];
-check(!vm.runInContext('focusGodotHybridRendererAt(100,100)',context),'hidden outside geometry cannot become an orbit pivot');
-state.settings.workspace_crop_min=[-.1,-.1,-1.1];state.settings.workspace_crop_max=[.1,.1,-.9];
-check(vm.runInContext('focusGodotHybridRendererAt(100,100)',context),'native geometry inside the crop remains pickable');
-state.settings.workspace_crop_enabled=false;
+
 vm.runInContext('setGodotHybridNavigationState(savedRuntime)',context);
 state.canvas = {addEventListener: (name, listener) => {listeners[name] = listener;},
   setPointerCapture() {}, hasPointerCapture: () => false, clientHeight: 600};
@@ -207,15 +205,13 @@ check(changedReference[0].sequence === 1,
     fs.readFileSync(path.join(__dirname, '../web/capture_presets.js'), 'utf8')).toString('base64'));
   const policy = vm.createContext({URLSearchParams, document:{getElementById:control,body:{classList:{contains:()=>false}}}, robotModule:{},
     viewSettingsVersion:15,displayModes:['point_cloud','independent_mesh','blendpcr','rgb_camera'],
-    cropViewSettings:()=>({workspace_crop_enabled:false,workspace_crop_show_box:false,
-      workspace_crop_min:[-.6,-.45,-.6],workspace_crop_max:[.6,.45,.6]}),
-    workspaceCropBounds:()=>true,lastValidCrop:{},restoreCropSettings(){},
     modeledViewSettings:()=>({modeled_workspace_enabled:false}),modeledWorkspace:()=>null,lastValidModeled:{},restoreModeledSettings(){},
     defaultDisplayMode:'independent_mesh',displayModeSelect:control('display-mode'),
+    pointPreviewToggle:{value:'0'},triangleFilter:{value:'standard'},
     streamPresetSelect:control('stream-preset'),localSavedViewSettings:()=>null,
     updateHeadTrackingOptions(){},updateViewLabels(){},showHybrid(){},updateStatus(){},
     viewportGeneration:0,retainedNavigation:null,selectedRgbCamera:'',capturePresetControl:null,workspaceStreamControl:{update(){}},remoteUrl:()=> 'wss://example.test/head-tracking',
-    nativeStreamPreset:presets.nativeStreamPreset,
+    nativeStreamPreset:presets.nativeStreamPreset,loadRtcIceServers:async()=>[],
     CapturePresetControl:class {async request(mode){requestedMode=mode;return true;} cancel(){}},
     currentPreset:()=>({label:'Quality'}),startHybridControlPeer:async()=>true,
     hybridCanvas:{},rgbCameraCanvas:{},rgbdDataChannel:{},startupNavigation:null,startupNavigationPending:false,

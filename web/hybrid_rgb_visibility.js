@@ -1,7 +1,7 @@
 // Color visibility from the entire measured rig, independent of depth ownership.
 // Full native triangles are cached in each original RGB camera's optical frame.
 // SPDX-License-Identifier: EUPL-1.2
-import {bindWorkspaceTiles,unbindWorkspaceTiles} from './workspace_crop.js?v=20261021_original_rgb';
+import {bindWorkspaceTiles,unbindWorkspaceTiles} from './table_geometry.js?v=20261021_original_rgb';
 import {visibleNativeTiles,nativeSourceTiles} from './native_geometry.js?v=20261026_native_render';
 import {rgbVisibilityRegion,regionContains,rgbRegionClip} from './rgb_visibility_region.js?v=20261027_visibility_region';
 const VERTEX=`#version 300 es
@@ -87,7 +87,6 @@ function projection(p){
     2*(k[2]+.5)/w-1,2*(k[3]+.5)/h-1,(f+n)/(f-n),1,0,0,-2*f*n/(f-n),0]);
   return multiply(clip,cv);
 }
-export {projection as rgbVisibilityProjection,multiply as rgbVisibilityMultiply};
 export class RgbVisibility {
   constructor(gl,compile,allocate,replayQuality=null){this.gl=gl;this.compile=compile;this.allocate=allocate;this.replayQuality=replayQuality;this.buffers=new Map();this.tileUploads=new Map();this.passes=0;this.tiled=true;this.sharedVertices=true;this.useRegions=true;this.layers=new Int32Array(0);this.sources=[];this.revisions=[];this.layerStates=[];this.snapshotCache=new WeakMap();}
   clear(){const gl=this.gl;if(this.texture)gl.deleteTexture(this.texture);if(this.framebuffer)gl.deleteFramebuffer(this.framebuffer);
@@ -173,7 +172,7 @@ export class RgbVisibility {
           if(narrow){
             let snapshot=this.snapshotCache.get(c);
             if(!snapshot||snapshot.revision!==sourceRevisions[source]){
-              snapshot={revision:sourceRevisions[source],camera:{...c,modelMatrix:new Float32Array(c.modelMatrix),intrinsicsArray:new Float32Array(c.intrinsicsArray)},delta:options.delta,edge:options.edge};this.snapshotCache.set(c,snapshot);
+              snapshot={revision:sourceRevisions[source],camera:{...c,modelMatrix:new Float32Array(c.modelMatrix),intrinsicsArray:new Float32Array(c.intrinsicsArray)},delta:options.delta,edge:options.edge,relaxed:options.relaxed,tolerance:options.tolerance,support:options.support};this.snapshotCache.set(c,snapshot);
             }
             records.push({snapshot,source,matrix});
           }

@@ -522,3 +522,39 @@ experimental. See `visibility-compaction-experiment.md`. No adaptive geometry,
 lossy compression, 3D wire-format change, robot command or shared-service
 restart is part of this region optimization. Evidence is retained outside
 OneDrive in `teleop-compaction-20261027` under the laptop's temporary directory.
+
+### Native RGB snapshot encoding — 2026-10-27
+
+The native encoder can now retain an immutable, owned BGR/BGRA capture snapshot
+and submit its original scanlines directly to libjpeg-turbo. The capture owner
+reuses storage only after encoder references are released; no SDK/UVC frame is
+held between captures. Normal full-resolution RGB-D requests no longer expand
+1080p RGB to RGBA on the Godot service thread. Scaled RGB previews, color gain
+and uncommon/platform-specific paths materialize the same RGBA pixels in the
+encoder worker. Aligned desktop-preview generation remains unchanged.
+
+Production JPEG comparisons passed 80 byte-equality cases, including 1920×1080,
+BGR/BGRA, padded rows and qualities 1/78/95/100, plus 20 ownership checks.
+Production depth-packing and both lossless compression-backend checks passed.
+The native depth grid, depth compression, JPEG settings, intrinsics, calibration
+and browser shaders are unchanged.
+
+In three-camera Quality loopback tests, the initial 30-second baseline delivered
+14.61 / 15.65 / 15.41 fresh FPS (serial suffixes 4294 / 5787 / 6048). The final
+60-second native-snapshot run delivered 15.92 / 15.90 / 15.99 FPS. Mean delivery
+improved about 5%; these sequential windows do not establish a universal gain.
+The same rebuilt library with snapshots disabled delivered 13.73 / 15.10 / 14.31
+FPS in a separate 30-second control. Median encoder submission fell from
+3.24 ms initially (3.92 ms in the control) to 0.16 ms. This removes avoidable
+service-thread work, but does not establish 30 fresh FPS or browser presentation
+at 30 FPS. CPU alignment, encoding and public transport remain limitations.
+
+`ROBOT_TELEOP_NATIVE_SNAPSHOT_ENCODING=0` selects the old handoff for reversible
+comparisons. A managed camera restart can also set
+`ROBOT_TELEOP_CAPTURE_PROFILE=highres30` to start directly in the active Quality
+profile, avoiding an initial fast60 open followed by a profile change. Without
+that variable the existing startup behavior remains available. Camera-only
+restarts must account for the desktop consumer's shared-memory mappings.
+
+Raw timings, camera exposure freshness, the original library and activation
+checkpoints are retained in `.teleop/native-snapshot-20261027` on the lab host.

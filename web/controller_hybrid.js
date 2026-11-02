@@ -1,9 +1,9 @@
     import { robotModuleReady } from "./robot_module_host.js";
-    import { EpisodeRecordingControl } from './episode_recording.js?v=20261025_trials';
-    import { TrialController } from './trial_controller.js?v=20261025_trials';
-    import { CapturePresetControl, WorkspaceStreamControl, nativeStreamPreset } from "./capture_presets.js?v=20261026_transport_recovery";
-    import { workspaceCropBounds } from './workspace_crop.js?v=20261021_original_rgb';
+    import { EpisodeRecordingControl } from './episode_recording.js?v=20261101_result_prompt';
+    import { TrialController } from './trial_controller.js?v=20261101_compact_trials';
+    import { CapturePresetControl, WorkspaceStreamControl, nativeStreamPreset } from "./capture_presets.js?v=20261028_crop_queue";
     import { MODELED_WORKSPACE_DEFAULTS, modeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
+    import { renderCropStatistics } from './crop_statistics.js';
 
     const robotModule = await robotModuleReady;
     const recordingRoot = document.getElementById('episode-recording');
@@ -18,6 +18,27 @@
     const rgbCameraCanvas = document.getElementById("rgb-camera-canvas");
     const displayModeSelect = document.getElementById("display-mode");
     const streamPresetSelect = document.getElementById("stream-preset");
+    const pointPreviewToggle = document.getElementById('point-preview-enabled');
+    const pointPreviewActive=()=>pointPreviewToggle.value==='-1'||Number(pointPreviewToggle.value)>0;
+    const selectedPointBudget=()=>pointPreviewToggle.value==='-1'?0:Number(pointPreviewToggle.value)===40000?40000:20000;
+    const blendControls=document.getElementById('blendpcr-controls');
+    const blendDepth=document.getElementById('blend-depth'),blendSupport=document.getElementById('blend-support'),blendEdge=document.getElementById('blend-edge');
+    let storedBlend={};try{storedBlend=JSON.parse(localStorage.getItem('robotTeleopBlendControls')||'{}')||{};}catch{}
+    const clampBlend=(v,min,max,fallback)=>Number.isFinite(Number(v))?Math.max(min,Math.min(max,Number(v))):fallback;
+    blendDepth.value=clampBlend(storedBlend.depth,1,100,1);
+    blendSupport.value=clampBlend(storedBlend.support,0,4,localStorage.getItem('robotTeleopTriangleFilter')==='relaxed'?1:2);
+    blendEdge.value=clampBlend(storedBlend.edge,20,1000,80);
+    const savedPointDetail=localStorage.getItem('robotTeleopPointDetail');
+    pointPreviewToggle.value=['0','-2','-1','20000','40000'].includes(savedPointDetail)?savedPointDetail:'0';
+    const applyPointOptions=()=>{
+      blendControls.hidden=displayModeSelect.value!=='blendpcr'||pointPreviewActive();
+      document.getElementById('blend-depth-value').textContent=Number(blendDepth.value).toFixed(1)+'Ã—';
+      document.getElementById('blend-support-value').textContent=blendSupport.value;
+      document.getElementById('blend-edge-value').textContent=blendEdge.value+' mm';
+      workspaceStreamControl.update({rgbd_client_id:window.robotTeleopPageId,point_preview_enabled:pointPreviewActive(),point_preview_budget:selectedPointBudget(),display_mode:displayModeSelect.value});
+      window.setGodotHybridViewSettings?.({point_preview_enabled:pointPreviewActive(),mesh_preview_enabled:pointPreviewToggle.value==='-2',point_preview_budget:selectedPointBudget(),blendpcr_depth_tolerance:Number(blendDepth.value),blendpcr_support:Number(blendSupport.value),blendpcr_max_edge:Number(blendEdge.value)/1000});
+    };
+    applyPointOptions();
     const rgbCameraControl = document.getElementById("rgb-camera-control");
     const rgbCameraSelect = document.getElementById("rgb-camera-select");
     let selectedRgbCamera = '';
@@ -38,16 +59,50 @@
     const siteSettingsStatus = document.getElementById("site-settings-status");
     const viewControlIds = [
       "orbit-span", "orbit-response", "orbit-distance", "dolly-gain", "inspect-fov",
-      "head-height", "orbit-elevation", "workspace-surface-offset", "workspace-surface-size",
-      "workspace-surface-opacity",
+      "head-height", "orbit-elevation",
     ];
     // v13 adds GPU mesh views while preserving older saved camera views.
     const viewSettingsVersion = 16;
-    let workspaceCropConfigured = false;
-    let lastValidCrop = {workspace_crop_min: [-0.6, -0.45, -0.6], workspace_crop_max: [0.6, 0.45, 0.6]};
     const modeledFields = ['width','depth','table-height','heading','clearance','height','light-angle','x','y','z'];
     let lastValidModeled = {...MODELED_WORKSPACE_DEFAULTS};
     let modeledWorkspaceConfigured = false;
+
+    let tableDefaultsReady = false;
+    let tableDefaultsTimer = 0;
+    let tableDefaultsSaving = false;
+    let savedTableDefaults = '';
+
+    function tableDefaults(settings) {
+      return Object.fromEntries(Object.keys(MODELED_WORKSPACE_DEFAULTS)
+        .map(key => [key, settings[key] ?? MODELED_WORKSPACE_DEFAULTS[key]]));
+    }
+
+    async function saveTableDefaults() {
+      clearTimeout(tableDefaultsTimer);
+      if (!tableDefaultsReady || tableDefaultsSaving || !modeledWorkspaceConfigured
+        || document.body.classList.contains('workspace-editing')) return;
+      const table = tableDefaults(viewSettingsPayload());
+      const signature = JSON.stringify(table);
+      if (signature === savedTableDefaults) return;
+      tableDefaultsSaving = true;
+      try {
+        const saved = await fetchSiteSettings();
+        const response = await fetch('/api/v1/site-settings', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({...saved, ...table, settings_version: viewSettingsVersion}),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        savedTableDefaults = signature;
+        siteSettingsStatus.textContent = 'Last table settings saved as defaults.';
+      } catch (error) {
+        siteSettingsStatus.textContent = `Table saved in this browser; installation save failed: ${error.message}`;
+      } finally {
+        tableDefaultsSaving = false;
+        if (signature !== JSON.stringify(tableDefaults(viewSettingsPayload()))) {
+          tableDefaultsTimer = setTimeout(saveTableDefaults, 300);
+        }
+      }
+    }
 
     function modeledViewSettings() {
       const value = name => document.getElementById(`modeled-workspace-${name}`).valueAsNumber;
@@ -104,53 +159,6 @@
       return true;
     }
 
-    function cropViewSettings() {
-      const values = bound => ['x', 'y', 'z'].map(axis =>
-        document.getElementById(`workspace-crop-${bound}-${axis}`).valueAsNumber);
-      return {workspace_crop_enabled: document.getElementById('workspace-crop-enabled').checked,
-        workspace_crop_show_box: document.getElementById('workspace-crop-show-box').checked,
-        workspace_crop_min: values('min'), workspace_crop_max: values('max'),
-        workspace_crop_rotation:['x','y','z'].map(axis=>document.getElementById(`workspace-crop-rotation-${axis}`).valueAsNumber)};
-    }
-
-    function restoreCropSettings(saved = {}) {
-      const valid = workspaceCropBounds({...saved, workspace_crop_enabled: true});
-      if (valid) for (const bound of ['min', 'max']) ['x', 'y', 'z'].forEach((axis, i) => {
-        document.getElementById(`workspace-crop-${bound}-${axis}`).value = String(saved[`workspace_crop_${bound}`][i]);
-      });
-      if(valid) ['x','y','z'].forEach((axis,i)=>document.getElementById(`workspace-crop-rotation-${axis}`).value=String((saved.workspace_crop_rotation||[0,0,0])[i]));
-      workspaceCropConfigured = Boolean(valid);
-      document.getElementById('workspace-crop-enabled').checked = Boolean(valid && saved.workspace_crop_enabled);
-      document.getElementById('workspace-crop-show-box').checked = saved.workspace_crop_show_box === true;
-      updateCropControls();
-    }
-
-    function updateCropControls() {
-      const settings = cropViewSettings(), enabled = settings.workspace_crop_enabled;
-      document.getElementById('workspace-crop-options').hidden = !enabled;
-      const valid = workspaceCropBounds({...settings, workspace_crop_enabled: true});
-      for (const bound of ['min', 'max']) ['x', 'y', 'z'].forEach((axis, i) => {
-        const control = document.getElementById(`workspace-crop-${bound}-${axis}`);
-        const lo = settings.workspace_crop_min[i], hi = settings.workspace_crop_max[i];
-        control.setCustomValidity(Number.isFinite(lo) && Number.isFinite(hi) && lo < hi
-          && Math.abs(lo) <= 20 && Math.abs(hi) <= 20 ? '' : 'Enter a minimum below the maximum, between -20 and 20 metres.');
-      });
-      document.getElementById('workspace-crop-status').textContent = enabled
-        ? valid ? 'Native detail retained inside the box. Save site defaults to reuse it in other browsers.'
-          : 'Enter valid bounds; the last valid crop stays active.' : '';
-      return !enabled || Boolean(valid);
-    }
-
-    function centerCropOnOrbit() {
-      const bounds = window.centerGodotHybridWorkspaceCrop?.();
-      if (!bounds) {
-        document.getElementById('workspace-crop-status').textContent = 'Open a connected 3D view to center the box.';
-        return false;
-      }
-      restoreCropSettings({...cropViewSettings(), ...bounds});
-      return true;
-    }
-
     let peer = null;
     let capturePresetControl = null;
     let viewportGeneration = 0;
@@ -198,10 +206,6 @@
     transportLink.textContent = quickTunnel ? "Reload Point Cloud" : (hybridMode ? "Frame Stream Fallback" : "Hybrid RGB-D View");
 
     function viewSettingsPayload(extra = {}) {
-      const crop = cropViewSettings();
-      if (workspaceCropBounds({...crop, workspace_crop_enabled: true})) {
-        lastValidCrop = {workspace_crop_min: crop.workspace_crop_min, workspace_crop_max: crop.workspace_crop_max,workspace_crop_rotation:crop.workspace_crop_rotation};
-      } else Object.assign(crop, lastValidCrop);
       const modeled = modeledViewSettings();
       if (modeledWorkspace({...modeled,modeled_workspace_enabled:true})) lastValidModeled = modeled;
       else Object.assign(modeled,lastValidModeled,{modeled_workspace_enabled:modeled.modeled_workspace_enabled});
@@ -210,7 +214,8 @@
       const orbitDistance = Number(document.getElementById("orbit-distance").value);
       const payload = {
         rgbd_client_id:window.robotTeleopPageId,
-        workspace_stream_crop_enabled:!document.body.classList.contains('workspace-editing'),
+        point_preview_enabled:pointPreviewActive(),point_preview_budget:selectedPointBudget(),
+      workspace_stream_crop_enabled:!document.body.classList.contains('workspace-editing'),
         // Mouse navigation and click-to-focus are always available. Head
         // tracking layers onto this orbit rather than selecting another mode.
         inspect_enabled: true,
@@ -234,12 +239,6 @@
         full_rgb_frame_updates_enabled: true,
         camera_locations_enabled: document.getElementById("camera-locations-enabled").checked,
         head_tracking_enabled: document.getElementById("head-tracking-enabled").checked,
-        workspace_surface_enabled: document.getElementById("workspace-surface-enabled").checked,
-        workspace_boundary_enabled: document.getElementById("workspace-boundary-enabled").checked,
-        workspace_surface_offset: Number(document.getElementById("workspace-surface-offset").value),
-        workspace_surface_size: Number(document.getElementById("workspace-surface-size").value),
-        workspace_surface_opacity: Number(document.getElementById("workspace-surface-opacity").value),
-        ...crop,
         ...modeled,
         display_mode: displayModeSelect.value,
         stream_preset: streamPresetSelect.value,
@@ -257,9 +256,6 @@
       document.getElementById("inspect-fov-value").textContent = `${document.getElementById("inspect-fov").value} deg`;
       document.getElementById("head-height-value").textContent = `${Number(document.getElementById("head-height").value).toFixed(2)} m`;
       document.getElementById("orbit-elevation-value").textContent = `${Number(document.getElementById("orbit-elevation").value).toFixed(0)} deg`;
-      document.getElementById("workspace-surface-offset-value").textContent = `${Math.round(Number(document.getElementById("workspace-surface-offset").value) * 1000)} mm`;
-      document.getElementById("workspace-surface-size-value").textContent = `${Number(document.getElementById("workspace-surface-size").value).toFixed(2)} m`;
-      document.getElementById("workspace-surface-opacity-value").textContent = `${Math.round(Number(document.getElementById("workspace-surface-opacity").value) * 100)}%`;
     }
 
     function updateHeadTrackingOptions() {
@@ -270,12 +266,13 @@
     }
 
     function sendViewSettings(extra = {}) {
-      if (!updateCropControls()) return false;
       updateViewLabels();
       const payload = viewSettingsPayload(extra);
       workspaceStreamControl.update(payload);
       // Calibration actions and uploaded files are transient, never startup defaults.
       localStorage.setItem("robotTeleopViewSettings", JSON.stringify(viewSettingsPayload()));
+      clearTimeout(tableDefaultsTimer);
+      tableDefaultsTimer = setTimeout(saveTableDefaults, 300);
       window.setGodotHybridViewSettings && window.setGodotHybridViewSettings(payload);
       const remotePayload = {...payload};
       // The dedicated socket owns page crop state, avoiding reordering with
@@ -284,18 +281,24 @@
       return window.sendGodotViewSettings && window.sendGodotViewSettings(remotePayload);
     }
 
+    function activeViewSettings(settings) {
+      return settings && Object.fromEntries(Object.entries(settings).filter(([key]) =>
+        !/^(workspace_crop_|workspace_surface_|workspace_boundary_)/.test(key)));
+    }
+
     function localSavedViewSettings() {
       try {
-        return JSON.parse(localStorage.getItem("robotTeleopViewSettings") || localStorage.getItem("digitalWindowViewSettings") || "null");
+        return activeViewSettings(JSON.parse(localStorage.getItem("robotTeleopViewSettings") || localStorage.getItem("digitalWindowViewSettings") || "null"));
       } catch (_) {
         return null;
       }
     }
 
-    function restoreViewSettings(savedInput = null) {
+    function restoreViewSettings(savedInput = null, {preferLastTable = true} = {}) {
       const localSaved = localSavedViewSettings();
       const saved = savedInput && Object.keys(savedInput).length ? { ...localSaved, ...savedInput } : localSaved;
-      if (!saved || ![6, 7, 8, 9, 10, 11, 12, 13, 14, 15, viewSettingsVersion].includes(saved.settings_version)) {
+      // Installation defaults may use a newer version or a legacy timestamp.
+      if (!saved || !Number.isFinite(saved.settings_version) || saved.settings_version < 6) {
         updateHeadTrackingOptions();
         return updateViewLabels();
       }
@@ -311,13 +314,9 @@
       document.getElementById("orbit-elevation").value = String(saved.orbit_pitch_offset ?? 0);
       document.getElementById("head-tracking-enabled").checked = saved.head_tracking_enabled !== false;
       document.getElementById("camera-locations-enabled").checked = saved.camera_locations_enabled === true;
-      document.getElementById("workspace-surface-enabled").checked = saved.workspace_surface_enabled === true;
-      document.getElementById("workspace-boundary-enabled").checked = saved.workspace_boundary_enabled === true;
-      document.getElementById("workspace-surface-offset").value = String(saved.workspace_surface_offset ?? 0);
-      document.getElementById("workspace-surface-size").value = String(saved.workspace_surface_size ?? 1.2);
-      document.getElementById("workspace-surface-opacity").value = String(saved.workspace_surface_opacity ?? 0.18);
-      restoreCropSettings(saved);
-      if ('modeled_workspace_enabled' in saved || 'modeled_workspace_center' in saved) restoreModeledSettings(saved);
+      const table = preferLastTable && Array.isArray(localSaved?.modeled_workspace_center)
+        ? {...saved, ...tableDefaults(localSaved)} : saved;
+      if ('modeled_workspace_enabled' in table || 'modeled_workspace_center' in table) restoreModeledSettings(table);
       displayModeSelect.value = displayModes.includes(saved.display_mode) ? saved.display_mode : defaultDisplayMode;
       streamPresetSelect.value = saved.stream_preset === "latency" ? "latency" : "quality";
       startupNavigation = saved.default_navigation || null;
@@ -330,14 +329,14 @@
     async function fetchSiteSettings() {
       const response = await fetch("/api/v1/site-settings", { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return await response.json();
+      return activeViewSettings(await response.json());
     }
 
     async function loadSiteSettings({ apply = false } = {}) {
       try {
         const saved = await fetchSiteSettings();
         if (apply) {
-          restoreViewSettings(saved);
+          restoreViewSettings(saved, {preferLastTable: false});
           sendViewSettings();
           if (startupNavigationPending && window.setGodotHybridNavigationState) {
             window.setGodotHybridNavigationState(startupNavigation);
@@ -509,6 +508,7 @@
     function applyDisplayMode() {
       if (activeViewportMode !== "hybrid") return;
       const showRgb = displayModeSelect.value === "rgb_camera";
+      pointPreviewToggle.disabled=showRgb;applyPointOptions();
       hybridCanvas.hidden = showRgb;
       rgbCameraCanvas.hidden = !showRgb;
       viewportVideo.hidden = true;
@@ -531,7 +531,7 @@
         if (signature !== rgbCameraListSignature) {
           rgbCameraListSignature = signature;
           rgbCameraSelect.replaceChildren(...cameras.map(camera => new Option(
-            `${camera.name || camera.model || 'Camera'} · ${camera.id.slice(-4)}`, camera.id)));
+            `${camera.name || camera.model || 'Camera'} Â· ${camera.id.slice(-4)}`, camera.id)));
           if (!cameras.some(camera => camera.id === selectedRgbCamera)) selectedRgbCamera = cameras[0]?.id || '';
           rgbCameraSelect.value = selectedRgbCamera;
           window.setGodotHybridRgbCamera?.(selectedRgbCamera);
@@ -539,7 +539,7 @@
         rgbCameraListUpdated = Date.now();
         const levelsDisplay = document.getElementById('camera-image-levels');
         if (levelsDisplay) levelsDisplay.textContent = cameras.map(camera => {
-          const name = `${camera.name || camera.model || 'Camera'} · ${camera.id.slice(-4)}`;
+          const name = `${camera.name || camera.model || 'Camera'} Â· ${camera.id.slice(-4)}`;
           const levels = camera.image_levels;
           if (!levels || !Number.isFinite(levels.mean_luma)) return `${name}: image levels unavailable`;
           const age = Date.now() - levels.sample_unix_ms;
@@ -713,9 +713,17 @@
       }
     }
 
-    async function startHybridControlPeer(rgbdPreset = null) {
+    async function loadRtcIceServers(){
+      try{
+        const response=await fetch('/api/v1/ice-servers',{cache:'no-store',signal:AbortSignal.timeout(3000)});
+        if(response.ok){const data=await response.json();if(Array.isArray(data.iceServers)&&data.iceServers.length)return data.iceServers;}
+      }catch(_){}
+      return [{urls:'stun:stun.l.google.com:19302'}];
+    }
+
+    async function startHybridControlPeer(rgbdPreset = null, iceServers = [{ urls: "stun:stun.l.google.com:19302" }]) {
       if (!window.RTCPeerConnection) return false;
-      const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+      const pc = new RTCPeerConnection({ iceServers,iceTransportPolicy:new URLSearchParams(location.search).get('rtc_relay')==='1'?'relay':'all' });
       peer = pc;
       configureControlDataChannels(pc);
       if (rgbdPreset) {
@@ -723,6 +731,7 @@
           ordered: false,
           maxRetransmits: 0,
         });
+        rgbdDataChannel.nativePointStream=Boolean(rgbdPreset.pointBudget);
       }
       pc.onconnectionstatechange = () => {
         window.refreshGodotRemoteHeadTrackingTransport && window.refreshGodotRemoteHeadTrackingTransport();
@@ -738,7 +747,8 @@
           body: JSON.stringify({
             sdp: pc.localDescription.sdp,
             type: pc.localDescription.type,
-            source: rgbdPreset ? "rgbd_data" : "control_only",
+            source: rgbdPreset ? (rgbdPreset.pointBudget?"native_points":"rgbd_data") : "control_only",
+            pointBudget: rgbdPreset?.pointBudget||0,
             client:window.robotTeleopPageId,
             width: rgbdPreset ? rgbdPreset.width : undefined,
             fps: rgbdPreset ? rgbdPreset.fps : undefined,
@@ -795,8 +805,13 @@
       // RGB-D over the public latest-frame endpoint. This lets a local browser
       // exercise the same Cloudflare path used when direct peer connectivity
       // is unavailable on a remote network.
+      const rtcIceServers=await loadRtcIceServers();
+      if(generation!==viewportGeneration)return;
       const peerPromise = startHybridControlPeer(
-        forceRelayedRgbd ? null : hybridPreset
+        forceRelayedRgbd||['-2','-1'].includes(pointPreviewToggle.value) ? null : pointPreviewActive()
+          ? (new URLSearchParams(location.search).get('native_point_webrtc')==='1'
+            ? {...hybridPreset,pointBudget:selectedPointBudget()}:null)
+          : hybridPreset,rtcIceServers
       );
       await Promise.all([
         window.startGodotHybridRenderer({
@@ -835,18 +850,14 @@
       return selectedViewportMode() === "hybrid" ? startHybridViewport() : startWebRtcViewport();
     }
 
-    function recenterWhenTrackingStarts() {
+    function frameWhenTrackingStarts() {
       const generation = ++startupRecenterGeneration;
       const deadline = performance.now() + 5000;
       const attempt = () => {
         if (generation !== startupRecenterGeneration) return;
-        const latest = window.godotWebcamTrackerLatest || {};
-        if (latest.active === true) {
-          window.recenterGodotWebcamTracker && window.recenterGodotWebcamTracker();
-          window.recenterGodotHybridRenderer && window.recenterGodotHybridRenderer();
-          window.setTimeout(() => sendViewSettings({ recenter: true }), 120);
-          return;
-        }
+        // Scene framing is available even before a face is detected.
+        // Never turn the current head pose into the reference zero.
+        if (window.frameGodotHeadTrackingView?.()) return;
         if (performance.now() < deadline) window.setTimeout(attempt, 100);
       };
       attempt();
@@ -958,7 +969,7 @@
       if (!enabled) {
         startupRecenterGeneration += 1;
         window.stopGodotWebcamTracker && window.stopGodotWebcamTracker();
-        trackingState = "off · mouse navigation enabled";
+        trackingState = "off Â· mouse navigation enabled";
         updateStatus();
         return true;
       }
@@ -971,7 +982,7 @@
         xScale: -1,
         zScale: 1,
         maxZM: 5,
-        smoothing: 0.35,
+        smoothing: 0, // Absolute head position maps to a deterministic view.
         preview: false,
         debug: false,
         showVideo: false,
@@ -986,7 +997,7 @@
       });
       trackingState = "tracking";
       window.setTimeout(() => sendViewSettings(), 150);
-      recenterWhenTrackingStarts();
+      frameWhenTrackingStarts();
       updateStatus();
     }
 
@@ -1159,13 +1170,13 @@
       context.fillText("0", 3, height - 3);
 
       if (hybrid.stalled) {
-        rgbdLatencyValue.textContent = `STALLED · packet ${Math.round(hybrid.packetAgeMs)}ms`;
+        rgbdLatencyValue.textContent = `STALLED Â· packet ${Math.round(hybrid.packetAgeMs)}ms`;
         rgbdLatencyValue.style.color = "#ff6b6b";
       } else if (hybrid.captureAgeMs != null && hybrid.captureAgeMs >= 0) {
-        rgbdLatencyValue.textContent = `${Math.round(hybrid.captureAgeMs)}ms · packet ${Math.round(Math.max(0, hybrid.packetAgeMs || 0))}ms`;
+        rgbdLatencyValue.textContent = `${Math.round(hybrid.captureAgeMs)}ms Â· packet ${Math.round(Math.max(0, hybrid.packetAgeMs || 0))}ms`;
         rgbdLatencyValue.style.color = "";
       } else {
-        rgbdLatencyValue.textContent = "—";
+        rgbdLatencyValue.textContent = "â€”";
         rgbdLatencyValue.style.color = "";
       }
     }
@@ -1177,15 +1188,9 @@
       const av1Connected = av1Socket && av1Socket.readyState === WebSocket.OPEN && viewportVideo.currentTime > 0;
       const hybrid = window.getGodotHybridRendererStatus ? window.getGodotHybridRendererStatus() : {};
       const connected = activeViewportMode === "hybrid" ? hybrid.connected === true : (peer && peer.connectionState === "connected") || av1Connected;
-      const geometry = hybrid.workspaceCrop;
-      const modeled=modeledWorkspace(modeledViewSettings()),crop=cropViewSettings().workspace_crop_enabled;
-      if ((modeled||crop) && geometry?.sourceCells > 0) {
-        const percent = Math.min(100,100 * geometry.submittedCells / geometry.sourceCells);
-        const network=hybrid.streamCrop;
-        document.getElementById(modeled?'modeled-workspace-status':'workspace-crop-status').textContent = network?.applied&&network.input_bytes>0
-          ? `Server stream: ${(100*network.output_bytes/network.input_bytes).toFixed(1)}% of original RGB-D bytes. Geometry submitted: ${percent.toFixed(1)}% of source cells.`
-          : `Geometry submitted: ${percent.toFixed(1)}% of source cells. Server crop not active; local cropping still applies.`;
-      }
+      if(modeledWorkspace(modeledViewSettings()))renderCropStatistics(document.getElementById('modeled-workspace-status'),hybrid,{
+        is3D:activeViewportMode==='hybrid'&&displayModeSelect.value!=='rgb_camera'&&hybrid.displaySource!=='original_rgb',
+      });
       const hybridStalled = activeViewportMode === "hybrid" && hybrid.stalled === true;
       const headTrackingEnabled = document.getElementById("head-tracking-enabled").checked;
       statusDot.className = "dot " + (hybridStalled ? "bad" : connected ? "ok" : "bad");
@@ -1219,20 +1224,26 @@
             `Worker ${Number(hybrid.workerMs || 0).toFixed(1)}ms | return scheduling ${Number(hybrid.dispatchMs || 0).toFixed(1)}ms`,
           ]),
           `Decode+upload ${hybrid.decodeMs ? `${hybrid.decodeMs.toFixed(1)}ms` : "--"} | render ${hybrid.renderFps ? `${Math.round(hybrid.renderFps)} fps` : "--"}`,
+          ...(hybrid.pointPreview ? [`${hybrid.pointPreview.budget===0?'All native points':`${hybrid.pointPreview.budget/1000}k preview`} ${Object.entries(hybrid.pointPreview.counts).map(([id,n])=>`${id.slice(-4)}:${n.toLocaleString()}`).join(' | ')} submitted points | selection/upload ${hybrid.pointPreview.selectionMs.toFixed(1)}ms`] : []),
+          ...(hybrid.robotModelsExpected ? [`Arm overlay ${hybrid.robotModelsLoaded || 0}/${hybrid.robotModelsExpected} model links${hybrid.robotLoadError ? ` | ${hybrid.robotLoadError}` : ''}`] : []),
           ...(hybrid.decodeErrors ? [`Decode errors ${hybrid.decodeErrors} | ${hybrid.status}`] : []),
           `Camera FPS  ${Object.entries(hybrid.cameraFps || {}).map(([id, rate]) => `${id.slice(-4)}:${Math.round(rate)}`).join("  ") || "--"}`,
           `Camera frames ${Object.entries(hybrid.cameraFrames || {}).map(([id, count]) => `${id.slice(-4)}:${count}`).join("  ") || "--"}`,
           ...(hybrid.workspaceCrop?.enabled && hybrid.workspaceCrop.sourceCells ? [
-            `Workspace crop: ${Math.round(100 * (1 - hybrid.workspaceCrop.submittedCells / hybrid.workspaceCrop.sourceCells))}% of source geometry skipped; native detail inside`,
+            `Table region: ${Math.round(100 * (1 - hybrid.workspaceCrop.submittedCells / hybrid.workspaceCrop.sourceCells))}% of source geometry skipped; ${hybrid.meshPreview?'compressed':'native'} detail inside`,
           ] : []),
         ] : []),
       ].join("\n");
+      const available=hybrid.pointCounts||{};document.getElementById('point-counts').textContent=`Full available after crop: ${Number(hybrid.pointCountTotal||0).toLocaleString()} points total (${Object.entries(available).map(([id,n])=>`${id.slice(-4)}: ${n.toLocaleString()}`).join(' | ')}). ${hybrid.pointPreview?`Selected: ${hybrid.pointPreview.total.toLocaleString()} points total.`:hybrid.meshPreview?'Balanced mesh selected: one-quarter of the depth grid, compressed RGB.':'Full detail selected; mesh filtering can reject further samples.'}`;
       statusLines.textContent = [
         `Stream ${hybrid.displaySource === "original_rgb" ? `${currentPreset().label} RGB` : streamMode} | ${size} | ${fps} | ${bitrate}`,
         ...(activeViewportMode === 'hybrid' && hybrid.displaySource !== 'original_rgb' && hasStreamMeasurement
           ? [`Viewer drawing ${Math.round(hybrid.renderFps || 0)} fps`] : []),
         !connected ? streamState : "",
         activeViewportMode === "hybrid" ? hybrid.renderWarning : "",
+        activeViewportMode === "hybrid" ? hybrid.robotModelWarning : "",
+        ...(activeViewportMode==='hybrid'&&hybrid.pointPreview ? [`${hybrid.pointPreview.budget===0?'All native points':`${hybrid.pointPreview.budget/1000}k sparse preview`} (${hybrid.pointPreview.transport||'local'}) | ${hybrid.pointPreview.total.toLocaleString()} points total`] : []),
+        ...(activeViewportMode==='hybrid'&&hybrid.meshPreview ? ['Balanced mesh preview | Â¼ depth samples | compressed RGB'] : []),
         headTrackingEnabled
           ? `Tracking ${latest.status || trackingState} | ${remote.connected ? "bridge on" : "bridge ..."}`
           : "Tracking off | mouse orbit/pan/zoom enabled",
@@ -1243,6 +1254,8 @@
     }
 
     streamPresetSelect.addEventListener("change", () => {
+      // Stop cached velocity before potentially blocking graphics work.
+      window.so101ArmController?.clearKeyboardMotion?.();
       sendViewSettings();
       if (userStarted) startSelectedViewport().catch(error => {
         streamState = error?.message || "Camera mode change failed";
@@ -1252,10 +1265,23 @@
       updateStatus();
     });
     displayModeSelect.addEventListener("change", () => {
+      // Stop cached velocity before potentially blocking graphics work.
+      window.so101ArmController?.clearKeyboardMotion?.();
       applyDisplayMode();
       sendViewSettings();
       displayModeSelect.blur();
     });
+    // This experiment is local to the current tab; never save it as site,
+    // recording, camera or robot defaults, and do not reconnect the stream.
+    pointPreviewToggle.addEventListener('change',()=>{
+      localStorage.setItem('robotTeleopPointDetail',pointPreviewToggle.value);applyPointOptions();
+      if(new URLSearchParams(location.search).get('native_point_webrtc')==='1'&&activeViewportMode==='hybrid'
+          &&Boolean(rgbdDataChannel?.nativePointStream)!==(pointPreviewActive()))startHybridViewport();
+      pointPreviewToggle.blur();updateStatus();
+    });
+    const saveBlendControls=()=>{localStorage.setItem('robotTeleopBlendControls',JSON.stringify({depth:Number(blendDepth.value),support:Number(blendSupport.value),edge:Number(blendEdge.value)}));applyPointOptions();};
+    for(const slider of [blendDepth,blendSupport,blendEdge])slider.addEventListener('input',saveBlendControls);
+    document.getElementById('blend-reset').addEventListener('click',()=>{blendDepth.value=1;blendSupport.value=2;blendEdge.value=80;saveBlendControls();});
     rgbCameraSelect.addEventListener('change', () => {
       selectedRgbCamera = rgbCameraSelect.value;
       window.setGodotHybridRgbCamera?.(selectedRgbCamera);
@@ -1274,9 +1300,7 @@
     }
     for (const id of [
       "dolly-enabled", "white-background-enabled", "depth-only-enabled",
-      "workspace-surface-enabled", "workspace-boundary-enabled",
       "camera-locations-enabled",
-      "workspace-crop-show-box",
       "scene-lighting-enabled", "scene-shadows-enabled",
     ]) {
       const control = document.getElementById(id);
@@ -1285,15 +1309,6 @@
         control.blur();
       });
     }
-    document.getElementById('workspace-crop-enabled').addEventListener('change', event => {
-      if (event.currentTarget.checked && !workspaceCropConfigured && !centerCropOnOrbit()) {
-        event.currentTarget.checked = false;
-        updateCropControls();
-        document.getElementById('workspace-crop-status').textContent = 'Open a connected 3D view to center the box.';
-        return;
-      }
-      sendViewSettings();
-    });
     document.getElementById('modeled-workspace-enabled').addEventListener('change', event => {
       if (event.currentTarget.checked && !modeledWorkspaceConfigured && !alignModeledTable()) {
         event.currentTarget.checked = false;
@@ -1309,14 +1324,6 @@
       const input = document.getElementById(`modeled-workspace-${name}`);
       input.addEventListener(name === 'light-angle' ? 'input' : 'change', () => {
         if (updateModeledControls()) {modeledWorkspaceConfigured=true;sendViewSettings();}
-      });
-    }
-    document.getElementById('workspace-crop-center').addEventListener('click', () => {
-      if (centerCropOnOrbit()) sendViewSettings();
-    });
-    for (const bound of ['min', 'max']) for (const axis of ['x', 'y', 'z']) {
-      document.getElementById(`workspace-crop-${bound}-${axis}`).addEventListener('change', () => {
-        if (updateCropControls()) {workspaceCropConfigured = true; sendViewSettings();}
       });
     }
     document.getElementById("head-tracking-enabled").addEventListener("change", async (event) => {
@@ -1339,7 +1346,6 @@
     const flushWorkspaceEdit=()=>{clearTimeout(workspaceEditTimer);workspaceEditTimer=0;sendViewSettings();};
     window.addEventListener('workspace-edit-change',event=>{
       const {settings,phase}=event.detail;
-      if('workspace_crop_min' in settings)restoreCropSettings({...cropViewSettings(),...settings});
       if('modeled_workspace_center' in settings)restoreModeledSettings({...modeledViewSettings(),...settings});
       if(phase==='preview') {if(!workspaceEditTimer)workspaceEditTimer=setTimeout(flushWorkspaceEdit,100);}
       else flushWorkspaceEdit();
@@ -1349,12 +1355,11 @@
       sendViewSettings();
       document.getElementById('open-advanced').focus({preventScroll:true});
     });
-    for(const target of ['crop','table'])document.getElementById(target==='table'?'modeled-workspace-edit':'workspace-crop-edit').addEventListener('click',()=>{
+    document.getElementById('modeled-workspace-edit').addEventListener('click',()=>{
       if(displayModeSelect.value==='rgb_camera') {displayModeSelect.value='independent_mesh';applyDisplayMode();sendViewSettings();}
-      if(window.editGodotWorkspace?.(target)) {advancedSetup.hidden=true;document.body.classList.add('workspace-editing');sendViewSettings();}
-      else document.getElementById(target==='table'?'modeled-workspace-status':'workspace-crop-status').textContent='Open a connected 3D view to edit this workspace.';
+      if(window.editGodotWorkspace?.('table')) {advancedSetup.hidden=true;document.body.classList.add('workspace-editing');sendViewSettings();}
+      else document.getElementById('modeled-workspace-status').textContent='Open a connected 3D view to edit this workspace.';
     });
-    for(const axis of ['x','y','z'])document.getElementById(`workspace-crop-rotation-${axis}`).addEventListener('change',()=>{if(updateCropControls())sendViewSettings();});
     function handleDepthOnlyShortcut(event) {
       if (event.key !== "Backspace" || event.defaultPrevented || event.isComposing
         || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
@@ -1393,7 +1398,10 @@
     }, 500);
 
     const installationSettings = await loadSiteSettings();
+    savedTableDefaults = JSON.stringify(tableDefaults(installationSettings));
     restoreViewSettings(installationSettings);
+    tableDefaultsReady = true;
+    tableDefaultsTimer = setTimeout(saveTableDefaults, 300);
     robotModule.bind?.({ sendViewSettings, updateStatus });
     robotModule.start?.({ sendViewSettings, updateStatus });
     const trialController = new TrialController({recording: episodeRecording,
@@ -1421,4 +1429,4 @@
       },
     });
     await trialController.initialize();
-    startController();
+    applyPointOptions();startController();

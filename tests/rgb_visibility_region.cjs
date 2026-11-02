@@ -2,8 +2,8 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const url=source=>'data:text/javascript;base64,'+Buffer.from(source).toString('base64');
 (async()=>{
  const web=path.join(__dirname,'../web'),transform=url(fs.readFileSync(path.join(web,'workspace_transform.js'),'utf8'));
- const crop=url(fs.readFileSync(path.join(web,'workspace_crop.js'),'utf8').replace(/'\.\/workspace_transform\.js[^']*'/,JSON.stringify(transform)));
- const source=fs.readFileSync(path.join(web,'rgb_visibility_region.js'),'utf8').replace(/'\.\/workspace_crop\.js[^']*'/,JSON.stringify(crop));
+ const crop=url(fs.readFileSync(path.join(web,'table_geometry.js'),'utf8').replace(/'\.\/workspace_transform\.js[^']*'/,JSON.stringify(transform)));
+ const source=fs.readFileSync(path.join(web,'rgb_visibility_region.js'),'utf8').replace(/'\.\/table_geometry\.js[^']*'/,JSON.stringify(crop));
  const {rgbVisibilityRegion,regionContains,rgbRegionClip}=await import(url(source));
  const width=640,height=480,matrix=new Float32Array([1.25,0,0,0,0,1.65,0,0,0,0,1,1,0,0,-.02,0]);
  const full={x:0,y:0,width,height},project=(m,p)=>[0,1,2,3].map(r=>m[r]*p[0]+m[r+4]*p[1]+m[r+8]*p[2]+m[r+12]);

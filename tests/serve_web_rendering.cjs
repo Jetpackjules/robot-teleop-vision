@@ -4,7 +4,7 @@ const {readFileSync,existsSync} = require('node:fs');
 const {resolve} = require('node:path');
 const vm=require('node:vm');
 const root = resolve(__dirname,'..');
-const modules = new Set(['hybrid_rgbd_renderer.js','hybrid_camera_fusion.js','hybrid_camera_quality.js','hybrid_blendpcr.js','camera_rgb_viewer.js','hybrid_color_projection.js','depth_shading.js','workspace_crop.js','modeled_workspace.js','rgbd_decode_pool.js','rgbd_decode_worker.js']);
+const modules = new Set(['hybrid_rgbd_renderer.js','hybrid_camera_fusion.js','hybrid_camera_quality.js','hybrid_blendpcr.js','camera_rgb_viewer.js','hybrid_color_projection.js','depth_shading.js','table_geometry.js','modeled_workspace.js','rgbd_decode_pool.js','rgbd_decode_worker.js']);
 function createTestServer() {
   return http.createServer((req,res) => {
     const path = new URL(req.url,'http://localhost').pathname;
@@ -32,10 +32,12 @@ function createTestServer() {
         '\nexport {state,uploadCamera,identityMatrix,inverseRigidTransform};');
     } else if(path==='/controller.html') {
       res.setHeader('Content-Type','text/html');res.end(readFileSync(resolve(root,'web/controller.html')));
+    } else if(path==='/controller_ui.css') {
+      res.setHeader('Content-Type','text/css');res.end(readFileSync(resolve(root,'web/controller_ui.css')));
     } else if(modules.has(path.slice(1))||(/^\/[\w-]+\.js$/.test(path)&&existsSync(resolve(root,'web',path.slice(1))))) {
       res.setHeader('Content-Type','text/javascript');
       let source=readFileSync(resolve(root,'web',path.slice(1)),'utf8');
-      if(path==='/hybrid_rgbd_renderer.js')source+='\nwindow.probe={state,createProgram,findUniforms,render,uploadCamera,decodeCamera,identityMatrix,inverseRigidTransform,perspectiveMatrix,multiplyMatrix,deleteCameraTextures,loadRobotMeshes,findRobotUniforms,ROBOT_VERTEX_SHADER,ROBOT_FRAGMENT_SHADER,parsePacket};';
+      if(path==='/hybrid_rgbd_renderer.js')source+='\nwindow.probe={state,createProgram,findUniforms,render,uploadCamera,decodeCamera,identityMatrix,inverseRigidTransform,perspectiveMatrix,multiplyMatrix,deleteCameraTextures,loadRobotMeshes,findRobotUniforms,ROBOT_VERTEX_SHADER,ROBOT_FRAGMENT_SHADER,parsePacket,robotMaskCapsules,drawRobotOverlay,drawRobotShadow,decodeNewestPackets,handleRgbdPacket};';
       res.end(source);
     } else if(path==='/web_rendering_fixture.js') {
       res.setHeader('Content-Type','text/javascript');res.end(readFileSync(resolve(__dirname,'web_rendering_fixture.js')));

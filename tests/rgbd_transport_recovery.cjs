@@ -17,10 +17,12 @@ const context = vm.createContext({
   document:{hidden:false}, WebSocket:Socket, setTimeout:setTimer, clearTimeout:clearTimer,
   performance:{now:()=>100}, URLSearchParams, FUSION_FRAGMENT_SHADER:'', COLOR_PROJECTION_SHADER:'',
   DEPTH_SHADING_SHADER:'', SCENE_LIGHTING_SHADER:'', MODELED_WORKSPACE_DEFAULTS:{},
-  WORKSPACE_CROP_SHADER:'', MODELED_WORKSPACE_SHADER:'',
+  MODELED_WORKSPACE_SHADER:'',
 });
 const source = fs.readFileSync(path.join(__dirname,'../web/hybrid_rgbd_renderer.js'),'utf8')
   .replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
+vm.runInContext('globalThis.RobotPosePreview=(()=>{'+fs.readFileSync(path.join(__dirname,'../web/robot_pose_preview.js'),'utf8').replace(/^export /gm,'')+';return RobotPosePreview;})();',context);
+vm.runInContext('globalThis.MeasuredJointAnimation=(()=>{'+fs.readFileSync(path.join(__dirname,'../web/robot_joint_animation.js'),'utf8').replace(/^export /gm,'')+';return MeasuredJointAnimation;})();',context);
 vm.runInContext(source+'\nwindow.probe={state,startRgbdWebSocket,closeRgbdSocket,gpuFrameReady,markGpuFrame};',context);
 const {state,startRgbdWebSocket,closeRgbdSocket} = context.window.probe;
 let httpStarts=0;

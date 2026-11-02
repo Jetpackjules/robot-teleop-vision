@@ -25,7 +25,7 @@ func _process(_delta: float) -> void:
 	var configuration := _resolve_configuration()
 	if configuration == _resolved_configuration: return
 	if is_instance_valid(_calibrator) and str(_calibrator.call("get_calibration_status").get("state", "")) in ["capturing", "solving"]: return
-	if is_instance_valid(_overlay) and bool(_overlay.get("manual_claw_calibration_enabled")): return
+	if is_instance_valid(_overlay) and (bool(_overlay.get("manual_claw_calibration_enabled")) or bool(_overlay.get("manual_base_calibration_enabled"))): return
 	for node in [_calibrator, _overlay]:
 		if is_instance_valid(node):
 			node.get_parent().remove_child(node)
@@ -107,6 +107,8 @@ func apply_remote_settings(payload: Dictionary) -> void:
 		return
 	if payload.has("robot_overlay_enabled"):
 		_overlay.call("set_overlay_enabled", bool(payload.robot_overlay_enabled))
+	if payload.has("robot_overlay_style"):
+		_overlay.call("set_overlay_style", str(payload.robot_overlay_style))
 	if payload.has("robot_overlay_mask_scanned_robot"):
 		_overlay.call(
 			"set_mask_scanned_robot",
@@ -208,7 +210,7 @@ func start_full_calibration(from_editor: bool = false) -> void:
 	if is_instance_valid(_overlay) and (bool(_overlay.get("manual_claw_calibration_enabled")) or bool(_overlay.get("manual_base_calibration_enabled"))):
 		return
 	if _hardware_enabled and is_instance_valid(_calibrator):
-		_calibrator.call("start_automated_arm_calibration", from_editor)
+		_calibrator.call("start_arm_registration", from_editor)
 
 
 func refine_calibration(from_editor: bool = false) -> void:

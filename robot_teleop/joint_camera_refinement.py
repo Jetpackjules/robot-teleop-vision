@@ -1,6 +1,7 @@
 """Joint RGB-D camera registration, with a fixed reference and fresh-frame validation.
 
-Consumes the existing capture stream; never opens a camera or writes calibration.
+Consumes the capture stream; an explicit saved policy permits bounded capture
+recovery after calibration. This worker never writes camera poses.
 Godot owns the transaction and commits the selected world transforms atomically.
 """
 
@@ -369,6 +370,10 @@ def run(request, folder, progress=lambda text: None, frames=None, matcher=None):
     ):
         raise ValueError("Invalid camera serial")
     progress("Capturing two fresh RGB-D datasets")
+    if frames is None:
+        from robot_teleop.camera_capture_recovery import prepare_calibration_capture
+
+        prepare_calibration_capture(request, folder, progress)
     frames = frames if frames is not None else capture_sets(request["source_url"], ids, folder)
     cameras = [
         [

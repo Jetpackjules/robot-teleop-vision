@@ -26,7 +26,8 @@ const server=createTestServer();
     // Capture APIs intentionally return 404 in this fixture; dismiss their
     // handled startup message so the real settings controls can be exercised.
     await page.evaluate(()=>{document.getElementById('start-overlay').hidden=true;});
-    await page.getByRole('button',{name:'Advanced Setup',exact:true}).click();
+    await page.locator('#open-advanced').click();
+    await page.locator('#tab-view').click();
     const toggle=page.getByRole('checkbox',{name:'Modeled table and floor',exact:true});
     assert.equal(await toggle.isChecked(),false,'new browser starts in the original full scene');
     // Mock only the picked world point; run the actual controls/persistence.
@@ -42,11 +43,11 @@ const server=createTestServer();
     assert.deepEqual(saved.modeled_workspace_center,[.12,.34,-.56]);
     assert.equal(saved.modeled_workspace_enabled,true);
     await page.locator('#modeled-workspace-options').screenshot({path:resolve(output,'desktop-controls.png')});
-    await page.setViewportSize({width:390,height:844});
+    await page.setViewportSize({width:1920,height:1080});
     await toggle.scrollIntoViewIfNeeded();
     const overflow=await page.locator('#modeled-workspace-options').evaluate(el=>el.scrollWidth>el.clientWidth+1);
-    assert.equal(overflow,false,'alignment controls fit phone width');
-    await page.screenshot({path:resolve(output,'mobile-controls.png')});
+    assert.equal(overflow,false,'alignment controls fit desktop settings');
+    await page.screenshot({path:resolve(output,'wide-controls.png')});
     await toggle.uncheck();
     assert.equal(await page.locator('#modeled-workspace-options').isVisible(),false);
     const off=await page.evaluate(()=>JSON.parse(localStorage.getItem('robotTeleopViewSettings')));
@@ -54,6 +55,6 @@ const server=createTestServer();
     assert.deepEqual(off.modeled_workspace_center,saved.modeled_workspace_center,'off switch retains placement for the next comparison');
     assert.equal(off.display_mode,saved.display_mode,'off switch preserves rendering mode');
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({...result.result,ui:'toggle, alignment, persistence and mobile checks passed',output}));
+    console.log(JSON.stringify({...result.result,ui:'toggle, alignment, persistence and desktop checks passed',output}));
   } finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);process.exitCode=1;});

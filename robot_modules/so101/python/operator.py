@@ -314,6 +314,10 @@ class So101Operator(GenericRobotOperator):
                     if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or abs(value) > limit:
                         raise ValueError(f"base adjustment {name} must be finite and within +/-{limit}")
                     result[name] = float(value)
+                height = action.get("offset_y", 0.0)
+                if isinstance(height, bool) or not isinstance(height, (float, int)) or not math.isfinite(height) or abs(height) > 2.0:
+                    raise ValueError("base adjustment offset_y must be finite and within +/-2.0")
+                result["offset_y"] = float(height)
         if operation == "import":
             file = action.get("file")
             if not isinstance(file, dict):

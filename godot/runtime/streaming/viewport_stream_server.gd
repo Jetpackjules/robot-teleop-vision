@@ -14,7 +14,9 @@ extends Node
 @export_storage var target_fps: float = 30.0
 @export_storage var max_width: int = 720
 @export_storage var jpeg_quality: int = 42
-@export_storage var max_clients: int = 4
+# Three recording feeds coexist with live viewers, RGB-D and short camera-list
+# requests. Four total slots rejected the third recording feed at startup.
+@export_storage var max_clients: int = 12
 @export_storage var hybrid_target_fps: float = 60.0
 @export_storage var hybrid_context_fps: float = 30.0
 @export_storage var hybrid_detail_fps: float = 60.0

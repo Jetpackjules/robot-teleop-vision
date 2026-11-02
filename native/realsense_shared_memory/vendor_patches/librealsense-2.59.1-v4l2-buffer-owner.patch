@@ -1,0 +1,18 @@
+diff --git a/src/linux/backend-v4l2.cpp b/src/linux/backend-v4l2.cpp
+index c1ade96..f8b706e 100644
+--- a/src/linux/backend-v4l2.cpp
++++ b/src/linux/backend-v4l2.cpp
+@@ -1922,8 +1922,12 @@ namespace librealsense
+         }
+ 
+ 
+-        void v4l_uvc_device::upload_video_and_metadata_from_syncer(buffers_mgr& buf_mgr)
++        void v4l_uvc_device::upload_video_and_metadata_from_syncer(buffers_mgr& /*poll_buffers*/)
+         {
++            // A synchronized frame can come from an earlier poll iteration.
++            // Its release callback must own those exact buffers, independently
++            // of the current poll's queued or rejected video/metadata buffers.
++            buffers_mgr buf_mgr(_use_memory_map);
+             // uploading to user's callback
+             std::shared_ptr<v4l2_buffer> video_v4l2_buffer;
+             std::shared_ptr<v4l2_buffer> md_v4l2_buffer;

@@ -2,7 +2,8 @@
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 (async()=>{
  const transform='data:text/javascript;base64,'+Buffer.from(fs.readFileSync(path.join(__dirname,'../web/workspace_transform.js'),'utf8')).toString('base64');
- const source=fs.readFileSync(path.join(__dirname,'../web/workspace_editor.js'),'utf8').replace(/'\.\/workspace_transform.js[^']*'/,JSON.stringify(transform));
+ const coverage='data:text/javascript;base64,'+Buffer.from(fs.readFileSync(path.join(__dirname,'../web/workspace_coverage.js'),'utf8')).toString('base64');
+ const source=fs.readFileSync(path.join(__dirname,'../web/workspace_editor.js'),'utf8').replace(/'\.\/workspace_transform.js[^']*'/,JSON.stringify(transform)).replace(/'\.\/workspace_coverage.js[^']*'/,JSON.stringify(coverage));
  const {WorkspaceEditor}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
  let mode=null,finished=null;
  const editor={active:true,setMode:v=>mode=v,finish:v=>finished=v};

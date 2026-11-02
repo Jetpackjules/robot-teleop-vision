@@ -115,13 +115,19 @@ Primary buttons use the pale action fill with dark text. Secondary buttons use t
 
 Settings tabs are flat text controls with an accent underline on the selected tab. Fields have dark fills, light borders, clear labels, and an accent caret. Disclosures expose secondary controls on demand. The connection disclosure retains its short text label alongside a semantic dot.
 
-Show the preconfigured study task in the top bar with Start trial as the initial action. Task configuration belongs in Settings → Session; participants do not type the task between trials. The current block-and-cup instruction is a placeholder for the final study task.
+Show the preconfigured task, timer and action in a compact top bar bounded at 560px, with an approximately 70px normal height. Keep session-name editing in Settings and its timestamp in recording metadata; do not display a session-name row in the HUD. Setup connects and enables the physical leader arm without recording. Then show Start first trial. After the final saved and reviewed trial, show Restart session. Task instructions, scoring and the shared 75-second default belong in Settings → Session and are saved on the host. Count/pass-fail entry belongs in a small post-trial dialog, never in the HUD.
 
-During a trial, group the secondary Pause/Resume action immediately before Finish. Keep its navy fill subordinate to the pale primary action. Paused appears beside the frozen timer; no explanatory subtitle is needed. Keep Finish available while paused and hide Pause once saving begins.
+During a trial, Done is the HUD action. Keep Pause/Resume in the recording settings. Paused appears beside the frozen timer; no explanatory subtitle is needed. Done remains available while paused. After the host saves, show the count or pass/fail prompt with Save & Next, or Save & Finish for the final trial. Closing it leaves Review result in the HUD; reviewing and saving never starts a new recording automatically.
 
-Trial progress is a visible 6px cyan horizontal bar showing elapsed time toward the configured target. Keep a compact 1/3 trial counter beside the condition. Timer figures are yellow and tabular, turning red when the time target has been reached; recording still ends manually. Keep the task distinct through modest size and weight rather than large display typography. Live and loading states use actual application status; demonstrations must identify synthetic inputs.
+Trial progress is a visible 4px cyan horizontal bar showing elapsed time toward the configured target. Keep a compact current/total trial counter beside the condition. Timer figures are yellow and tabular, turning red at the host-enforced time limit; the recording then saves and the arm holds. Next remains a facilitator action. Keep the task distinct through modest size and weight rather than large display typography. Live and loading states use actual application status; demonstrations must identify synthetic inputs.
 
 ## Do's and Don'ts
+
+The modeled 3D environment follows the approved Cool slate concept: a matte
+slate-blue tabletop, darker blue-gray legs, a light blue-gray floor, and a pale
+mist-gray background. Brighter neutral ambient light and a restrained cool fill
+make the dark graphite arm readable without changing its material. Keep these
+scene colors separate from the dark UI palette and from measured camera RGB.
 
 - **Do** preserve the approved neutral palette and semantic status roles.
 - **Do** keep controls consistent, plainly labelled, and keyboard accessible.

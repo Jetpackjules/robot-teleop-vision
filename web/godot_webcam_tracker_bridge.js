@@ -47,6 +47,7 @@ const state = {
   preview: null,
   overlay: null,
   neutral: null,
+  observationMissing: true,
   smoothed: { x: 0, y: 0, z: 0 },
   options: {
     neutralZCm: 35,
@@ -255,14 +256,16 @@ function emit(active, pose, status) {
   const now = Date.now();
   const debugInfo = buildDebugInfo(now);
   if (!active || !pose) {
+    state.observationMissing = true;
     window.godotWebcamTrackerLatest = {
       type: "tracking",
       source: `browser_${state.backend}`,
       active: false,
       status,
-      x: 0,
-      y: 0,
-      z: 0,
+      neutral_z_cm: state.options.neutralZCm,
+      x: state.smoothed.x,
+      y: state.smoothed.y,
+      z: state.smoothed.z,
       debug: debugInfo,
       sent_unix_ms: now,
     };
@@ -272,7 +275,7 @@ function emit(active, pose, status) {
   state.lastPose = pose;
   state.lastPoseMs = now;
   if (!state.neutral) {
-    state.neutral = pose;
+    state.neutral = {x: 0, y: 0, z: state.options.neutralZCm};
   }
   const raw = {
     x: (pose.x - state.neutral.x) * state.options.xScale,
@@ -280,7 +283,8 @@ function emit(active, pose, status) {
     z: ((pose.z - state.neutral.z) * state.options.zScale) + state.options.neutralZCm,
   };
   raw.z = Math.min(raw.z, Math.max(state.options.neutralZCm, state.options.maxZM * 100.0));
-  const a = Math.min(Math.max(state.options.smoothing, 0), 0.98);
+  const a = state.observationMissing ? 0 : Math.min(Math.max(state.options.smoothing, 0), 0.98);
+  state.observationMissing = false;
   state.smoothed.x = state.smoothed.x * a + raw.x * (1 - a);
   state.smoothed.y = state.smoothed.y * a + raw.y * (1 - a);
   state.smoothed.z = state.smoothed.z * a + raw.z * (1 - a);
@@ -289,6 +293,7 @@ function emit(active, pose, status) {
     source: `browser_${state.backend}`,
     active: true,
     status,
+    neutral_z_cm: state.options.neutralZCm,
     x: state.smoothed.x,
     y: state.smoothed.y,
     z: state.smoothed.z,
@@ -467,12 +472,9 @@ function sendRemoteTrackingPacket(packet) {
 }
 
 function emitHeldOrSearching(status) {
-  const now = Date.now();
-  if (state.lastPose && now - state.lastPoseMs <= state.options.holdLastPoseMs) {
-    emit(true, state.lastPose, `${status} holding`);
-  } else {
-    emit(false, null, `${status} searching`);
-  }
+  // Detection loss is real, but the viewer retains the last valid position.
+  // Do not feed cached poses back as new observations or reset their age.
+  emit(false, null, `${status} searching`);
 }
 
 async function initLandmarker() {
@@ -828,6 +830,7 @@ window.startGodotWebcamTracker = async function startGodotWebcamTracker(options 
   if (state.running) return true;
   state.lastPose = null;
   state.lastPoseMs = 0;
+  state.observationMissing = true;
   state.mediapipeNoFaceSinceMs = 0;
   state.mediapipeRecoveryAttempted = false;
   state.mediapipeLastDetectMs = 0;
@@ -962,7 +965,8 @@ window.getGodotRemoteHeadTrackingStatus = function getGodotRemoteHeadTrackingSta
 };
 
 window.recenterGodotWebcamTracker = function recenterGodotWebcamTracker() {
-  state.neutral = null;
+  state.neutral = {x: 0, y: 0, z: state.options.neutralZCm};
+  state.observationMissing = true;
   state.smoothed = { x: 0, y: 0, z: state.options.neutralZCm };
 };
 
