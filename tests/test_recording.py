@@ -757,3 +757,33 @@ def test_result_prompt_review_is_saved_before_next_and_owned_by_recorder(tmp_pat
         recorder.resume_result_review('refreshed-page', 'review')
         recorder.set_outcome('refreshed-page', 'success')
         assert recorder.last_saved['outcome'] == 'success'
+
+
+@pytest.mark.parametrize('condition', ['fixed_rgb', 'mouse_3d', 'head_3d'])
+@pytest.mark.parametrize('timeout', [False, True])
+def test_practice_records_observations_actions_but_never_pass_fail(tmp_path, condition, timeout):
+    trial = {'session_id': 'practice', 'index': 1, 'total': 15, 'condition': condition,
+             'display_mode': 'rgb_camera' if condition == 'fixed_rgb' else 'point_cloud',
+             'task_id': 'single_block', 'time_limit_seconds': 1 if timeout else 60,
+             'phase': 'practice', 'success_metric': 'practice', 'outcome_rule': 'manual', 'result_prompt': False}
+    with recorder_at(tmp_path) as (recorder, _, _):
+        recorder.start('page-a', 'Free exploration', trial=trial)
+        wait_for(lambda: recorder.samples >= 3)
+        if not timeout:
+            recorder.stop('page-a', outcome='success')  # A stale result selector cannot score practice.
+        wait_for(lambda: recorder.state == 'idle', timeout=4)
+        saved = recorder.last_saved
+        assert saved['status'] == 'complete' and saved['outcome'] == 'unrated'
+        assert saved['timed_out'] is timeout and saved['trial'] == trial
+        path = tmp_path/saved['episode']
+        manifest = json.loads((path/'episode.json').read_text())
+        assert manifest['trial']['phase'] == 'practice' and manifest['outcome'] == 'unrated'
+        inspected, _ = inspect_episode(path)
+        assert inspected['trial'] == trial
+        with np.load(path/'episode.npz', allow_pickle=False) as data:
+            assert len(data['action']) == len(data['obs.state']) == saved['frames']
+            assert all((path/str(name)).is_file() for name in data['obs.images.camera_1'])
+        with pytest.raises(RecordingError):
+            recorder.set_outcome('page-a', 'success')
+        with pytest.raises(RecordingError):
+            recorder.set_block_count('page-a', 1)

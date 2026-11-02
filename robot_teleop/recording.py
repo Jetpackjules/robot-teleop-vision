@@ -278,7 +278,7 @@ class HostEpisodeRecorder:
             saved = self.last_saved
             if (self.state != 'idle' or not saved or saved.get('status') != 'complete'
                     or self.last_saved_owner != client
-                    or ((saved.get('trial') or {}).get('success_metric') == 'block_count'
+                    or ((saved.get('trial') or {}).get('success_metric') in ('block_count', 'practice')
                         or ((saved.get('trial') or {}).get('success_metric') is None
                             and (saved.get('trial') or {}).get('task_id') == 'count_blocks'))):
                 raise RecordingError('Only the owner of this completed trial can save its result.')
@@ -343,7 +343,7 @@ class HostEpisodeRecorder:
             raise RecordingError('Select distinct cameras.')
         if trial is not None:
             fields = {'session_id', 'index', 'total', 'condition', 'display_mode'}
-            if not isinstance(trial, dict) or not fields <= set(trial) or set(trial)-fields-{'task_id', 'time_limit_seconds', 'session_name', 'success_metric', 'outcome_rule', 'result_prompt'}:
+            if not isinstance(trial, dict) or not fields <= set(trial) or set(trial)-fields-{'task_id', 'time_limit_seconds', 'session_name', 'success_metric', 'outcome_rule', 'result_prompt', 'phase'}:
                 raise RecordingError('Invalid trial metadata fields.')
             session = trial['session_id']
             if not isinstance(session, str) or not 1 <= len(session) <= 80 or any(
@@ -366,12 +366,19 @@ class HostEpisodeRecorder:
                 raise RecordingError('Trial time limit must be between 1 and 7200 seconds.')
             if trial.get('task_id', 'custom') not in ('single_block', 'count_blocks', 'custom'):
                 raise RecordingError('Invalid trial task.')
-            if trial.get('success_metric', 'pass_fail') not in ('pass_fail', 'block_count'):
+            if trial.get('success_metric', 'pass_fail') not in ('pass_fail', 'block_count', 'practice'):
                 raise RecordingError('Invalid trial success metric.')
             if trial.get('outcome_rule', 'manual') not in ('manual', 'finish_before_limit'):
                 raise RecordingError('Invalid trial outcome rule.')
             if 'result_prompt' in trial and type(trial['result_prompt']) is not bool:
                 raise RecordingError('Invalid trial result prompt.')
+            if 'phase' in trial and trial['phase'] not in ('practice', 'measured'):
+                raise RecordingError('Invalid trial phase.')
+            if trial.get('phase') == 'practice' or trial.get('success_metric') == 'practice':
+                if (trial.get('phase') != 'practice' or trial.get('success_metric') != 'practice'
+                        or trial.get('task_id') != 'single_block' or trial.get('outcome_rule') != 'manual'
+                        or trial.get('result_prompt', False)):
+                    raise RecordingError('Practice must be explicitly unscored, without a pass/fail prompt.')
             if trial.get('outcome_rule') == 'finish_before_limit' and (
                     trial.get('success_metric', 'pass_fail') != 'pass_fail' or 'time_limit_seconds' not in trial):
                 raise RecordingError('Automatic pass/fail requires a time limit and pass/fail scoring.')
@@ -407,7 +414,7 @@ class HostEpisodeRecorder:
             if self.state not in ('preparing', 'recording', 'paused', 'saving'):
                 return self.status(client)
             if self.state != 'saving':
-                self.discard, self.outcome = discard, outcome
+                self.discard, self.outcome = discard, 'unrated' if (self.trial or {}).get('phase') == 'practice' else outcome
                 self.stopped_ns = time.monotonic_ns()
                 self._close_pause(self.stopped_ns)
                 self.state, self.message = 'saving', 'Finishing the episode on the host…'

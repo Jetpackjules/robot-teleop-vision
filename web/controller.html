@@ -320,7 +320,7 @@
 
     <section id="trial-hud" aria-label="Current trial">
       <div class="trial-copy">
-        <h1 id="trial-task">Move the object from one plate to the other</h1>
+        <h1 id="trial-task">Free exploration: practise the view and arm controls</h1>
         <div class="trial-meta"><span id="trial-position" aria-label="Trial 1 of 3">1/3</span><span class="meta-divider" aria-hidden="true">/</span><span id="trial-condition">Fixed cameras</span></div>
       </div>
       <div class="trial-clock"><output id="trial-timer" aria-label="Trial elapsed time" aria-live="off">00:00</output><span id="trial-recording-state" hidden></span></div>
@@ -399,12 +399,12 @@
             <label id="trial-session-edit">Session name<input id="trial-session-input" type="text" maxlength="120" required value="Session" placeholder="e.g., Participant 01" autocomplete="off" title="The date and time are saved with the recording."></label>
             <label class="toggle-row"><span>Guided trials</span><input id="guided-trials" type="checkbox" checked></label>
             <p class="helper-text">One view at a time. The facilitator starts and saves each trial, then clicks Next.</p>
-            <label>Session activities<select id="trial-task-kind"><option value="all" selected>All configured activities</option><option value="single_block">Task 1 only · Pick and place</option><option value="count_blocks">Task 2 only · Objects in cup</option><option id="trial-task3-option" value="custom">Task 3 only · Balance test</option></select></label>
-            <label class="toggle-row"><span>Randomize activity order</span><input id="random-activity-order" type="checkbox" checked></label>
+            <label>Session activities<select id="trial-task-kind"><option value="all" selected>Practice, then Tasks 2 and 3</option><option value="single_block">Task 1 only · Practice</option><option value="count_blocks">Task 2 only · Objects in cup</option><option id="trial-task3-option" value="custom">Task 3 only · Balance test</option></select></label>
+            <label class="toggle-row"><span>Randomize Tasks 2 and 3 order (practice stays first)</span><input id="random-activity-order" type="checkbox" checked></label>
             <details class="advanced-disclosure"><summary>Task instructions and scoring</summary><div class="disclosure-body">
               <p class="helper-text">Pass/fail: Finish before the time limit passes; timeout fails. An early unsuccessful attempt can be marked Failure in recording controls. Count scoring requires a saved count before Next.</p>
-              <label>Task 1 instruction<input id="trial-task1-instruction" type="text" required maxlength="500"></label>
-              <label>Task 1 scoring<select id="trial-task1-metric"><option value="pass_fail">Pass / fail</option><option value="block_count">Count in cup</option></select></label>
+              <label>Task 1 practice instruction<input id="trial-task1-instruction" type="text" required maxlength="500"></label>
+              <label>Task 1 scoring<select id="trial-task1-metric"><option value="practice">Practice · unscored</option></select></label>
               <label>Task 2 instruction<input id="trial-task2-instruction" type="text" required maxlength="500"></label>
               <label>Task 2 scoring<select id="trial-task2-metric"><option value="block_count">Count in cup</option><option value="pass_fail">Pass / fail</option></select></label>
               <label>Task 3 instruction<input id="trial-task3-instruction" type="text" required maxlength="500"></label>
@@ -419,10 +419,11 @@
               <option value="head_3d,fixed_rgb,mouse_3d">Head tracking → Fixed cameras → Mouse 3D</option>
               <option value="head_3d,mouse_3d,fixed_rgb">Head tracking → Mouse 3D → Fixed cameras</option>
             </select></label>
-            <label>Trial time limit (seconds)<input id="trial-duration" type="number" required min="30" max="7200" step="1" value="75" title="Applies to new sessions. Recording stops and the arm holds when the active-time limit is reached."></label>
+            <label>Practice per mode (seconds)<input id="trial-practice-duration" type="number" required min="30" max="7200" step="1" value="60"></label>
+            <label>Measured trial time limit (seconds)<input id="trial-duration" type="number" required min="30" max="7200" step="1" value="75" title="Applies to new sessions. Recording stops and the arm holds when the active-time limit is reached."></label>
             <button id="trial-save-protocol" type="button">Save task settings on host</button>
             <p id="trial-protocol-status" class="helper-text" role="status">Loading task settings…</p>
-            <p id="trial-plan-help" class="helper-text">Each activity has two rounds of all three views (six trials). Use the same 3D renderer for both 3D conditions; choose it in View. Turn off guided trials for free configuration.</p>
+            <p id="trial-plan-help" class="helper-text">Task 1 is unscored practice in each view, always first. Tasks 2 and 3 each have two rounds of all three views (12 measured trials total). Practice recordings carry a practice label. Use the same 3D renderer for both 3D conditions; choose it in View.</p>
             <button id="restore-trial-view" type="button">Restore current trial view</button>
             <button id="new-trial-session" type="button">New session</button>
             <p id="trial-session-status" class="helper-text" role="status"></p>

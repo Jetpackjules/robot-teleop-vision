@@ -1,7 +1,12 @@
 const CONDITIONS = Object.freeze({fixed_rgb: 'Fixed cameras', mouse_3d: 'Mouse 3D', head_3d: 'Head tracking'});
 const DEFAULT_ORDER = Object.keys(CONDITIONS);
-const DEFAULT_TASK = 'Move the object from one plate to the other';
-const TASKS = {single_block: {instruction: DEFAULT_TASK, seconds: 75, success_metric: 'pass_fail'},
+const DEFAULT_TASK = 'Free exploration: practise the view and arm controls';
+const PRACTICE_HINTS = {
+  fixed_rgb: 'Try switching cameras while moving the arm. Use the camera arrows or left/right arrow keys.',
+  mouse_3d: 'Try orbiting, panning and zooming to inspect objects from different angles while moving the arm.',
+  head_3d: 'Move your head side to side and up/down to look around objects while moving the arm.',
+};
+const TASKS = {single_block: {instruction: DEFAULT_TASK, seconds: 75, success_metric: 'practice'},
   count_blocks: {instruction: 'Put as many blocks in the cup as possible', seconds: 75, success_metric: 'block_count'},
   custom: {instruction: 'Balance test: move the objects into the cup', seconds: 75, success_metric: 'pass_fail'}};
 const PROTOCOL_KEY = 'robotTeleopTrialProtocol.v1';
@@ -14,7 +19,7 @@ function configuredTasks() {
       const value = saved?.[id];
       if (value && typeof value.instruction === 'string' && value.instruction.trim() && value.instruction.length <= 500
           && Number.isInteger(value.seconds) && value.seconds >= 30 && value.seconds <= 7200
-          && ['pass_fail', 'block_count'].includes(value.success_metric)) tasks[id] = {...value};
+          && (id === 'single_block' ? value.success_metric === 'practice' : ['pass_fail', 'block_count'].includes(value.success_metric))) tasks[id] = {...value};
     }
   } catch { /* Browser storage is optional. */ }
   return tasks;
@@ -39,15 +44,21 @@ export function namedSession(base, date = new Date()) {
 export function makeTrialPlan(state, random = Math.random) {
   let activities = state.activitySelection === 'all' ? ['single_block', 'count_blocks', 'custom'] : [state.activitySelection];
   activities = activities.filter(id => state.tasks[id]?.instruction?.trim());
+  const practice = activities.includes('single_block');
+  activities = activities.filter(id => id !== 'single_block');
   if (state.randomActivities !== false) {
     for (let i = activities.length - 1; i > 0; i--) { const j = Math.floor(random() * (i + 1)); [activities[i], activities[j]] = [activities[j], activities[i]]; }
   }
-  return activities.flatMap(task_id => Array.from({length: 2}, () =>
-    (state.randomize !== false ? randomizedConditions(random) : state.order).map(condition => ({
+  const order = () => state.randomize !== false ? randomizedConditions(random) : state.order;
+  const training = practice ? order().map(condition => ({task_id: 'single_block', task: state.tasks.single_block.instruction,
+    time_limit_seconds: state.practiceSeconds || 60, condition, phase: 'practice', success_metric: 'practice', outcome_rule: 'manual'})) : [];
+  return training.concat(activities.flatMap(task_id => Array.from({length: 2}, () =>
+    order().map(condition => ({
       task_id, task: state.tasks[task_id].instruction, time_limit_seconds: state.tasks[task_id].seconds, condition,
       success_metric: state.tasks[task_id].success_metric || defaultMetric(task_id),
+      phase: 'measured',
       outcome_rule: (state.tasks[task_id].success_metric || defaultMetric(task_id)) === 'pass_fail' ? 'finish_before_limit' : 'manual',
-    }))).flat());
+    }))).flat()));
 }
 
 /** A small facilitator layer over the existing view and host-recording controls. */
@@ -76,7 +87,7 @@ export class TrialController {
     if (this.state.version !== 3 || !this.state.tasks) {
       this.state = {...this.state, version: 3, id: this.sessionId(), index: 0, completed: [], finished: false,
         randomize: true, randomActivities: true, activitySelection: 'all', plan: [],
-        tasks: configuredTasks(), protocolVersion: 1};
+        tasks: configuredTasks(), protocolVersion: 2, practiceSeconds: 60};
     }
     // Upgrade future-session configuration only. A restored plan keeps its
     // original instructions, limits, scoring and progress until New session.
@@ -90,6 +101,12 @@ export class TrialController {
       }
       this.state.protocolVersion = 1;
     }
+    if (this.state.protocolVersion < 2) {
+      this.state.tasks.single_block = {...TASKS.single_block};
+      this.state.protocolVersion = 2;
+    }
+    this.state.practiceSeconds ??= 60;
+    byId('trial-practice-duration').value = String(this.state.practiceSeconds);
     if (!this.state.plan?.length) this.state.plan = makeTrialPlan(this.state);
     this.state.prepared ??= this.state.index > 0 || this.state.completed.length > 0 || this.state.finished === true;
     this.state.nameBase = typeof this.state.nameBase === 'string' ? this.state.nameBase.slice(0, 120) : 'Session';
@@ -119,7 +136,8 @@ export class TrialController {
         task_id: this.state.taskId, time_limit_seconds: this.state.timeTargetSeconds,
         success_metric: this.state.plan[this.state.index].success_metric || defaultMetric(this.state.taskId),
         outcome_rule: this.state.plan[this.state.index].outcome_rule ||
-          (defaultMetric(this.state.taskId) === 'pass_fail' ? 'finish_before_limit' : 'manual'), result_prompt: true};
+          (defaultMetric(this.state.taskId) === 'pass_fail' ? 'finish_before_limit' : 'manual'), result_prompt: !this.practice,
+        ...(this.state.plan[this.state.index].phase ? {phase: this.state.plan[this.state.index].phase} : {})};
     };
     recording.root.addEventListener('recordingchange', () => this.render());
     recording.task.addEventListener('input', () => {
@@ -173,6 +191,12 @@ export class TrialController {
       this.protocolMessage = 'Changed in this browser. Save task settings on host to keep them.';
       this.newSession();
     });
+    byId('trial-practice-duration').addEventListener('change', event => {
+      if (!event.target.reportValidity()) { event.target.value = String(this.state.practiceSeconds); return; }
+      this.state.practiceSeconds = event.target.valueAsNumber;
+      this.protocolMessage = 'Changed in this browser. Save task settings on host to keep them.';
+      this.newSession();
+    });
     byId('new-trial-session').addEventListener('click', () => this.newSession());
     byId('restore-trial-view').addEventListener('click', () => this.apply());
     this.display.addEventListener('change', () => {
@@ -199,6 +223,7 @@ export class TrialController {
   }
 
   get condition() { return this.state.plan[this.state.index].condition; }
+  get practice() { return this.state.plan[this.state.index].phase === 'practice'; }
   syncTask() {
     const entry = this.state.plan[this.state.index];
     this.state.taskId = entry.task_id; this.state.task = entry.task; this.state.timeTargetSeconds = entry.time_limit_seconds;
@@ -241,6 +266,8 @@ export class TrialController {
         const response = await fetch('/api/v1/trial-protocol', {cache: 'no-store'});
         if (!response.ok) throw new Error('Host task settings are unavailable.');
         const value = await response.json();
+        this.state.practiceSeconds = value.practice_time_limit_seconds || 60;
+        byId('trial-practice-duration').value = String(this.state.practiceSeconds);
         for (const [id, task] of Object.entries(value.tasks))
           this.state.tasks[id] = {...task, seconds: value.time_limit_seconds};
         if (!this.restoredPlan) this.state.plan = makeTrialPlan(this.state);
@@ -251,7 +278,7 @@ export class TrialController {
     if (this.state.guided && !this.active) await this.apply();
   }
   async saveProtocol() {
-    if (this.active || this.protocolSaving || !this.duration.reportValidity()) return;
+    if (this.active || this.protocolSaving || !this.duration.reportValidity() || !byId('trial-practice-duration').reportValidity()) return;
     const tasks = {};
     for (const [id, number] of [['single_block', 1], ['count_blocks', 2], ['custom', 3]]) {
       const input = byId(`trial-task${number}-instruction`);
@@ -261,21 +288,24 @@ export class TrialController {
     this.protocolSaving = true; this.render();
     try {
       const response = await fetch('/api/v1/trial-protocol', {method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({version: 1, time_limit_seconds: this.duration.valueAsNumber, tasks})});
+        body: JSON.stringify({version: 2, time_limit_seconds: this.duration.valueAsNumber,
+          practice_time_limit_seconds: byId('trial-practice-duration').valueAsNumber, tasks})});
       const value = await response.json();
       if (!response.ok) throw new Error(value.error || 'Task settings could not be saved.');
+      this.state.practiceSeconds = value.practice_time_limit_seconds;
       for (const [id, task] of Object.entries(value.tasks)) this.state.tasks[id] = {...task, seconds: value.time_limit_seconds};
       this.persist(); this.protocolMessage = 'Saved on host. New sessions use these settings after browser or host restarts.';
     } catch (error) { this.protocolMessage = error.message; }
     finally { this.protocolSaving = false; this.render(); }
   }
   resultNeedsReview(saved = this.saved) {
+    if (saved?.trial?.phase === 'practice') return false;
     return !!saved && (saved.trial?.result_prompt ? saved.result_reviewed !== true
       : (saved.trial?.success_metric || defaultMetric(saved.trial?.task_id)) === 'block_count' && saved.block_count == null);
   }
   openResult() {
     const saved = this.saved;
-    if (!saved) return;
+    if (!saved || saved.trial?.phase === 'practice') return;
     const dialog = byId('trial-result-dialog');
     if (this.resultEpisode !== saved.episode) {
       byId('trial-outcome').value = ['success', 'failure'].includes(saved.outcome) ? saved.outcome : saved.timed_out ? 'failure' : 'success';
@@ -290,7 +320,7 @@ export class TrialController {
   }
   async saveResult() {
     const saved = this.saved;
-    if (!saved || this.recording.busy) return;
+    if (!saved || saved.trial?.phase === 'practice' || this.recording.busy) return;
     const counting = (saved.trial?.success_metric || defaultMetric(saved.trial?.task_id)) === 'block_count';
     const input = byId('trial-block-count');
     if (counting && !input.reportValidity()) return;
@@ -445,8 +475,11 @@ export class TrialController {
     const sessionInput = byId('trial-session-input');
     byId('trial-session-edit').hidden = !guided || (this.state.prepared && !done);
     sessionInput.disabled = locked;
-    byId('trial-position').textContent = guided ? `${this.state.index + 1}/${this.state.plan.length}` : 'Free session';
-    byId('trial-position').setAttribute('aria-label', guided ? `Trial ${this.state.index + 1} of ${this.state.plan.length}` : 'Free session');
+    const practiceCount = this.state.plan.filter(entry => entry.phase === 'practice').length;
+    const position = this.practice ? `Practice ${this.state.index + 1}/${practiceCount}`
+      : `${this.state.index + 1 - practiceCount}/${this.state.plan.length - practiceCount}`;
+    byId('trial-position').textContent = guided ? position : 'Free session';
+    byId('trial-position').setAttribute('aria-label', guided ? position : 'Free session');
     byId('trial-condition').textContent = guided ? CONDITIONS[this.condition]
       : this.display.value === 'rgb_camera' ? CONDITIONS.fixed_rgb : this.head.checked ? CONDITIONS.head_3d : CONDITIONS.mouse_3d;
     const task = recorder.task.value.trim() || 'Task not configured';
@@ -460,7 +493,7 @@ export class TrialController {
     byId('trial-recording-state').hidden = ['Ready', 'Recording', 'Saved', 'Complete'].includes(label);
     action.textContent = this.pending ? 'Switching…' : this.setupPending ? 'Setting up…' : recorder.busy ? 'Please wait…' : active ? status.state === 'saving' ? 'Saving…' : 'Done'
       : done ? 'Restart session' : saved ? needsReview ? 'Review result' : this.state.index === this.state.plan.length - 1 ? 'End session' : 'Next trial'
-        : needsSetup ? 'Set up session' : guided ? this.state.index === 0 ? 'Start first trial' : 'Start trial' : 'Start recording';
+        : needsSetup ? 'Set up session' : guided ? this.practice ? 'Start practice' : this.state.index === 0 ? 'Start first trial' : 'Start trial' : 'Start recording';
     action.disabled = this.pending || !!this.pausePending || !!this.setupPending || recorder.busy || status.state === 'saving'
       || (active ? status.is_owner === false : done ? !!recorder.offline || !sessionInput.value.trim()
         : saved ? !!recorder.offline
@@ -486,8 +519,9 @@ export class TrialController {
     const message = recorder.error || this.viewError || (saved || done ? ''
       : status.state === 'saving' ? 'Finishing the recording on the host. Keep this page open.'
       : active ? status.is_owner === false ? 'This recording belongs to another controller page.'
-        : needsView ? 'Live view interrupted. Hold the arm if needed; the host is still recording.' : ''
-      : needsSetup ? 'Set up connects the physical leader arm and enables control. Recording starts with Start first trial.'
+        : needsView ? 'Live view interrupted. Hold the arm if needed; the host is still recording.'
+          : guided && this.practice ? PRACTICE_HINTS[this.condition] : ''
+      : needsSetup ? `Set up connects the physical leader arm and enables control. Recording starts with ${this.practice ? 'Start practice' : 'Start trial'}.`
       : needsTask ? ''
       : mismatch ? 'The view was changed in Settings. Restore the trial view, or turn off guided trials.'
       : needsTracking ? 'Waiting for head tracking. Look toward the laptop camera, then reset head tracking.'
@@ -496,7 +530,7 @@ export class TrialController {
       : !status.controller_active ? 'Reconnect this controller in Settings → View before recording.'
       : !status.ready ? 'Waiting for fresh robot feedback. Check the arm in Settings.'
       : status.state === 'error' ? `${status.message} Start this trial again when ready.`
-      : '');
+      : guided && this.practice && !saved ? PRACTICE_HINTS[this.condition] : '');
     const messageNode = byId('trial-message');
     if (messageNode.textContent !== message) messageNode.textContent = message;
     messageNode.hidden = !message;
@@ -507,7 +541,7 @@ export class TrialController {
     byId('trial-block-score').textContent = counting && saved.block_count != null ? `${saved.block_count} blocks in cup` : '';
     byId('trial-save-block-count').disabled = recorder.busy || !!recorder.offline;
     if (counting && this.countEpisode !== saved.episode) { byId('trial-block-count').value = saved.block_count == null ? '' : String(saved.block_count); this.countEpisode = saved.episode; }
-    byId('trial-outcome-control').hidden = counting;
+    byId('trial-outcome-control').hidden = counting || this.practice;
     byId('trial-outcome').disabled = recorder.busy;
     byId('trial-save-block-count').textContent = this.state.index === this.state.plan.length - 1 ? 'Save & Finish' : 'Save & Next';
     if (saved && needsReview && this.promptedEpisode !== saved.episode) this.openResult();
@@ -517,6 +551,7 @@ export class TrialController {
     byId('trial-session-status').textContent = `${this.state.name || 'Session not started'} · ${completed} of ${this.state.plan.length} saved. New session keeps all host recordings.`;
     byId('trial-task3-option').disabled = !this.state.tasks.custom.instruction.trim();
     this.duration.disabled = locked;
+    byId('trial-practice-duration').disabled = locked;
     for (const [id, number] of [['single_block', 1], ['count_blocks', 2], ['custom', 3]]) for (const field of ['instruction', 'metric']) {
       const element = byId(`trial-task${number}-${field}`); element.disabled = locked;
       const value = field === 'instruction' ? this.state.tasks[id].instruction : this.state.tasks[id].success_metric || defaultMetric(id);

@@ -25,32 +25,41 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
  try{
   const views=['fixed_rgb','head_3d','mouse_3d'];
   const checkPlan=(plan,ids)=>{
-   assert.equal(plan.length,ids.length*6);
+   assert.equal(plan.length,ids.reduce((n,id)=>n+(id==='single_block'?3:6),0));
    const seen=[];
-   for(let offset=0;offset<plan.length;offset+=6){
-    const block=plan.slice(offset,offset+6),id=block[0].task_id;seen.push(id);
+   for(let offset=0;offset<plan.length;){
+    const id=plan[offset].task_id,practice=id==='single_block',size=practice?3:6;
+    const block=plan.slice(offset,offset+size);seen.push(id);offset+=size;
     assert.ok(block.every(p=>p.task_id===id),'both rounds finish before changing activity');
-    for(let round=0;round<2;round++)assert.deepEqual(block.slice(round*3,round*3+3).map(p=>p.condition).sort(),views,'every round contains all three views exactly once');
-    for(const condition of views)assert.equal(block.filter(p=>p.condition===condition).length,2);
-    assert.ok(block.every(p=>p.time_limit_seconds===75));
-    assert.ok(block.every(p=>p.success_metric===(id==='count_blocks'?'block_count':'pass_fail')));
-    assert.ok(block.every(p=>p.outcome_rule===(id==='count_blocks'?'manual':'finish_before_limit')));
+    for(let round=0;round<(practice?1:2);round++)assert.deepEqual(block.slice(round*3,round*3+3).map(p=>p.condition).sort(),views,'every round contains all three views exactly once');
+    for(const condition of views)assert.equal(block.filter(p=>p.condition===condition).length,practice?1:2);
+    assert.ok(block.every(p=>p.time_limit_seconds===(practice?60:75)));
+    assert.ok(block.every(p=>p.success_metric===(practice?'practice':id==='count_blocks'?'block_count':'pass_fail')));
+    assert.ok(block.every(p=>p.phase===(practice?'practice':'measured')));
+    assert.ok(block.every(p=>p.outcome_rule===(practice||id==='count_blocks'?'manual':'finish_before_limit')));
    }
+   if(ids.includes('single_block'))assert.equal(seen[0],'single_block','practice always comes first');
    assert.deepEqual(seen.sort(),[...ids].sort());
   };
   assert.equal(c.state.randomize,true);checkPlan(c.state.plan,['single_block','count_blocks','custom']);assert.equal(c.state.randomActivities,true);assert.equal(node('trial-order').value,'random');
   assert.match(c.state.tasks.custom.instruction,/Balance test/);
   const withThird=structuredClone(c.state);withThird.tasks.custom.instruction='Named third task';checkPlan(makeTrialPlan(withThird),['single_block','count_blocks','custom']);
-  const one={...withThird,activitySelection:'single_block',randomActivities:false};
+  const one={...withThird,activitySelection:'count_blocks',randomActivities:false};
   const randomValues=[0,0,.99,.99];const shuffled=makeTrialPlan(one,()=>{assert.ok(randomValues.length);return randomValues.shift();});
-  checkPlan(shuffled,['single_block']);assert.equal(randomValues.length,0);assert.notDeepEqual(shuffled.slice(0,3),shuffled.slice(3),'each round gets its own shuffle');
+  checkPlan(shuffled,['count_blocks']);assert.equal(randomValues.length,0);assert.notDeepEqual(shuffled.slice(0,3),shuffled.slice(3),'each round gets its own shuffle');
   assert.deepEqual(makeTrialPlan({...one,randomize:false}).map(p=>p.condition),[...one.order,...one.order],'fixed order repeats for round two');
-  assert.notEqual(makeTrialPlan(withThird,()=>0)[0].task_id,makeTrialPlan(withThird,()=>.99)[0].task_id,'activity order remains randomized');
+  assert.notEqual(makeTrialPlan(withThird,()=>0)[3].task_id,makeTrialPlan(withThird,()=>.99)[3].task_id,'measured activity order remains randomized after practice');
   await c.initialize();assert.equal(node('trial-action').textContent,'Set up session');assert.throws(()=>recording.context(),/Set up/);
   node('trial-session-input').value='Participant 01';node('trial-session-input').dispatchEvent(new Event('input'));
-  await c.act();assert.equal(setups,1);assert.equal(calls.length,0,'setup never starts recording');assert.equal(node('trial-action').textContent,'Start first trial');
+  await c.act();assert.equal(setups,1);assert.equal(calls.length,0,'setup never starts recording');assert.equal(node('trial-action').textContent,'Start practice');
   assert.match(c.state.name,/^Participant 01 — \d{4}-\d\d-\d\d \d\d:\d\d:\d\d GMT/);assert.equal(recording.context().session_name,c.state.name);
-  await c.act();assert.equal(trialPreparations,1);assert.equal(calls.at(-1)[0],'start');assert.equal(recording.context().time_limit_seconds,c.state.timeTargetSeconds);
+  await c.act();assert.equal(trialPreparations,1);assert.equal(calls.at(-1)[0],'start');assert.equal(recording.context().time_limit_seconds,60);
+  assert.equal(recording.context().phase,'practice');assert.equal(recording.context().success_metric,'practice');assert.equal(recording.context().result_prompt,false);
+  assert.equal(node('trial-position').textContent,'Practice 1/3');
+  const practiceStarts=calls.filter(p=>p[0]==='start').length;
+  recording.status.last_saved={episode:'practice-one',status:'complete',outcome:'unrated',trial:{...recording.context()}};
+  c.render();assert.equal(c.resultNeedsReview(),false);await c.act();assert.equal(c.state.index,1);
+  assert.equal(calls.filter(p=>p[0]==='start').length,practiceStarts,'Next practice never starts another recording');
   node('trial-task-kind').value='count_blocks';node('trial-task-kind').dispatchEvent(new Event('change'));await Promise.resolve();await Promise.resolve();
   await c.act();assert.equal(c.state.taskId,'count_blocks');assert.equal(c.state.timeTargetSeconds,75);assert.equal(recording.context().time_limit_seconds,75);
   assert.equal(recording.context().success_metric,'block_count');assert.equal(recording.context().outcome_rule,'manual');
@@ -72,7 +81,8 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
   const finishedId=c.state.id,finishedEpisode=recording.status.last_saved;node('trial-session-input').value='Participant 02';node('trial-session-input').dispatchEvent(new Event('input'));
   const starts=calls.filter(p=>p[0]==='start').length;await c.act();assert.notEqual(c.state.id,finishedId);assert.match(c.state.name,/^Participant 02 — /);assert.equal(c.state.index,0);assert.deepEqual(c.state.completed,[]);
   assert.equal(recording.status.last_saved,finishedEpisode,'restart preserves host recordings');assert.equal(calls.filter(p=>p[0]==='start').length,starts,'restart prepares without recording');assert.equal(node('trial-action').textContent,'Start first trial');
-  const snapshot={...withThird,id:'session-eighteen',name:c.state.name,nameBase:c.state.nameBase,prepared:true,plan:makeTrialPlan(withThird),index:17,completed:['saved-before-refresh'],finished:false};
+  const legacyPlan=['single_block','count_blocks','custom'].flatMap(id=>Array.from({length:2},()=>views.map(condition=>({task_id:id,task:withThird.tasks[id].instruction,time_limit_seconds:75,condition,success_metric:id==='count_blocks'?'block_count':'pass_fail',outcome_rule:id==='count_blocks'?'manual':'finish_before_limit'}))).flat());
+  const snapshot={...withThird,id:'session-eighteen',name:c.state.name,nameBase:c.state.nameBase,prepared:true,plan:legacyPlan,index:17,completed:['saved-before-refresh'],finished:false};
   stored.set('robotTeleopTrialSession.v1',JSON.stringify(snapshot));
   const reloaded=new TrialController(options);
   try{
