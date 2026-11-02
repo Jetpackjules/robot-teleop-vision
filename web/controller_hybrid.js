@@ -243,7 +243,7 @@
         orbit_pitch_offset: Number(document.getElementById("orbit-elevation").value),
         dolly_enabled: document.getElementById("dolly-enabled").checked,
         dolly_gain: Number(document.getElementById("dolly-gain").value),
-        min_distance: 0.2,
+        min_distance: 0.125,
         max_distance: 3.0,
         fov: Number(document.getElementById("inspect-fov").value),
         white_background_enabled: document.getElementById("white-background-enabled").checked,
@@ -265,7 +265,7 @@
     function updateViewLabels() {
       document.getElementById("orbit-span-value").textContent = `${document.getElementById("orbit-span").value} deg`;
       document.getElementById("orbit-response-value").textContent = document.getElementById("orbit-response").value;
-      document.getElementById("orbit-distance-value").textContent = `${Number(document.getElementById("orbit-distance").value).toFixed(2)} m`;
+      document.getElementById("orbit-distance-value").textContent = `${Number(document.getElementById("orbit-distance").value).toFixed(3)} m`;
       document.getElementById("dolly-gain-value").textContent = `${Number(document.getElementById("dolly-gain").value).toFixed(3)} m/cm`;
       document.getElementById("inspect-fov-value").textContent = `${document.getElementById("inspect-fov").value} deg`;
       document.getElementById("head-height-value").textContent = `${Number(document.getElementById("head-height").value).toFixed(2)} m`;

@@ -137,7 +137,7 @@ const state = {
     focus_vertical_offset: 0.35,
     dolly_enabled: true,
     dolly_gain: 0.008,
-    min_distance: 0.2,
+    min_distance: 0.125,
     max_distance: 3.0,
     fov: 55,
     splat_fill: 1.3,
@@ -2362,7 +2362,7 @@ function orbitViewer(base, headDelta) {
   let distance = Number(settings.orbit_distance || 0.65);
   if (settings.dolly_enabled) distance += (relativeHead[2] * 100) * Number(settings.dolly_gain || 0);
   distance += state.manualDolly;
-  distance = clamp(distance, Number(settings.min_distance || 0.2), Number(settings.max_distance || 3));
+  distance = clamp(distance, Number(settings.min_distance || 0.125), Number(settings.max_distance || 3));
   // Build the orbit at its reference radius, then dolly along its optical axis.
   // Fixed camera height plus a changing horizontal radius would change pitch.
   const offset = add(scale(direction, reference.distance), scale(worldUp, reference.height));
@@ -2417,7 +2417,7 @@ function attachPointerNavigation(options = {}) {
       if (viewer) {
         const distance = clamp(
           Number(state.settings.orbit_distance || 0.65) + state.manualDolly,
-          Number(state.settings.min_distance || 0.2),
+          Number(state.settings.min_distance || 0.125),
           Number(state.settings.max_distance || 3),
         );
         const metersPerPixel = 2 * distance
@@ -2448,7 +2448,7 @@ function attachPointerNavigation(options = {}) {
     state.manualDolly += event.deltaY * distance * 0.0015;
     state.manualDolly = clamp(
       state.manualDolly,
-      Number(state.settings.min_distance || 0.2) - Number(state.settings.orbit_distance || 0.65),
+      Number(state.settings.min_distance || 0.125) - Number(state.settings.orbit_distance || 0.65),
       Number(state.settings.max_distance || 3) - Number(state.settings.orbit_distance || 0.65),
     );
     event.preventDefault();
