@@ -359,7 +359,7 @@ class HostEpisodeRecorder:
             raise RecordingError('Select distinct cameras.')
         if trial is not None:
             fields = {'session_id', 'index', 'total', 'condition', 'display_mode'}
-            if not isinstance(trial, dict) or not fields <= set(trial) or set(trial)-fields-{'task_id', 'time_limit_seconds', 'session_name', 'success_metric', 'outcome_rule', 'result_prompt', 'phase', 'point_cleanup_support', 'point_cleanup_tolerance_mm', 'point_preview_detail', 'stream_preset', 'robot_overlay_enabled', 'control_source'}:
+            if not isinstance(trial, dict) or not fields <= set(trial) or set(trial)-fields-{'task_id', 'time_limit_seconds', 'session_name', 'success_metric', 'outcome_rule', 'result_prompt', 'phase', 'point_cleanup_enabled', 'point_cleanup_radius_mm', 'point_cleanup_support', 'point_cleanup_tolerance_mm', 'point_preview_detail', 'stream_preset', 'robot_overlay_enabled', 'control_source'}:
                 raise RecordingError('Invalid trial metadata fields.')
             session = trial['session_id']
             if not isinstance(session, str) or not 1 <= len(session) <= 80 or any(
@@ -394,8 +394,13 @@ class HostEpisodeRecorder:
                     or trial['point_preview_detail'] not in (0, -2, -1, 20000, 40000)):
                 raise RecordingError('Invalid trial point detail.')
             if 'point_cleanup_support' in trial and (type(trial['point_cleanup_support']) is not int
-                    or not 0 <= trial['point_cleanup_support'] <= 8):
+                    or not 0 <= trial['point_cleanup_support'] <= 16):
                 raise RecordingError('Invalid preview cleanup support.')
+            if 'point_cleanup_enabled' in trial and type(trial['point_cleanup_enabled']) is not bool:
+                raise RecordingError('Invalid preview cleanup toggle.')
+            if 'point_cleanup_radius_mm' in trial and (type(trial['point_cleanup_radius_mm']) not in (int,float)
+                    or not np.isfinite(trial['point_cleanup_radius_mm']) or not 1 <= trial['point_cleanup_radius_mm'] <= 100):
+                raise RecordingError('Invalid preview cleanup radius.')
             if 'point_cleanup_tolerance_mm' in trial and (type(trial['point_cleanup_tolerance_mm']) not in (int, float)
                     or not np.isfinite(trial['point_cleanup_tolerance_mm']) or not 1 <= trial['point_cleanup_tolerance_mm'] <= 100):
                 raise RecordingError('Invalid preview cleanup tolerance.')

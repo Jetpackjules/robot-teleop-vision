@@ -24,8 +24,9 @@ def test_point_detail_rejects_unsupported_values(detail):
 def test_cleanup_controls_persist_on_host_and_reject_fractional_support():
     handler = LanRemoteHandler.__new__(LanRemoteHandler)
     handler.server = SimpleNamespace(robot_operator=load_robot_operator('disabled'))
-    value = handler.validate_site_settings({'point_cleanup_support': 2, 'point_cleanup_tolerance_mm': 15})
-    assert value['point_cleanup_support'] == 2
-    assert value['point_cleanup_tolerance_mm'] == 15
+    value = handler.validate_site_settings({'point_cleanup_enabled': True, 'point_cleanup_support': 3, 'point_cleanup_radius_mm': 15})
+    assert value['point_cleanup_support'] == 3
+    assert value['point_cleanup_radius_mm'] == 15
+    assert value['point_cleanup_enabled'] is True
     with pytest.raises(ValueError):
         handler.validate_site_settings({'point_cleanup_support': 2.5})

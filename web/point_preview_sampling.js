@@ -1,5 +1,15 @@
 // Optional lossy preview: choose existing nonzero measurements without changing
 // their values. Evenly spaced valid ranks avoid fresh random flicker per frame.
+export function validSparsePointCount(metadata,count,budget) {
+  if(metadata.preview_cleanup_enabled===true && metadata.preview_cleanup_kind==='selected_radius_v1'){
+    const source=metadata.preview_source_points,input=metadata.preview_cleanup_input_points,removed=metadata.preview_cleanup_removed;
+    return Number.isInteger(source)&&source>=0&&Number.isInteger(input)
+      && input===(budget===0?source:Math.min(source,budget))
+      && Number.isInteger(removed)&&removed>=0&&removed<=input&&count===input-removed;
+  }
+  return budget===0?count===metadata.preview_source_points:count<=budget;
+}
+
 export function sampleDepthPoints(depth, budget = 20000) {
   if (!Number.isInteger(budget) || budget < 0 || budget > 40000) throw new Error('invalid point preview budget');
   let valid = 0;

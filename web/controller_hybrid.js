@@ -22,9 +22,15 @@
     const pointPreviewToggle = document.getElementById('point-preview-enabled');
     const pointPreviewActive=()=>pointPreviewToggle.value==='-1'||Number(pointPreviewToggle.value)>0;
     const selectedPointBudget=()=>pointPreviewToggle.value==='-1'?0:Number(pointPreviewToggle.value)===40000?40000:20000;
+    const cleanupEnabled=document.getElementById('point-cleanup-enabled');
     const cleanupSupport=document.getElementById('point-cleanup-support');
-    const cleanupTolerance=document.getElementById('point-cleanup-tolerance');
-    const cleanupSettings=()=>({point_cleanup_support:Number(cleanupSupport.value),point_cleanup_tolerance_mm:Number(cleanupTolerance.value)});
+    const cleanupRadius=document.getElementById('point-cleanup-radius');
+    const cleanupSettings=()=>({point_cleanup_enabled:cleanupEnabled.checked,point_cleanup_support:Number(cleanupSupport.value),point_cleanup_radius_mm:Number(cleanupRadius.value)});
+    function updateCleanupControls(){
+      cleanupSupport.disabled=cleanupRadius.disabled=!cleanupEnabled.checked;
+      document.getElementById('point-cleanup-support-value').textContent=cleanupSupport.value;
+      document.getElementById('point-cleanup-radius-value').textContent=cleanupRadius.value+' mm';
+    }
     const blendControls=document.getElementById('blendpcr-controls');
     const blendDepth=document.getElementById('blend-depth'),blendSupport=document.getElementById('blend-support'),blendEdge=document.getElementById('blend-edge');
     let storedBlend={};try{storedBlend=JSON.parse(localStorage.getItem('robotTeleopBlendControls')||'{}')||{};}catch{}
@@ -37,13 +43,12 @@
     const applyPointOptions=()=>{
       blendControls.hidden=displayModeSelect.value!=='blendpcr'||pointPreviewActive();
       document.getElementById('point-cleanup-controls').hidden=!pointPreviewActive() || displayModeSelect.value==='rgb_camera';
-      document.getElementById('point-cleanup-support-value').textContent=Number(cleanupSupport.value) ? cleanupSupport.value+' / 8' : 'Off';
-      document.getElementById('point-cleanup-tolerance-value').textContent=cleanupTolerance.value+' mm';
-      document.getElementById('blend-depth-value').textContent=Number(blendDepth.value).toFixed(1)+'Ã—';
+      updateCleanupControls();
+      document.getElementById('blend-depth-value').textContent=Number(blendDepth.value).toFixed(1)+'\u00d7';
       document.getElementById('blend-support-value').textContent=blendSupport.value;
       document.getElementById('blend-edge-value').textContent=blendEdge.value+' mm';
       workspaceStreamControl.update({...cleanupSettings(),rgbd_client_id:window.robotTeleopPageId,point_preview_enabled:pointPreviewActive(),point_preview_budget:selectedPointBudget(),display_mode:displayModeSelect.value});
-      window.setGodotHybridViewSettings?.({point_preview_enabled:pointPreviewActive(),mesh_preview_enabled:pointPreviewToggle.value==='-2',point_preview_budget:selectedPointBudget(),blendpcr_depth_tolerance:Number(blendDepth.value),blendpcr_support:Number(blendSupport.value),blendpcr_max_edge:Number(blendEdge.value)/1000});
+      window.setGodotHybridViewSettings?.({...cleanupSettings(),point_preview_enabled:pointPreviewActive(),mesh_preview_enabled:pointPreviewToggle.value==='-2',point_preview_budget:selectedPointBudget(),blendpcr_depth_tolerance:Number(blendDepth.value),blendpcr_support:Number(blendSupport.value),blendpcr_max_edge:Number(blendEdge.value)/1000});
     };
     applyPointOptions();
     const rgbCameraControl = document.getElementById("rgb-camera-control");
@@ -287,6 +292,8 @@
       // The dedicated socket owns page crop state, avoiding reordering with
       // the optional tracking/WebRTC transport.
       delete remotePayload.rgbd_client_id;
+      // Cleanup belongs only to this preview until the explicit host Save.
+      for(const key of ['point_cleanup_enabled','point_cleanup_support','point_cleanup_radius_mm']) delete remotePayload[key];
       return window.sendGodotViewSettings && window.sendGodotViewSettings(remotePayload);
     }
 
@@ -306,8 +313,9 @@
     function restoreViewSettings(savedInput = null, {preferLastTable = true} = {}) {
       const localSaved = localSavedViewSettings();
       const saved = savedInput && Object.keys(savedInput).length ? { ...localSaved, ...savedInput } : localSaved;
-      cleanupSupport.value=Number.isInteger(saved.point_cleanup_support)?Math.max(0,Math.min(8,saved.point_cleanup_support)):0;
-      cleanupTolerance.value=Math.max(1,Math.min(100,Number(saved.point_cleanup_tolerance_mm)||15));
+      cleanupEnabled.checked=saved.point_cleanup_enabled===true;
+      cleanupSupport.value=Number.isInteger(saved.point_cleanup_support)&&saved.point_cleanup_support>0?Math.min(16,saved.point_cleanup_support):3;
+      cleanupRadius.value=Math.max(1,Math.min(100,Number(saved.point_cleanup_radius_mm)||15));
       const pointDefault = JSON.stringify([saved?.settings_version,saved?.point_preview_detail]);
       const samePointDefault = localStorage.getItem('robotTeleopPointDetailHostDefault') === pointDefault;
       pointPreviewToggle.value=resolvePointDetail(saved,localStorage.getItem('robotTeleopPointDetail'),preferLastTable && samePointDefault);
@@ -547,7 +555,7 @@
         if (signature !== rgbCameraListSignature) {
           rgbCameraListSignature = signature;
           rgbCameraSelect.replaceChildren(...cameras.map(camera => new Option(
-            `${camera.name || camera.model || 'Camera'} Â· ${camera.id.slice(-4)}`, camera.id)));
+            `${camera.name || camera.model || 'Camera'} \u00b7 ${camera.id.slice(-4)}`, camera.id)));
           if (!cameras.some(camera => camera.id === selectedRgbCamera)) selectedRgbCamera = cameras[0]?.id || '';
           rgbCameraSelect.value = selectedRgbCamera;
           window.setGodotHybridRgbCamera?.(selectedRgbCamera);
@@ -555,7 +563,7 @@
         rgbCameraListUpdated = Date.now();
         const levelsDisplay = document.getElementById('camera-image-levels');
         if (levelsDisplay) levelsDisplay.textContent = cameras.map(camera => {
-          const name = `${camera.name || camera.model || 'Camera'} Â· ${camera.id.slice(-4)}`;
+          const name = `${camera.name || camera.model || 'Camera'} \u00b7 ${camera.id.slice(-4)}`;
           const levels = camera.image_levels;
           if (!levels || !Number.isFinite(levels.mean_luma)) return `${name}: image levels unavailable`;
           const age = Date.now() - levels.sample_unix_ms;
@@ -985,7 +993,7 @@
       if (!enabled) {
         startupRecenterGeneration += 1;
         window.stopGodotWebcamTracker && window.stopGodotWebcamTracker();
-        trackingState = "off Â· mouse navigation enabled";
+        trackingState = "off \u00b7 mouse navigation enabled";
         updateStatus();
         return true;
       }
@@ -1186,10 +1194,10 @@
       context.fillText("0", 3, height - 3);
 
       if (hybrid.stalled) {
-        rgbdLatencyValue.textContent = `STALLED Â· packet ${Math.round(hybrid.packetAgeMs)}ms`;
+        rgbdLatencyValue.textContent = `STALLED \u00b7 packet ${Math.round(hybrid.packetAgeMs)}ms`;
         rgbdLatencyValue.style.color = "#ff6b6b";
       } else if (hybrid.captureAgeMs != null && hybrid.captureAgeMs >= 0) {
-        rgbdLatencyValue.textContent = `${Math.round(hybrid.captureAgeMs)}ms Â· packet ${Math.round(Math.max(0, hybrid.packetAgeMs || 0))}ms`;
+        rgbdLatencyValue.textContent = `${Math.round(hybrid.captureAgeMs)}ms \u00b7 packet ${Math.round(Math.max(0, hybrid.packetAgeMs || 0))}ms`;
         rgbdLatencyValue.style.color = "";
       } else {
         rgbdLatencyValue.textContent = "â€”";
@@ -1207,6 +1215,10 @@
       if(modeledWorkspace(modeledViewSettings()))renderCropStatistics(document.getElementById('modeled-workspace-status'),hybrid,{
         is3D:activeViewportMode==='hybrid'&&displayModeSelect.value!=='rgb_camera'&&hybrid.displaySource!=='original_rgb',
       });
+      const cleanup=hybrid.pointPreview?.cleanup;
+      document.getElementById('point-cleanup-stats').textContent=!cleanupEnabled.checked?'Cleanup off (bypassed).'
+        : !cleanup?.matches||!cleanup.input?'Applying cleanup to selected points...'
+        : `Removed ${cleanup.removed.toLocaleString()} of ${cleanup.input.toLocaleString()} selected points.`;
       const hybridStalled = activeViewportMode === "hybrid" && hybrid.stalled === true;
       const headTrackingEnabled = document.getElementById("head-tracking-enabled").checked;
       statusDot.className = "dot " + (hybridStalled ? "bad" : connected ? "ok" : "bad");
@@ -1259,7 +1271,7 @@
         activeViewportMode === "hybrid" ? hybrid.renderWarning : "",
         activeViewportMode === "hybrid" ? hybrid.robotModelWarning : "",
         ...(activeViewportMode==='hybrid'&&hybrid.pointPreview ? [`${hybrid.pointPreview.budget===0?'All native points':`${hybrid.pointPreview.budget/1000}k sparse preview`} (${hybrid.pointPreview.transport||'local'}) | ${hybrid.pointPreview.total.toLocaleString()} points total`] : []),
-        ...(activeViewportMode==='hybrid'&&hybrid.meshPreview ? ['Balanced mesh preview | Â¼ depth samples | compressed RGB'] : []),
+        ...(activeViewportMode==='hybrid'&&hybrid.meshPreview ? ['Balanced mesh preview | \u00bc depth samples | compressed RGB'] : []),
         headTrackingEnabled
           ? `Tracking ${latest.status || trackingState} | ${remote.connected ? "bridge on" : "bridge ..."}`
           : "Tracking off | mouse orbit/pan/zoom enabled",
@@ -1295,17 +1307,13 @@
           &&Boolean(rgbdDataChannel?.nativePointStream)!==(pointPreviewActive()))startHybridViewport();
       pointPreviewToggle.blur();updateStatus();
     });
-    for(const slider of [cleanupSupport,cleanupTolerance]) slider.addEventListener('input',()=>{applyPointOptions();sendViewSettings();});
-    document.getElementById('point-cleanup-save').addEventListener('click',async event=>{
-      const button=event.currentTarget,status=document.getElementById('point-cleanup-status');button.disabled=true;
-      try {
-        const saved=await fetchSiteSettings();
-        const response=await fetch('/api/v1/site-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...saved,...cleanupSettings()})});
-        if(!response.ok)throw new Error(`HTTP ${response.status}`);
-        status.textContent='Cleanup saved on the host for all viewers and restarts.';
-      } catch(error){status.textContent=`Could not save cleanup: ${error.message}`;}
-      finally{button.disabled=false;}
-    });
+    let cleanupTimer=0;
+    const applyCleanup=()=>{clearTimeout(cleanupTimer);applyPointOptions();sendViewSettings();};
+    cleanupEnabled.addEventListener('change',applyCleanup);
+    for(const slider of [cleanupSupport,cleanupRadius]){
+      slider.addEventListener('input',()=>{updateCleanupControls();clearTimeout(cleanupTimer);cleanupTimer=setTimeout(applyCleanup,150);});
+      slider.addEventListener('change',applyCleanup);
+    }
     const saveBlendControls=()=>{localStorage.setItem('robotTeleopBlendControls',JSON.stringify({depth:Number(blendDepth.value),support:Number(blendSupport.value),edge:Number(blendEdge.value)}));applyPointOptions();};
     for(const slider of [blendDepth,blendSupport,blendEdge])slider.addEventListener('input',saveBlendControls);
     document.getElementById('blend-reset').addEventListener('click',()=>{blendDepth.value=1;blendSupport.value=2;blendEdge.value=80;saveBlendControls();});

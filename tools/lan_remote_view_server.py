@@ -124,6 +124,8 @@ CORE_PERSISTENT_VIEW_SETTINGS = frozenset(
         "display_mode",
         "stream_preset",
         "point_preview_detail",
+        "point_cleanup_enabled",
+        "point_cleanup_radius_mm",
         "point_cleanup_support",
         "point_cleanup_tolerance_mm",
     }
@@ -4602,6 +4604,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             raise ValueError("view settings must be an object")
         bounds = {
+            "point_cleanup_radius_mm": (1.0, 100.0),
             "point_cleanup_tolerance_mm": (1.0, 100.0),
             "yaw_gain": (0.0, 12.0),
             "pitch_gain": (0.0, 12.0),
@@ -4634,6 +4637,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 raise ValueError(f"{key} must be finite")
             packet[key] = max(minimum, min(maximum, float(value)))
         boolean_settings = {
+            "point_cleanup_enabled",
             "inspect_enabled",
             "dolly_enabled",
             "robot_overlay_enabled",
@@ -4659,8 +4663,8 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 packet[key] = data[key]
         if "point_cleanup_support" in data:
             support = data["point_cleanup_support"]
-            if type(support) is not int or not 0 <= support <= 8:
-                raise ValueError("point_cleanup_support must be an integer from 0 to 8")
+            if type(support) is not int or not 0 <= support <= 16:
+                raise ValueError("point_cleanup_support must be an integer from 0 to 16")
             packet["point_cleanup_support"] = support
         if "point_preview_budget" in data:
             budget = data["point_preview_budget"]

@@ -73,6 +73,7 @@ export class SampledPointPreview {
     this.maxPointSize=Math.min(32,gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]);
   }
   render(cameras,view,mask,settings) {
+    const cleanup={input:0,removed:0,matches:true};
     const gl=this.gl,u=this.u,counts={},sourceCounts={};let selectionMs=0,gpuUploadBytes=0,compactCameras=0;const budget=settings.point_preview_budget===0?0:settings.point_preview_budget===40000?40000:20000;
     gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.bindVertexArray(this.vao);gl.useProgram(this.program);
     gl.viewport(0,0,view.width,view.height);gl.enable(gl.DEPTH_TEST);gl.depthMask(true);gl.depthFunc(gl.LEQUAL);
@@ -99,6 +100,13 @@ export class SampledPointPreview {
           entry.depth=camera.depth;entry.revision=camera.uploadRevision;entry.budget=budget;
           selectionMs+=performance.now()-started;
         }else gl.bindBuffer(gl.ARRAY_BUFFER,entry.buffer);
+        const meta=camera.metadata;
+        cleanup.input+=Number(meta.preview_cleanup_input_points??entry.count);
+        cleanup.removed+=Number(meta.preview_cleanup_removed||0);
+        cleanup.matches &&= meta.preview_budget===budget && meta.preview_cleanup_kind==='selected_radius_v1'
+          && meta.preview_cleanup_enabled===(settings.point_cleanup_enabled===true)
+          && meta.preview_cleanup_support===settings.point_cleanup_support
+          && meta.preview_cleanup_radius_mm===settings.point_cleanup_radius_mm;
         const id=String(camera.metadata.id);counts[id]=entry.count;sourceCounts[id]=entry.valid;
         gl.enableVertexAttribArray(0);gl.vertexAttribIPointer(0,1,gl.UNSIGNED_INT,0,0);gl.vertexAttribDivisor(0,0);
         gl.uniform1i(u.u_compact,entry.compact?1:0);
@@ -116,7 +124,7 @@ export class SampledPointPreview {
       }
       for(const [camera,entry]of this.entries)if(!cameras.includes(camera)){gl.deleteBuffer(entry.buffer);this.entries.delete(camera);}
     }finally{gl.bindVertexArray(null);}
-    return {budget,counts,sourceCounts,total:Object.values(counts).reduce((a,b)=>a+b,0),selectionMs,gpuUploadBytes,compactCameras};
+    return {budget,counts,sourceCounts,cleanup,total:Object.values(counts).reduce((a,b)=>a+b,0),selectionMs,gpuUploadBytes,compactCameras};
   }
   dispose(){const gl=this.gl;for(const entry of this.entries.values())gl.deleteBuffer(entry.buffer);
     this.entries.clear();gl.deleteTexture(this.emptyDepth);gl.deleteTexture(this.emptyColor);gl.deleteVertexArray(this.vao);gl.deleteProgram(this.program);}

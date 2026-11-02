@@ -1,7 +1,7 @@
 // Stateless native Quality frames: preserve every depth sample and JPEG pixel.
 import {colorFrameDimensions} from './hybrid_color_projection.js?v=20261021_original_rgb';
 import {workspaceDepthTiles} from './table_geometry.js?v=20261021_original_rgb';
-import {sampleDepthPoints} from './point_preview_sampling.js?v=20261027_point_options';
+import {sampleDepthPoints,validSparsePointCount} from './point_preview_sampling.js?v=20261027_point_options';
 import {decodeExactJpegRgba,preferExactJpegDecode} from './jpeg_rgba_decoder.js?v=20261026_exact_color';
 export async function decodeIndependentDepth(bytes, metadata) {
   const width = Number(metadata.width), height = Number(metadata.height);
@@ -32,7 +32,7 @@ if (typeof self !== "undefined") self.onmessage = async ({data}) => {
   if(metadata.depth_encoding==='u16_mm_sparse_points_deflate'){
     try{
       const width=Number(metadata.width),height=Number(metadata.height),count=Number(metadata.preview_count),budget=Number(metadata.preview_budget);
-      if(!Number.isInteger(width)||!Number.isInteger(height)||width<1||height<1||width*height>16*1024*1024||![0,20000,40000].includes(budget)||!Number.isInteger(count)||count<0||(budget===0?count!==metadata.preview_source_points:count>budget)||count>width*height)throw Error('invalid sparse point dimensions');
+      if(!Number.isInteger(width)||!Number.isInteger(height)||width<1||height<1||width*height>16*1024*1024||![0,20000,40000].includes(budget)||!Number.isInteger(count)||count<0||!validSparsePointCount(metadata,count,budget)||count>width*height)throw Error('invalid sparse point dimensions');
       const packed=await new Response(new Blob([depth]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();
       if(packed.byteLength!==count*9)throw Error('invalid sparse point payload');
       const view=new DataView(packed),values=new Uint16Array(width*height),rgba=new Uint8Array(width*height*4),indices=new Uint32Array(count);

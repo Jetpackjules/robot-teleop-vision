@@ -3,6 +3,22 @@
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
+#include <limits>
+#include <unordered_map>
+#include <vector>
+
+struct Cell {
+    int64_t x,y,z;
+    bool operator==(const Cell &b) const { return x==b.x && y==b.y && z==b.z; }
+};
+struct CellHash {
+    size_t operator()(const Cell &c) const {
+        size_t h=std::hash<int64_t>{}(c.x);
+        h^=std::hash<int64_t>{}(c.y)+0x9e3779b9+(h<<6)+(h>>2);
+        h^=std::hash<int64_t>{}(c.z)+0x9e3779b9+(h<<6)+(h>>2);
+        return h;
+    }
+};
 #if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
 #include <immintrin.h>
 // Retain double-precision conversion and positive truncation exactly as the
@@ -29,6 +45,46 @@ static void depth_mm_avx2(const float *source,uint16_t *out,size_t count,double 
 #endif
 
 extern "C" {
+// Count spatial neighbours among selected points only, in camera millimetres.
+void sparse_point_support(const uint32_t *indices,const uint16_t *depth,
+        uint8_t *keep,uint32_t count,int width,const double *k,
+        int support,double radius) {
+    struct Point { double x,y,z; Cell cell; uint32_t next; };
+    constexpr uint32_t end=std::numeric_limits<uint32_t>::max();
+    std::vector<Point> points(count);
+    std::unordered_map<Cell,uint32_t,CellHash> heads;
+    heads.reserve(count);
+    for(uint32_t i=0;i<count;++i) {
+        const double z=depth[i],x=(double(indices[i]%width)-k[2])/k[0]*z,
+                     y=(double(indices[i]/width)-k[3])/k[1]*z;
+        const Cell cell{int64_t(std::floor(x/radius)),int64_t(std::floor(y/radius)),int64_t(std::floor(z/radius))};
+        auto found=heads.find(cell);
+        points[i]={x,y,z,cell,found==heads.end()?end:found->second};
+        heads[cell]=i;
+    }
+    const double squared=radius*radius;
+    for(uint32_t i=0;i<count;++i) {
+        const Point &p=points[i];int n=0;
+        const auto visit=[&](const Cell &cell) {
+            const auto found=heads.find(cell);
+            for(uint32_t j=found==heads.end()?end:found->second;j!=end && n<support;j=points[j].next) {
+                if(i==j)continue;
+                const Point &q=points[j];const double x=p.x-q.x,y=p.y-q.y,z=p.z-q.z;
+                n+=x*x+y*y+z*z<=squared;
+            }
+        };
+        // Dense surfaces usually satisfy support inside their own cell. Visit
+        // it first, avoiding 26 neighbour lookups for the common case.
+        visit(p.cell);
+        for(int dz=-1;dz<=1 && n<support;++dz)
+        for(int dy=-1;dy<=1 && n<support;++dy)
+        for(int dx=-1;dx<=1 && n<support;++dx) {
+            if(dx || dy || dz)visit({p.cell.x+dx,p.cell.y+dy,p.cell.z+dz});
+        }
+        keep[i]=n>=support;
+    }
+}
+
 void sparse_clean_depth(const uint16_t *depth, uint16_t *out, int w, int h,
         int support, double tolerance) {
     for (int y=0; y<h; ++y) for (int x=0; x<w; ++x) {

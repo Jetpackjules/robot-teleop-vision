@@ -264,3 +264,24 @@ class NativeSparseTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+def test_cleanup_runs_after_native_20k_selection(tmp_path):
+    import pytest
+    from tools.native_sparse_kernels import LIBRARY
+    if LIBRARY is None:
+        pytest.skip('Optional native kernels unavailable')
+    path=tmp_path/'selected-native';path.write_bytes(fixture())
+    reader=NativeSnapshot(path)
+    try:snapshot=reader.read()
+    finally:reader.close()
+    snapshot['intrinsics']=[1000.,1000.,150.,100.]
+    settings={'point_preview_budget':20000,'point_cleanup_enabled':True,
+              'point_cleanup_support':3,'point_cleanup_radius_mm':1.5}
+    packet=encode_native_camera(snapshot,{'id':'selected'},settings,WorkspaceStreamCropper())
+    end=9+struct.unpack_from('<I',packet,5)[0]
+    camera=json.loads(packet[9:end])['cameras'][0]
+    assert camera['preview_source_points']>40000
+    assert camera['preview_cleanup_input_points']==20000
+    assert camera['preview_cleanup_removed']>0
+    assert camera['preview_count']==20000-camera['preview_cleanup_removed']
+    assert len(zlib.decompress(packet[end:]))==camera['preview_count']*9

@@ -8,15 +8,19 @@ does not write calibration. Save Calibration commits it; Cancel restores it.
 The normal Godot scene must be running for base/manual calibration. The
 read-only overlay publisher alone cannot service calibration commands.
 
-Settings > View > Point cleanup filters the native square-point preview before
-crop and sampling. It counts the eight neighbouring source depth pixels within
-the selected depth tolerance. Unsupported pixels are removed; retained XYZ/RGB
-values are unchanged. This is a reversible preview filter that can remove real
-thin features, not a lossless representation of all source pixels. Support 0
-disables it exactly. Start with support 2 and tolerance 15 mm. Save cleanup for
-everyone persists these values on the host across reloads/restarts. It leaves
-capture profiles and original recording JPEGs unchanged. Trial metadata records
-the cleanup settings. Balanced mesh and full-detail BlendPCR are unaffected.
+Settings > View > Point cleanup is disabled by default. When enabled, it runs
+AFTER crop and 20k / 40k / all-native-point selection and before compression.
+It counts neighbouring selected points within a 3D radius in millimetres.
+Retained point index, depth and RGB values are unchanged. Larger support and
+smaller radius remove more points and can remove real thin details. The UI
+reports how many selected points were removed, using applied packet metadata.
+Off bypasses neighbour calculations and compaction entirely. Changes remain
+local to the current preview until Save Current Setup as Default is pressed;
+that saves the toggle and sliders on the host for other viewers on reload and
+across host restarts. Capture and recording are untouched. Trial metadata
+records the enabled flag, support and radius. Balanced mesh and full-detail
+BlendPCR are unaffected. The dedicated preview control socket carries all
+three cleanup settings, even without head tracking or WebRTC.
 
 New practice plans use Fixed RGB, Mouse 3D, then Head 3D, each with the host's
 practice duration (default 60 seconds). After the explicit Start practice,

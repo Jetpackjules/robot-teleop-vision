@@ -465,11 +465,12 @@
           <p id="point-counts" class="helper-text">Waiting for point counts…</p>
           <fieldset id="point-cleanup-controls">
             <legend>Point cleanup</legend>
-            <label>Required neighbours <output id="point-cleanup-support-value"></output><input id="point-cleanup-support" type="range" min="0" max="8" step="1" value="0"></label>
-            <label>Depth tolerance <output id="point-cleanup-tolerance-value"></output><input id="point-cleanup-tolerance" type="range" min="1" max="100" step="1" value="15"></label>
-            <p class="helper-text">Removes isolated depth pixels before sampling. Zero neighbours turns cleanup off. Higher support removes more speckles and may remove thin details; a larger tolerance keeps more neighbours. Native point previews only; capture and recording stay unchanged.</p>
-            <button id="point-cleanup-save" type="button">Save cleanup for everyone</button>
-            <p id="point-cleanup-status" class="helper-text" role="status"></p>
+            <label class="toggle-row"><span>Enable point cleanup</span><input id="point-cleanup-enabled" type="checkbox"></label>
+            <label>Required neighbours <output id="point-cleanup-support-value"></output><input id="point-cleanup-support" type="range" min="1" max="16" step="1" value="3" disabled></label>
+            <label>Neighbour radius <output id="point-cleanup-radius-value"></output><input id="point-cleanup-radius" type="range" min="1" max="100" step="1" value="15" disabled></label>
+            <p class="helper-text">Runs after workspace crop and 20k / 40k / all-point selection. Removes points with too few displayed neighbours inside this 3D radius. More neighbours or a smaller radius removes more, including thin details. Off bypasses cleanup entirely. Capture and recording stay unchanged.</p>
+            <p id="point-cleanup-stats" class="helper-text" role="status">Cleanup off.</p>
+            <p class="helper-text">Changes preview in this tab. Use Save Current Setup as Default below to share these settings with all viewers across reloads and host restarts.</p>
           </fieldset>
           <fieldset id="blendpcr-controls">
             <legend>BlendPCR surface controls</legend>

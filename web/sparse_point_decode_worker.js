@@ -1,7 +1,8 @@
+import {validSparsePointCount} from './point_preview_sampling.js?v=20261102_selected_cleanup';
 // Compact native samples only: no image-decoder or geometry-module startup cost.
 export async function decodeSparsePoints(depth,metadata){
   const width=Number(metadata.width),height=Number(metadata.height),count=Number(metadata.preview_count),budget=Number(metadata.preview_budget);
-  if(!Number.isInteger(width)||!Number.isInteger(height)||width<1||height<1||width*height>16*1024*1024||![0,20000,40000].includes(budget)||!Number.isInteger(count)||count<0||(budget===0?count!==metadata.preview_source_points:count>budget)||count>width*height)throw Error('invalid sparse point dimensions');
+  if(!Number.isInteger(width)||!Number.isInteger(height)||width<1||height<1||width*height>16*1024*1024||![0,20000,40000].includes(budget)||!Number.isInteger(count)||count<0||!validSparsePointCount(metadata,count,budget)||count>width*height)throw Error('invalid sparse point dimensions');
   let packed=await new Response(new Blob([depth]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();
   if(packed.byteLength!==count*9)throw Error('invalid sparse point payload');
   if(metadata.preview_predictor==='shuffle_delta_v2'){

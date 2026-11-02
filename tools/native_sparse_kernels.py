@@ -22,6 +22,8 @@ def _load():
         lib.sparse_depth_mm.restype=None
         lib.sparse_clean_depth.argtypes=[pointer,pointer,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_double]
         lib.sparse_clean_depth.restype=None
+        lib.sparse_point_support.argtypes=[pointer,pointer,pointer,ctypes.c_uint32,ctypes.c_int,pointer,ctypes.c_int,ctypes.c_double]
+        lib.sparse_point_support.restype=None
         lib.sparse_pack.argtypes=[pointer,ctypes.c_int,ctypes.c_int,pointer,ctypes.c_int,
             ctypes.c_int,ctypes.c_int,ctypes.c_int,pointer,ctypes.c_uint32,pointer,
             ctypes.c_size_t,ctypes.POINTER(ctypes.c_uint32)]
@@ -31,6 +33,15 @@ def _load():
 
 
 LIBRARY=_load()
+
+
+def selected_point_support(indices, depths, width, intrinsics, support, radius):
+    if LIBRARY is None:return None
+    keep=np.empty(len(indices),np.uint8)
+    k=np.asarray(intrinsics,np.float64)
+    LIBRARY.sparse_point_support(indices.ctypes.data,depths.ctypes.data,keep.ctypes.data,
+        len(indices),width,k.ctypes.data,support,radius)
+    return keep.astype(bool)
 
 
 def clean_depth(depth, support, tolerance):

@@ -21,7 +21,7 @@ import numpy as np
 
 from tools.sparse_point_stream import ENCODING, sample_rgb_pixels
 from tools.native_sparse_kernels import depth_mm, pack_points
-from tools.point_preview_cleanup import clean_preview_depth
+from tools.point_preview_cleanup import clean_selected_points
 from tools.workspace_stream_crop_native import compress_depth
 from tools.workspace_stream_crop import WorkspaceStreamCropper, crop_volumes, retained_depth
 
@@ -104,7 +104,6 @@ def encode_native_camera(snapshot, camera, settings, cropper, robot=None, viewer
         values = snapshot['depth']
         valid = np.isfinite(values)&(values>0)&(values<=snapshot['maximum'])
         depth = np.where(valid,np.minimum(65535,np.floor(np.where(valid,values,0).astype(np.float64)*1000+.5)),0).astype(np.uint16)
-    depth = clean_preview_depth(depth, settings)
     metadata = dict(camera,width=snapshot['width'],height=snapshot['height'],
                     intrinsics=snapshot['intrinsics'],transform=snapshot['transform'],
                     color_space='original_rgb',color_projection=snapshot['projection'])
@@ -129,6 +128,13 @@ def encode_native_camera(snapshot, camera, settings, cropper, robot=None, viewer
             colors=np.floor(np.clip(colors.astype(np.float64)/255*np.asarray(snapshot['gain'])+np.asarray(snapshot['bias']),0,1)*255+.5).astype(np.uint8)
         raw=indices.astype('<u4').tobytes()+selected.astype('<u2').tobytes()+colors.tobytes()
         count=len(indices)
+    selected_count=count
+    raw,count=clean_selected_points(raw,count,snapshot['width'],snapshot['intrinsics'],settings)
+    metadata.update(preview_cleanup_enabled=settings.get('point_cleanup_enabled') is True,
+                    preview_cleanup_kind='selected_radius_v1',
+                    preview_cleanup_support=settings.get('point_cleanup_support',3),
+                    preview_cleanup_radius_mm=settings.get('point_cleanup_radius_mm',15),
+                    preview_cleanup_input_points=selected_count,preview_cleanup_removed=selected_count-count)
     predictor=settings.get('_sparse_predictor')
     if predictor in ('delta_v1','shuffle_delta_v2'):
         # Independent, reversible differences within this frame only. Spatial

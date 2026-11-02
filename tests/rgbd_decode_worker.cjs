@@ -36,6 +36,11 @@ const load = async name => {
   assert.deepEqual(allDecoded.previewSamples.depths,allDepths);
   assert.deepEqual(allDecoded.previewSamples.colors,allColors);
   await assert.rejects(decodeSparsePoints(allCompressed,{...allMetadata,preview_source_points:allCount+1}),/dimensions/,'All cannot silently omit source points');
+  const cleanedMetadata={...allMetadata,preview_source_points:allCount+20,preview_cleanup_enabled:true,
+    preview_cleanup_kind:'selected_radius_v1',preview_cleanup_input_points:allCount+20,preview_cleanup_removed:20};
+  const cleanedDecoded=await decodeSparsePoints(allCompressed,cleanedMetadata);
+  assert.deepEqual(cleanedDecoded.previewSamples.indices,allIndices,'explicit post-selection cleanup is accepted in All mode');
+  await assert.rejects(decodeSparsePoints(allCompressed,{...cleanedMetadata,preview_cleanup_removed:19}),/dimensions/);
   allDepths.set([65535,1,32768,65534]);
   const shuffled=new Uint8Array(allCount*9);
   let previousIndex=0,previousZ=0,previousRedGreen=0,previousGreen=0,previousBlueGreen=0;

@@ -109,7 +109,8 @@ class FixtureHandler(LanRemoteHandler):
                         'robot_overlay_enabled': True, 'robot_overlay_style': 'solid',
                         'robot_overlay_mask_scanned_robot': False, 'head_tracking_enabled': False,
                         'scene_lighting_enabled': True, 'scene_shadows_enabled': True,
-                        'orbit_distance': 1.2, 'focus_vertical_offset': .25, 'depth_only_enabled': True}
+                        'orbit_distance': 1.2, 'focus_vertical_offset': .25, 'depth_only_enabled': True,
+                        **self.server.load_site_settings()}
             self.serve_json(settings)
             return
         if self.path.startswith('/capture-'):

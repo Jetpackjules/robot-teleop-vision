@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 import av
 import numpy as np
 
-from tools.point_preview_cleanup import clean_preview_depth
+from tools.point_preview_cleanup import clean_selected_points
 from tools.workspace_stream_crop import _decode_depth, crop_volumes, retained_depth
 
 ENCODING = "u16_mm_sparse_points_deflate"
@@ -81,7 +81,7 @@ def _encode_camera(camera, color_bytes, depth_bytes, budget, cropper=None, volum
         camera.pop('color_projection',None)
         return previous[1]
     encoded = _encode_camera_uncached(camera,color_bytes,depth_bytes,budget,cropper,volumes)
-    updates = {k:camera[k] for k in ('depth_encoding','color_encoding','color_space','color_length','depth_length','color_width','color_height','preview_budget','preview_count','preview_source_points','depth_exact')}
+    updates = {k:camera[k] for k in ('depth_encoding','color_encoding','color_space','color_length','depth_length','color_width','color_height','preview_budget','preview_count','preview_source_points','depth_exact','preview_cleanup_enabled','preview_cleanup_kind','preview_cleanup_support','preview_cleanup_radius_mm','preview_cleanup_input_points','preview_cleanup_removed')}
     with cropper.cache_lock:
         cache[identity] = (key,encoded,updates)
         while len(cache)>32:
@@ -90,7 +90,7 @@ def _encode_camera(camera, color_bytes, depth_bytes, budget, cropper=None, volum
 
 
 def _encode_camera_uncached(camera, color_bytes, depth_bytes, budget, cropper=None, volumes=None, cleanup=None):
-    depth = clean_preview_depth(_decode_depth(depth_bytes, camera), cleanup or {})
+    depth = _decode_depth(depth_bytes, camera)
     if volumes:
         depth = retained_depth(depth, camera, volumes, cropper._bounds(depth, camera, volumes))
     depth = depth.ravel()
@@ -102,11 +102,18 @@ def _encode_camera_uncached(camera, color_bytes, depth_bytes, budget, cropper=No
     values = depth[valid]
     colors = _colors(color_bytes, camera, valid, values)
     packed = valid.astype("<u4").tobytes() + values.astype("<u2").tobytes() + colors.tobytes()
+    selected_count=len(valid)
+    packed,count=clean_selected_points(packed,selected_count,camera['width'],camera['intrinsics'],cleanup or {})
+    camera.update(preview_cleanup_enabled=(cleanup or {}).get('point_cleanup_enabled') is True,
+                  preview_cleanup_kind='selected_radius_v1',
+                  preview_cleanup_support=(cleanup or {}).get('point_cleanup_support',3),
+                  preview_cleanup_radius_mm=(cleanup or {}).get('point_cleanup_radius_mm',15),
+                  preview_cleanup_input_points=selected_count,preview_cleanup_removed=selected_count-count)
     encoded = zlib.compress(packed, 1)
     camera.update(depth_encoding=ENCODING, color_encoding="sparse_rgb8",
                   color_space="aligned_depth", color_length=0, depth_length=len(encoded),
                   color_width=camera["width"], color_height=camera["height"],
-                  preview_budget=budget, preview_count=len(valid), preview_source_points=total,
+                  preview_budget=budget, preview_count=count, preview_source_points=total,
                   depth_exact=True)
     camera.pop("color_projection", None)
     return encoded
@@ -124,8 +131,8 @@ def sparse_point_packet_for_view(packet, budget, cropper, settings):
         volumes = crop_volumes(settings)
     except (ValueError, TypeError, OverflowError):
         volumes = None
-    cleanup = {k:settings[k] for k in ('point_cleanup_support','point_cleanup_tolerance_mm') if k in settings}
-    if not volumes and not cleanup.get('point_cleanup_support'):
+    cleanup = {k:settings[k] for k in ('point_cleanup_enabled','point_cleanup_support','point_cleanup_radius_mm') if k in settings}
+    if not volumes and not cleanup.get('point_cleanup_enabled'):
         return sparse_point_packet(packet, budget)
     return _point_packet(packet, budget, cropper, volumes, cleanup)
 

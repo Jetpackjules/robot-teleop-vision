@@ -1,42 +1,64 @@
-"""Preview-only depth support filter; never changes capture/recording buffers."""
+"""Optional cleanup of selected preview points, never capture/recording buffers."""
 from __future__ import annotations
 
+import math
 import numpy as np
 
-from tools.native_sparse_kernels import clean_depth
+from tools.native_sparse_kernels import selected_point_support
 
 
-def clean_preview_depth(depth, settings):
-    """Remove unsupported pixels without averaging, moving or inventing points.
+def _reference_support(indices, depths, width, intrinsics, support, radius):
+    """Spatial hash reference, also used without the optional native kernel."""
+    y, x = np.divmod(indices, width)
+    fx, fy, cx, cy = intrinsics
+    points = np.column_stack(((x.astype(float)-cx)/fx*depths,
+                              (y.astype(float)-cy)/fy*depths, depths))
+    cells = np.floor(points/radius).astype(np.int64)
+    groups = {}
+    for i, cell in enumerate(cells):
+        groups.setdefault(tuple(cell), []).append(i)
+    keep = np.zeros(len(indices), bool)
+    for i, (point, cell) in enumerate(zip(points, cells)):
+        neighbours = 0
+        for dz in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    for j in groups.get(tuple(cell+(dx, dy, dz)), ()):
+                        if i != j and np.dot(point-points[j], point-points[j]) <= radius*radius:
+                            neighbours += 1
+                            if neighbours >= support: break
+                    if neighbours >= support: break
+                if neighbours >= support: break
+            if neighbours >= support: break
+        keep[i] = neighbours >= support
+    return keep
 
-    Support is counted in the eight neighbouring source depth pixels, before
-    workspace cropping or point sampling. Zero disables filtering exactly.
+
+def clean_selected_points(raw, count, width, intrinsics, settings):
+    """Crop -> select 20k/40k/all -> support filter -> compression.
+
+    Off returns the original bytes without decoding, copying or neighbour work.
+    Retained pixel indices, depth and RGB bytes stay unchanged and in source order.
     """
-    support = settings.get('point_cleanup_support', 0)
-    tolerance = settings.get('point_cleanup_tolerance_mm', 15)
-    if (type(support) not in (int, float) or not np.isfinite(support)
-            or support != int(support) or not 0 <= support <= 8):
-        raise ValueError('point cleanup support must be an integer from 0 to 8')
-    if (type(tolerance) not in (int, float) or not np.isfinite(tolerance)
-            or not 1 <= tolerance <= 100):
-        raise ValueError('point cleanup tolerance must be 1 to 100 mm')
-    if not support:
-        return depth
-    native = clean_depth(depth, support, tolerance)
-    if native is not None:
-        return native
-    values = depth.astype(np.int32)
-    neighbours = np.zeros(depth.shape, dtype=np.uint8)
-    height, width = depth.shape
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            if not (dx or dy):
-                continue
-            target = (slice(max(0, dy), min(height, height+dy)),
-                      slice(max(0, dx), min(width, width+dx)))
-            source = (slice(max(0, -dy), min(height, height-dy)),
-                      slice(max(0, -dx), min(width, width-dx)))
-            other = values[source]
-            neighbours[target] += ((other > 0)
-                                   & (np.abs(values[target]-other) <= tolerance))
-    return np.where(neighbours >= support, depth, 0).astype(depth.dtype)
+    if settings.get('point_cleanup_enabled') is not True:
+        return raw, count
+    support = settings.get('point_cleanup_support', 3)
+    radius = settings.get('point_cleanup_radius_mm', 15)
+    if type(support) is not int or not 1 <= support <= 16:
+        raise ValueError('point cleanup support must be an integer from 1 to 16')
+    if type(radius) not in (int, float) or not math.isfinite(radius) or not 1 <= radius <= 100:
+        raise ValueError('point cleanup radius must be 1 to 100 mm')
+    if len(raw) != count*9 or width < 1 or len(intrinsics) != 4:
+        raise ValueError('invalid selected point block')
+    if not all(math.isfinite(k) for k in intrinsics) or min(intrinsics[:2]) <= 0:
+        raise ValueError('invalid point intrinsics')
+    indices = np.frombuffer(raw, dtype='<u4', count=count)
+    depths = np.frombuffer(raw, dtype='<u2', count=count, offset=count*4)
+    keep = selected_point_support(indices, depths, width, intrinsics, support, radius)
+    if keep is None:
+        keep = _reference_support(indices, depths, width, intrinsics, support, radius)
+    kept = int(np.count_nonzero(keep))
+    if kept == count:
+        return raw, count
+    colors = np.frombuffer(raw, dtype=np.uint8, offset=count*6).reshape(count, 3)
+    return indices[keep].tobytes()+depths[keep].tobytes()+colors[keep].tobytes(), kept

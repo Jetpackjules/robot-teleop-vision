@@ -31,6 +31,7 @@ vm.runInContext(source+'\nglobalThis.control=new CapturePresetControl("wss://exa
   Socket.prototype.readyState=0;
   vm.runInContext('globalThis.workspace=new WorkspaceStreamControl("wss://example.test/head-tracking");',context);
   const settings={rgbd_client_id:'page-a',workspace_stream_crop_enabled:true,display_mode:'unified_mesh',
+    point_cleanup_enabled:true,point_cleanup_support:7,point_cleanup_radius_mm:4,
     modeled_workspace_enabled:true,modeled_workspace_center:[0,0,0],modeled_workspace_width:1.2,
     calibrate_robot_position:true,robot_visual_calibration_action:{operation:'save'},stream_preset:'latency'};
   assert.equal(context.workspace.update(settings),true,'view settings connect without a tracker or WebRTC');
@@ -43,6 +44,9 @@ vm.runInContext(source+'\nglobalThis.control=new CapturePresetControl("wss://exa
   assert.equal(connecting.sent.length,1);
   assert.equal(connecting.sent[0].modeled_workspace_width,1.4,'newest bounds replace pending edits');
   assert.equal(connecting.sent[0].modeled_workspace_enabled,true,'a queued point-detail update retains workspace bounds');
+  assert.equal(connecting.sent[0].point_cleanup_enabled,true);
+  assert.equal(connecting.sent[0].point_cleanup_support,7);
+  assert.equal(connecting.sent[0].point_cleanup_radius_mm,4);
   assert.equal(connecting.sent[0].point_preview_budget,20000,'partial point-detail updates share the latest bounds');
   assert.equal(connecting.sent[0].calibrate_robot_position,undefined,'calibration actions are never queued');
   assert.equal(connecting.sent[0].robot_visual_calibration_action,undefined);

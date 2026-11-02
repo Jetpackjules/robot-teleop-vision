@@ -30,7 +30,7 @@ CONTROL_SIZE = 64 * 1024
 CONTROL_OFFSET = SLOT_SIZE * 2
 SETTINGS_KEYS = {
     'workspace_stream_crop_enabled', 'display_mode', 'point_preview_enabled',
-    'point_cleanup_support', 'point_cleanup_tolerance_mm',
+    'point_cleanup_enabled', 'point_cleanup_support', 'point_cleanup_radius_mm',
     'point_preview_budget', 'modeled_workspace_enabled', 'modeled_workspace_center',
     'modeled_workspace_width', 'modeled_workspace_depth', 'modeled_workspace_height',
     'modeled_workspace_heading', 'modeled_workspace_clearance', '_sparse_predictor', '_mesh_profile',

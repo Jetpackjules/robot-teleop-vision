@@ -5,7 +5,7 @@ export function nativeStreamPreset(preset) {
 
 // Workspace filtering must also work when head tracking and WebRTC are off.
 // Only viewing bounds enter this reconnect queue, never robot/calibration actions.
-const WORKSPACE_KEYS = ['workspace_stream_crop_enabled', 'display_mode', 'point_preview_enabled', 'point_preview_budget', 'modeled_workspace_enabled',
+const WORKSPACE_KEYS = ['point_cleanup_enabled','point_cleanup_support','point_cleanup_radius_mm','workspace_stream_crop_enabled', 'display_mode', 'point_preview_enabled', 'point_preview_budget', 'modeled_workspace_enabled',
   'modeled_workspace_center', 'modeled_workspace_width', 'modeled_workspace_depth',
   'modeled_workspace_height', 'modeled_workspace_heading', 'modeled_workspace_clearance'];
 

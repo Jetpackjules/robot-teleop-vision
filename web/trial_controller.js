@@ -145,8 +145,9 @@ export class TrialController {
         ...(['0','-2','-1','20000','40000'].includes(detail) ? {point_preview_detail:Number(detail)} : {}),
         ...(['quality','latency'].includes(preset) ? {stream_preset:preset} : {}),
         ...(overlay ? {robot_overlay_enabled:overlay.checked} : {}),
-        point_cleanup_support:Number(byId('point-cleanup-support')?.value || 0),
-        point_cleanup_tolerance_mm:Number(byId('point-cleanup-tolerance')?.value || 15),
+        point_cleanup_enabled:byId('point-cleanup-enabled')?.checked===true,
+        point_cleanup_support:Number(byId('point-cleanup-support')?.value || 3),
+        point_cleanup_radius_mm:Number(byId('point-cleanup-radius')?.value || 15),
         ...(['keyboard','leader'].includes(input) ? {control_source:input} : {})};
     };
     recording.root.addEventListener('recordingchange', () => this.render());
