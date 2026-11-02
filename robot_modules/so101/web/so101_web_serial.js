@@ -188,6 +188,7 @@ export class So101ArmController extends EventTarget {
       try {
         const status = JSON.parse(event.data);
         if (status.type !== "arm_status") return;
+        this.statusRevision = (this.statusRevision || 0) + 1;
         const reply = status.view_settings_reply;
         const pending = reply && this.viewSettingsPending.get(reply.request_id);
         if (pending) {
@@ -594,9 +595,17 @@ export class So101ArmController extends EventTarget {
       await this.connectKeyboard();
     if (!this.latest.keyboardConnected) return this.prepareLeaderTrial(options);
     await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected && status.keyboardConnected);
-    this.clearKeyboardMotion();
+    const before = this.statusRevision || 0;
+    if (!this.clearKeyboardMotion()) throw new Error("Could not send the idle keyboard packet. Wait for the arm connection, then retry Start practice.");
+    const idleSequence = this.lastKeyboardIntentSequence;
+    // A timeout sends Hold on the host. Do not decide whether to Enable from
+    // a cached pre-timeout 'armed' status; first acknowledge our new idle input.
+    await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected && status.keyboardConnected
+      && (this.statusRevision || 0) > before && status.status?.last_seq >= idleSequence
+      && status.status?.measured_feedback_fresh === true);
     if (!this.latest.armed || (this.latest.status?.control_source ?? this.latest.controlMode) !== "keyboard") this.enableArm();
     await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected && status.keyboardConnected
+      && status.status?.measured_feedback_fresh === true
       && status.armed && (status.status?.control_source ?? status.controlMode) === "keyboard");
   }
 
@@ -613,12 +622,13 @@ export class So101ArmController extends EventTarget {
   }
 
   enableArm() {
+    if (this.trialSuspended) return false;
     const source = this.latest.keyboardConnected ? "keyboard" : "leader";
     if (source === "leader" && !this.latest.leaderConnected) throw new Error("Connect the leader arm or enable keyboard control first");
     if (source === "leader" && !this.leaderInputFresh()) throw new Error("Wait for fresh readings from all six leader encoders before enabling the arm");
     if (!this.latest.serverConnected) throw new Error("Arm control server is not connected");
-    if (source === "keyboard") this.sendKeyboardIntent();
-    this.send({ type: "arm_enable", source });
+    if (source === "keyboard" && !this.sendKeyboardIntent()) throw new Error("Could not send fresh keyboard input. Wait for the connection and retry.");
+    if (!this.send({ type: "arm_enable", source })) throw new Error("Could not send Enable. Wait for the connection and retry.");
   }
 
   hold() {
@@ -633,8 +643,11 @@ export class So101ArmController extends EventTarget {
   waitForTrialStatus(predicate) {
     if (predicate(this.latest)) return Promise.resolve();
     return new Promise((resolve, reject) => {
+      let settled = false, pollTimer = 0;
       const finish = (error) => {
-        window.clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer); window.clearTimeout(pollTimer);
         this.removeEventListener("status", check);
         if (error) reject(error); else resolve();
       };
@@ -642,8 +655,20 @@ export class So101ArmController extends EventTarget {
         if (!this.latest.serverConnected) finish(new Error("Arm connection was lost. The trial remains held."));
         else if (predicate(this.latest)) finish();
       };
-      const timer = window.setTimeout(() => finish(new Error("The arm did not confirm the trial control change.")), 3000);
+      const timer = window.setTimeout(() => {
+        if (predicate(this.latest)) return finish();
+        const status = this.latest.status || {};
+        finish(new Error(`The arm did not confirm the trial control change. Last status: ${this.latest.state || 'unknown'} / ${status.control_source || 'none'}${status.fault ? ': '+status.fault : ''}.`));
+      }, 6000);
       this.addEventListener("status", check);
+      // Read-only retries recover delayed/missed status delivery, never repeat
+      // Enable or a motion command. No recording begins without confirmation.
+      const poll = () => {
+        if (settled) return;
+        if (this.latest.serverConnected) this.send({type:"arm_status_request"});
+        if (!settled) pollTimer = window.setTimeout(poll,500);
+      };
+      poll();
     });
   }
 
@@ -797,8 +822,9 @@ export class So101ArmController extends EventTarget {
     this.gripperContactLatched = false;
     this.latest.keyboardDeadman = false;
     this.keyboardInputActive = false;
-    this.sendKeyboardIntent(true);
+    const sent = this.sendKeyboardIntent(true);
     this.emitStatus();
+    return sent;
   }
 
   keyboardAxis(positive, negative) {
@@ -847,7 +873,7 @@ export class So101ArmController extends EventTarget {
       precision: this.keyboardKeys.has("ShiftLeft") || this.keyboardKeys.has("ShiftRight"),
       deadman: inputEnabled,
     };
-    return this.send({
+    const sent = this.send({
       ...common,
       type: "arm_cartesian_velocity",
       input_timing: this.latest.keyboardTiming,
@@ -860,6 +886,8 @@ export class So101ArmController extends EventTarget {
       wrist: [wristPitch, wristRoll],
       gripper,
     });
+    if (sent) this.lastKeyboardIntentSequence = common.seq;
+    return sent;
   }
 
   restartFollower() {

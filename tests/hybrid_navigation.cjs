@@ -146,8 +146,7 @@ for (const [width, height, fx, fy] of [[640, 480, 600, 600], [192, 109, 96, 97],
   check(vertices.every(Number.isFinite), 'camera marker handles different camera intrinsics');
   check(vertices[5] < 0, 'camera frustum points along the Godot optical forward axis');
 }
-const packet = (id, reference, keyframe, sequence) => ({sequence, metadata: {cameras: [{id,
-  depth_temporal_keyframe: keyframe, depth_keyframe_id: reference}]}});
+const packet = (id, reference, keyframe, sequence) => {const camera={id,depth_temporal_keyframe:keyframe,depth_keyframe_id:reference};return {sequence,metadata:{cameras:[camera]},payloads:[{metadata:camera}]};};
 const queued = [packet('A', 1, true, 1), packet('B', 1, true, 2),
   ...Array.from({length: 9}, (_, i) => packet('A', 1, false, i + 3))];
 trimIndependentFrameQueue(queued);
@@ -203,11 +202,17 @@ check(changedReference[0].sequence === 1,
   let requestedMode;
   const presets = await import('data:text/javascript;base64,' + Buffer.from(
     fs.readFileSync(path.join(__dirname, '../web/capture_presets.js'), 'utf8')).toString('base64'));
+  const pointDetail=await import('data:text/javascript;base64,'+Buffer.from(fs.readFileSync(path.join(__dirname,'../web/point_detail_settings.js'),'utf8')).toString('base64'));
+  const pointChoice={value:'0'};
   const policy = vm.createContext({URLSearchParams, document:{getElementById:control,body:{classList:{contains:()=>false}}}, robotModule:{},
     viewSettingsVersion:15,displayModes:['point_cloud','independent_mesh','blendpcr','rgb_camera'],
     modeledViewSettings:()=>({modeled_workspace_enabled:false}),modeledWorkspace:()=>null,lastValidModeled:{},restoreModeledSettings(){},
     defaultDisplayMode:'independent_mesh',displayModeSelect:control('display-mode'),
-    pointPreviewToggle:{value:'0'},triangleFilter:{value:'standard'},
+    pointPreviewToggle:pointChoice,triangleFilter:{value:'standard'},
+    cleanupEnabled:control('point-cleanup-enabled'),cleanupSupport:control('point-cleanup-support'),cleanupRadius:control('point-cleanup-radius'),
+    cleanupSettings:()=>({point_cleanup_enabled:false,point_cleanup_support:3,point_cleanup_radius_mm:15}),
+    pointPreviewActive:()=>pointChoice.value==='-1'||Number(pointChoice.value)>0,selectedPointBudget:()=>pointChoice.value==='-1'?0:20000,
+    resolvePointDetail:pointDetail.resolvePointDetail,localStorage:{getItem:()=>null,setItem(){}},
     streamPresetSelect:control('stream-preset'),localSavedViewSettings:()=>null,
     updateHeadTrackingOptions(){},updateViewLabels(){},showHybrid(){},updateStatus(){},
     viewportGeneration:0,retainedNavigation:null,selectedRgbCamera:'',capturePresetControl:null,workspaceStreamControl:{update(){}},remoteUrl:()=> 'wss://example.test/head-tracking',
@@ -223,7 +228,7 @@ check(changedReference[0].sequence === 1,
     +section('async function startHybridViewport(', 'function startSelectedViewport('),policy);
   for(const legacy of [undefined,false,true]) {
     policy.saved={settings_version:14,persistent_temporal_reference_enabled:legacy,
-      full_rgb_frame_updates_enabled:false,fov:71,orbit_distance:.83,display_mode:'blendpcr'};
+      full_rgb_frame_updates_enabled:false,fov:71,orbit_distance:.83,display_mode:'blendpcr',point_preview_detail:0};
     vm.runInContext('restoreViewSettings(saved);payload=viewSettingsPayload();',policy);
     check(policy.payload.persistent_temporal_reference_enabled===false,'old or absent saved compression stays off');
     check(policy.payload.full_rgb_frame_updates_enabled===true,'both camera profiles always send full RGB frames');

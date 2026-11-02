@@ -186,7 +186,7 @@ def main():
     server.browser_client_id = 'recording-fixture'
     stopping = threading.Event()
     control_lock = threading.Lock()
-    control_status = {'state': 'ready', 'armed': False, 'torque_enabled': False}
+    control_status = {'state': 'ready', 'armed': False, 'torque_enabled': False, 'control_source':'none', 'last_seq':-1}
 
     def receive_commands():
         # Simulated acknowledgement only; this socket never forwards to hardware.
@@ -197,7 +197,10 @@ def main():
                 if message.get('type') in ('arm_hold', 'arm_enable'):
                     armed = message['type'] == 'arm_enable'
                     with control_lock:
-                        control_status.update(state='armed' if armed else 'hold', armed=armed, torque_enabled=True)
+                        control_status.update(state='armed' if armed else 'hold', armed=armed, torque_enabled=True, control_source=message.get('source','leader') if armed else 'none')
+                elif message.get('type') == 'arm_cartesian_velocity':
+                    with control_lock:
+                        control_status['last_seq'] = message['seq']
             except TimeoutError:
                 continue
             except OSError:

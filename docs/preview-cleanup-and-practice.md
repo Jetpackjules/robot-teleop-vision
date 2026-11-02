@@ -34,3 +34,15 @@ read/write age, mapped to the same host monotonic clock as camera timestamps.
 An isolated alignment miss waits up to 100 ms for a genuinely matching pair.
 Each saved camera/feedback pair must still meet the 100 ms alignment bound;
 stale input and persistent mismatch still preserve an incomplete episode.
+
+Keyboard practice handoffs acknowledge a newly sent zero-motion input by its
+follower sequence and fresh encoder feedback before deciding whether Enable
+is needed. Cached status from before a host timeout cannot decide that handoff.
+Pending confirmation polls status only; it never retries movement or Enable.
+No recording starts without the confirmed keyboard state. A timeout reports
+the last state, control source and fault for diagnosis.
+
+Wheel zoom clamps actual optical distance to the aimed-at target, including
+the camera elevation and claw aim offset, instead of clamping the nominal
+orbit radius. The closest distance is 0.125 m. The original neutral framing,
+head orbit, straight dolly direction, target picking and saved views remain.

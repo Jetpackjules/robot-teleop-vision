@@ -2359,10 +2359,7 @@ function orbitViewer(base, headDelta) {
   ) * Math.PI / 180;
   const direction = rotateAroundAxis(baseDirection, worldUp, -yaw);
   const pitchAxis = rotateAroundAxis(baseRight, worldUp, -yaw);
-  let distance = Number(settings.orbit_distance || 0.65);
-  if (settings.dolly_enabled) distance += (relativeHead[2] * 100) * Number(settings.dolly_gain || 0);
-  distance += state.manualDolly;
-  distance = clamp(distance, Number(settings.min_distance || 0.125), Number(settings.max_distance || 3));
+  const headDolly = settings.dolly_enabled ? (relativeHead[2] * 100) * Number(settings.dolly_gain || 0) : 0;
   // Build the orbit at its reference radius, then dolly along its optical axis.
   // Fixed camera height plus a changing horizontal radius would change pitch.
   const offset = add(scale(direction, reference.distance), scale(worldUp, reference.height));
@@ -2374,7 +2371,13 @@ function orbitViewer(base, headDelta) {
   const aim = rotateAroundAxis(rotateAroundAxis(state.orbitAimOffset || [0, 0, 0], worldUp, -yaw), pitchAxis, turn);
   const target = add(focus, aim);
   const viewer = lookAtTransform(add(focus, orbitOffset), target, worldUp);
-  const dolly = distance - reference.distance;
+  // The orbit radius differs from distance to the aimed-at claw, especially
+  // with a high camera or an aim offset. Clamp actual optical distance.
+  const rayDistance = Math.hypot(...orbitOffset.map((v,i)=>v-aim[i]));
+  state.orbitZoomBaseDistance = rayDistance + Number(settings.orbit_distance || .65) - reference.distance + headDolly;
+  const distance = clamp(state.orbitZoomBaseDistance + state.manualDolly,
+    Number(settings.min_distance || .125), Number(settings.max_distance || 3));
+  const dolly = distance - rayDistance;
   for (let i = 0; i < 3; i++) viewer[12 + i] += viewer[8 + i] * dolly;
   return viewer;
 }
@@ -2444,13 +2447,14 @@ function attachPointerNavigation(options = {}) {
   };
   const wheel = (event) => {
     state.settings.inspect_enabled = true;
-    const distance = Math.max(0.1, Number(state.settings.orbit_distance || 0.65) + state.manualDolly);
-    state.manualDolly += event.deltaY * distance * 0.0015;
-    state.manualDolly = clamp(
-      state.manualDolly,
-      Number(state.settings.min_distance || 0.125) - Number(state.settings.orbit_distance || 0.65),
-      Number(state.settings.max_distance || 3) - Number(state.settings.orbit_distance || 0.65),
-    );
+    // Refresh the reference from the same camera math used by drawing, even
+    // when several wheel events arrive before the next rendered frame.
+    if (state.baseViewer?.transform) orbitViewer(state.baseViewer.transform,state.lastHeadDelta || [0,0,0]);
+    const baseDistance = state.orbitZoomBaseDistance ?? Number(state.settings.orbit_distance || .65);
+    const minimum = Number(state.settings.min_distance || .125), maximum = Number(state.settings.max_distance || 3);
+    const distance = clamp(baseDistance + state.manualDolly,minimum,maximum);
+    state.manualDolly = clamp(state.manualDolly + event.deltaY * distance * .0015,
+      minimum-baseDistance,maximum-baseDistance);
     event.preventDefault();
   };
   const contextMenu = (event) => event.preventDefault();
