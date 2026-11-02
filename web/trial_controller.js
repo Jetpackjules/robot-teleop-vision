@@ -526,7 +526,9 @@ export class TrialController {
     byId('trial-condition').textContent = guided ? CONDITIONS[this.condition]
       : this.display.value === 'rgb_camera' ? CONDITIONS.fixed_rgb : this.head.checked ? CONDITIONS.head_3d : CONDITIONS.mouse_3d;
     const task = recorder.task.value.trim() || 'Task not configured';
-    byId('trial-task').textContent = task; byId('trial-task').title = task;
+    const taskNumber = {single_block:1, count_blocks:2, custom:3}[this.state.plan[this.state.index].task_id];
+    const taskTitle = guided && taskNumber ? `Task ${taskNumber}: ${task}` : task;
+    byId('trial-task').textContent = taskTitle; byId('trial-task').title = taskTitle;
     if (active) this.lastElapsed = Number(status.elapsed_seconds) || 0;
     else if (saved) this.lastElapsed = Number(saved.active_duration_seconds ?? saved.duration_seconds) || this.lastElapsed;
     byId('trial-timer').textContent = formatTime(this.lastElapsed);
