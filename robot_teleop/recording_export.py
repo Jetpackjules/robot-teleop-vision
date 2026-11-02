@@ -39,7 +39,7 @@ def inspect_episode(root: Path) -> tuple[dict, dict[str, np.ndarray]]:
         if arrays[key].shape != (count, dimensions) or not np.all(np.isfinite(arrays[key])):
             raise RecordingError('Invalid measured joint/action arrays.')
     times = arrays['timestamp']
-    if times.shape != (count,) or not np.all(np.isfinite(times)) or np.any(np.diff(times) < 0):
+    if times.shape != (count,) or not np.all(np.isfinite(times)) or np.any(times < 0) or np.any(np.diff(times) < 0):
         raise RecordingError('Capture timestamps are invalid or run backwards.')
     if times[-1]-times[0] < .001:
         raise RecordingError('The episode contains no advancing camera frames.')
@@ -59,10 +59,30 @@ def inspect_episode(root: Path) -> tuple[dict, dict[str, np.ndarray]]:
         for name in paths:
             _image_path(root, name)
     for key, shape in [('obs.capture_unix_ns', (count, len(cameras))),
+                       ('obs.capture_monotonic_ns', (count, len(cameras))),
+                       ('obs.robot_received_ns', (count,)), ('command_sequence', (count,)),
                        ('obs.robot_measured_ns', (count,)), ('action_applied_ns', (count,)),
                        ('camera_sequence', (count, len(cameras)))]:
-        if arrays[key].shape != shape or arrays[key].dtype.kind not in 'iu':
-            raise RecordingError('Invalid source timing arrays.')
+        value = arrays.get(key)
+        if value is None or value.shape != shape or value.dtype.kind not in 'iu':
+            raise RecordingError(f'Missing or invalid source timing array: {key}.')
+    clock_keys = ('obs.capture_unix_ns', 'obs.capture_monotonic_ns', 'obs.robot_received_ns',
+                  'obs.robot_measured_ns', 'action_applied_ns')
+    if any(np.any(arrays[key] < 0) or np.any(arrays[key] > np.iinfo(np.int64).max) for key in clock_keys):
+        raise RecordingError('Invalid source clock values.')
+    captured = arrays['obs.capture_monotonic_ns'].astype(np.int64)
+    measured = arrays['obs.robot_measured_ns'].astype(np.int64)
+    if (np.any(np.ptp(captured, axis=1) > 100_000_000)
+            or np.any(np.abs(captured-measured[:, None]) > 100_000_000)):
+        raise RecordingError('Recorded camera/robot timing exceeds the 100-ms alignment limit.')
+    if (np.any(np.diff(captured, axis=0) < 0) or np.any(np.diff(arrays['obs.capture_unix_ns'].astype(np.int64), axis=0) < 0)
+            or np.any(arrays['camera_sequence'][1:] < arrays['camera_sequence'][:-1])):
+        raise RecordingError('Recorded camera timestamps or frame counters run backwards.')
+    if (np.any(arrays['obs.robot_measured_ns'] > arrays['obs.robot_received_ns'])
+            or np.any(arrays['action_applied_ns'] > arrays['obs.robot_received_ns'])):
+        raise RecordingError('Recorded robot measurement/action times exceed their receipt times.')
+    if not np.allclose(times-times[0], (captured[:, 0]-captured[0, 0])/1e9, atol=1e-6, rtol=0):
+        raise RecordingError('Relative timestamps disagree with the recorded capture clock.')
     return manifest, arrays
 
 

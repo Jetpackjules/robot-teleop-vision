@@ -2639,16 +2639,25 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
                 raise RecordingError("Recording requests must use application/json.")
             data = json.loads(self.rfile.read(length).decode("utf-8"))
-            if not isinstance(data, dict) or set(data)-{"command", "client", "task", "cameras", "fps", "outcome", "trial"}:
+            if not isinstance(data, dict) or set(data)-{"command", "client", "task", "cameras", "fps", "outcome", "trial", "session_id", "block_count"}:
                 raise RecordingError("Invalid recording request fields.")
             client = camera_id(data.get("client"))
             recorder = self.server.episode_recorder
             command = data.get("command")
+            if command in ('score', 'rate') and data.get('session_id') is not None:
+                with self.server.browser_client_lock:
+                    if self.server.browser_client_id != client:
+                        raise RecordingError('Reconnect this controller before reviewing a result.')
+                    recorder.resume_result_review(client, data['session_id'])
             if command == "start":
                 with self.server.browser_client_lock:
                     if self.server.browser_client_id != client:
                         raise RecordingError("Reconnect this controller before starting an episode.")
                     result = recorder.start(client, data.get("task"), data.get("cameras"), data.get("fps", 15), data.get("trial"))
+            elif command == 'score':
+                result = recorder.set_block_count(client, data.get('block_count'))
+            elif command == 'rate':
+                result = recorder.set_outcome(client, data.get('outcome'))
             elif command in ("stop", "discard"):
                 result = recorder.stop(client, discard=command == "discard", outcome=data.get("outcome", "unrated"))
             elif command in ("pause", "resume"):

@@ -131,19 +131,22 @@ TRIAL = {'session_id': 'test-session', 'index': 1, 'total': 3,
          'condition': 'fixed_rgb', 'display_mode': 'rgb_camera'}
 
 
-def test_trial_metadata_survives_host_save(tmp_path):
+@pytest.mark.parametrize('total', [3, 12, 18])
+def test_trial_metadata_survives_host_save(tmp_path, total):
     with recorder_at(tmp_path) as (recorder, _, _):
-        supplied = dict(TRIAL)
+        expected = {**TRIAL, 'total': total, 'index': total,
+                    'session_name': 'Participant Î± / test â€” 2026-10-28 16:00:00 GMT+1'}
+        supplied = dict(expected)
         recorder.start('page-a', 'Match the viewing condition', trial=supplied)
         supplied['condition'] = 'head_3d'
         wait_for(lambda: recorder.status()['frames'] >= 3)
-        assert recorder.status()['trial'] == TRIAL
+        assert recorder.status()['trial'] == expected
         recorder.stop('page-a', outcome='success')
         wait_for(lambda: recorder.status()['state'] == 'idle')
         saved = recorder.status()['last_saved']
-        assert saved['trial'] == TRIAL and saved['duration_seconds'] > 0
+        assert saved['trial'] == expected and saved['duration_seconds'] > 0
         manifest, _ = inspect_episode(tmp_path/saved['episode'])
-        assert manifest['trial'] == TRIAL
+        assert manifest['trial'] == expected
 
 
 def test_pause_freezes_trial_time_without_dropping_capture_and_finishes_paused(tmp_path):
@@ -217,6 +220,8 @@ def test_pause_freezes_trial_time_without_dropping_capture_and_finishes_paused(t
 @pytest.mark.parametrize('patch', [
     {'index': 0}, {'index': True}, {'index': 4}, {'total': 31}, {'session_id': '../test'},
     {'session_id': []}, {'condition': 'invented'}, {'display_mode': 'blendpcr'}, {'extra': 'unbounded'},
+    {'session_name': ''}, {'session_name': ' '}, {'session_name': []},
+    {'session_name': 'x'*201}, {'session_name': 'name\n2026-10-28'},
 ])
 def test_invalid_trial_metadata_cannot_start_capture(tmp_path, patch):
     with recorder_at(tmp_path) as (recorder, _, _):
@@ -225,7 +230,7 @@ def test_invalid_trial_metadata_cannot_start_capture(tmp_path, patch):
         assert recorder.status()['state'] == 'idle' and recorder.worker is None
 
 
-@pytest.mark.parametrize('change', ['stale_rgb', 'profile', 'robot', 'invalid_feedback'])
+@pytest.mark.parametrize('change', ['stale_rgb', 'profile', 'robot', 'invalid_feedback', 'camera_order'])
 def test_source_faults_preserve_incomplete_episode(tmp_path, change):
     with recorder_at(tmp_path) as (recorder, source, status):
         recorder.start('page-a', 'Test source health')
@@ -236,6 +241,8 @@ def test_source_faults_preserve_incomplete_episode(tmp_path, change):
             source.epoch = 'changed'
         elif change == 'robot':
             status['restart_count'] = 1
+        elif change == 'camera_order':
+            source.ids.reverse()
         else:
             status['measured_feedback_fresh'] = False
         wait_for(lambda: recorder.status()['state'] == 'error')
@@ -342,6 +349,95 @@ def test_export_resampling_retains_timing_and_rejects_large_gaps():
         resample_indices(np.array([0., 1.]), 15)
 
 
+@pytest.mark.parametrize('has_aligned_feedback', [True, False])
+def test_robot_feedback_must_align_with_every_camera(tmp_path, has_aligned_feedback):
+    recorder = HostEpisodeRecorder(tmp_path, load_robot_operator('so101'), SyntheticSource)
+    now = time.monotonic_ns()
+    if has_aligned_feedback:
+        recorder.observe_robot(feedback(), received_ns=now-50_000_000)
+    recorder.observe_robot(feedback(), received_ns=now)
+    frames = [RgbFrame(str(i), JPEG, 64, 48, 1, 'capture', time.time_ns(), now-age, now)
+              for i, age in enumerate([10_000_000, 105_000_000])]
+    source = SimpleNamespace(snapshot=lambda: frames)
+    if has_aligned_feedback:
+        _, robot = recorder._sample(source)
+        assert max(abs(robot['measured_ns']-f.capture_monotonic_ns) for f in frames) <= 100_000_000
+    else:
+        with pytest.raises(RecordingError, match='100 ms'):
+            recorder._sample(source)
+
+
+def test_frozen_short_capture_is_not_reported_as_complete(tmp_path):
+    with recorder_at(tmp_path) as (recorder, source, _):
+        snapshot = source.snapshot
+        cached = []
+
+        def frozen():
+            if not cached:
+                cached.extend(snapshot())
+            return cached
+
+        source.snapshot = frozen
+        recorder.start('page-a', 'Short frozen capture')
+        wait_for(lambda: recorder.status()['frames'] >= 2)
+        recorder.stop('page-a', outcome='success')
+        wait_for(lambda: recorder.status()['state'] not in ('recording', 'saving'))
+        saved = recorder.status()['last_saved']
+        assert saved['status'] == 'incomplete'
+        assert 'advanc' in recorder.status()['message'].lower()
+        assert (tmp_path/saved['episode']/'frames.jsonl').is_file()
+
+
+def test_failed_finalization_preserves_raw_evidence_and_cannot_export(tmp_path, monkeypatch):
+    with recorder_at(tmp_path) as (recorder, _, _):
+        recorder.start('page-a', 'Finalization failure')
+        wait_for(lambda: recorder.status()['frames'] >= 3)
+
+        def fail(*args, **kwargs):
+            raise OSError('Synthetic disk failure')
+
+        monkeypatch.setattr('robot_teleop.recording.np.savez_compressed', fail)
+        recorder.stop('page-a', outcome='success')
+        wait_for(lambda: recorder.status()['state'] == 'error')
+        folder = tmp_path/recorder.episode
+        assert (folder/'frames.jsonl').is_file() and list((folder/'camera_1').glob('*.jpg'))
+        assert json.loads((folder/'episode.json').read_text())['status'] != 'complete'
+        with pytest.raises(RecordingError, match='No matching complete episodes'):
+            export_episodes(tmp_path, tmp_path/'export')
+
+
+def test_disk_pressure_stops_capture_as_incomplete(tmp_path, monkeypatch):
+    with recorder_at(tmp_path) as (recorder, _, _):
+        recorder.minimum_free_bytes = 1
+        monkeypatch.setattr('robot_teleop.recording.shutil.disk_usage',
+                            lambda _: SimpleNamespace(free=2 if recorder.samples < 3 else 0))
+        recorder.start('page-a', 'Disk pressure')
+        wait_for(lambda: recorder.status()['state'] == 'error')
+        saved = recorder.status()['last_saved']
+        assert saved['status'] == 'incomplete' and saved['frames'] >= 3
+        assert 'disk space' in recorder.status()['message']
+
+
+@pytest.mark.parametrize('fault', ['camera_skew', 'robot_skew', 'backward_sequence', 'relative_time'])
+def test_export_rejects_invalid_recorded_timing(tmp_path, fault):
+    with recorder_at(tmp_path) as (recorder, _, _):
+        root = complete_episode(recorder)
+    with np.load(root/'episode.npz', allow_pickle=False) as data:
+        arrays = dict(data)
+    if fault == 'camera_skew':
+        arrays['obs.capture_monotonic_ns'][:, 1] -= 200_000_000
+        arrays['obs.capture_unix_ns'][:, 1] -= 200_000_000
+    elif fault == 'robot_skew':
+        arrays['obs.robot_measured_ns'] -= 200_000_000
+    elif fault == 'backward_sequence':
+        arrays['camera_sequence'][1, 0] = arrays['camera_sequence'][0, 0]-1
+    else:
+        arrays['timestamp'][1:] += .01
+    np.savez_compressed(root/'episode.npz', **arrays)
+    with pytest.raises(RecordingError):
+        inspect_episode(root)
+
+
 class CaptureHandler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -389,7 +485,9 @@ def request(port, method, path, body=None, origin=True):
 
 
 @pytest.mark.parametrize('pause_trial', [False, True])
-def test_real_http_and_existing_multipart_rgb_record_without_motor_commands(tmp_path, monkeypatch, pause_trial):
+@pytest.mark.parametrize('metric', ['pass_fail', 'block_count'])
+def test_real_http_and_existing_multipart_rgb_record_without_motor_commands(tmp_path, monkeypatch, pause_trial, metric):
+    trial = {**TRIAL, 'success_metric': metric}
     capture = ThreadingHTTPServer(('127.0.0.1', 0), CaptureHandler)
     capture.daemon_threads = True
     capture.stopping, capture.requests = threading.Event(), []
@@ -420,7 +518,7 @@ def test_real_http_and_existing_multipart_rgb_record_without_motor_commands(tmp_
         assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'start', 'client': 'page-a', 'task': 'Synthetic HTTP trial'}, origin=False)[0] == 403
         assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'start', 'client': 'other', 'task': 'Wrong page'})[0] == 409
         assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'start', 'client': 'page-a', 'task': 'Synthetic HTTP trial', 'trial': {**TRIAL, 'index': 0}})[0] == 409
-        assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'start', 'client': 'page-a', 'task': 'Synthetic HTTP trial', 'trial': TRIAL})[0] == 200
+        assert request(server.server_port, 'POST', '/api/v1/recording', {'command': 'start', 'client': 'page-a', 'task': 'Synthetic HTTP trial', 'trial': trial})[0] == 200
         wait_for(lambda: server.episode_recorder.status()['frames'] >= 4)
         assert request(server.server_port, 'GET', '/api/v1/recording?client=page-a')[1]['state'] == 'recording'
         if pause_trial:
@@ -446,7 +544,20 @@ def test_real_http_and_existing_multipart_rgb_record_without_motor_commands(tmp_
         saved = server.episode_recorder.status()['last_saved']
         manifest, data = inspect_episode(tmp_path/'episodes'/saved['episode'])
         assert manifest['status'] == 'complete' and manifest['task'] == 'Synthetic HTTP trial'
-        assert manifest['trial'] == TRIAL
+        assert manifest['trial'] == trial
+        # The actual result popup sends session_id, including after a page refresh.
+        result_fields = {'command': 'rate', 'outcome': 'failure'} if metric == 'pass_fail' else {'command': 'score', 'block_count': 0}
+        result_fields.update(client='page-b', session_id=trial['session_id'])
+        assert request(server.server_port, 'POST', '/api/v1/recording', result_fields)[0] == 409
+        server.browser_client_id = 'page-b'
+        assert request(server.server_port, 'POST', '/api/v1/recording', {**result_fields, 'session_id': 'wrong-session'})[0] == 409
+        assert request(server.server_port, 'POST', '/api/v1/recording', {**result_fields, 'unexpected': True})[0] == 409
+        code, reviewed = request(server.server_port, 'POST', '/api/v1/recording', result_fields)
+        assert code == 200, reviewed
+        assert reviewed['last_saved']['result_reviewed']
+        manifest = json.loads((tmp_path/'episodes'/saved['episode']/'episode.json').read_text())
+        assert manifest['result_reviewed']
+        assert manifest['outcome'] == 'failure' if metric == 'pass_fail' else manifest['block_count'] == 0
         assert (tmp_path/'episodes'/saved['episode']/str(data['obs.images.camera_1'][0])).read_bytes() == JPEG
         assert all('w=3840' in path and 'q=95' in path for path in capture.requests)
         with pytest.raises(socket.timeout):
@@ -501,3 +612,148 @@ print(json.dumps({'episodes':d.num_episodes,'frames':len(d),'training_batch':Tru
     loaded = subprocess.run([os.environ['LEROBOT_TEST_PYTHON'], '-c', code, str(output), str(sorted((tmp_path/'source').iterdir())[0])], cwd=ROOT,
                             env=env, capture_output=True, text=True, timeout=120)
     assert loaded.returncode == 0, loaded.stderr[-6000:]
+
+
+def test_original_rgb_retries_transient_startup_capacity_then_preserves_frame():
+    attempts = []
+    class Reader:
+        closed = False
+        def read_part(self):
+            source.stopping.set()
+            return {"x-frame-width":"64","x-frame-height":"48","x-source-width":"64","x-source-height":"48",
+                    "x-capture-unix-ms":str(time.time_ns()/1e6),"x-camera-id":"camera_c","x-frame-sequence":"1"}, JPEG
+        def close(self):self.closed=True
+    reader=Reader()
+    def factory(url):
+        attempts.append(url)
+        if len(attempts)<3:raise OSError("HTTP/1.1 503 Service Unavailable")
+        return reader
+    source=CaptureRgbSource('127.0.0.1',8781,factory)
+    source.start(['camera_c']);source.threads[0].join(timeout=3)
+    assert len(attempts)==3 and not source.error and reader.closed
+    assert source.frames['camera_c'][0].jpeg==JPEG
+
+
+def test_original_rgb_capacity_failure_names_camera_and_actual_http_error():
+    attempts=[]
+    def factory(url):
+        attempts.append(url)
+        raise OSError('HTTP/1.1 503 Service Unavailable')
+    source=CaptureRgbSource('127.0.0.1',8781,factory)
+    source.start(['camera_c']);source.threads[0].join(timeout=3)
+    assert len(attempts)==4
+    assert 'camera_c' in source.error and '503' in source.error
+    assert not source.frames['camera_c']
+    source.close()
+
+
+def test_original_rgb_does_not_retry_or_hide_a_broken_stream():
+    attempts=[]
+    def factory(url):
+        attempts.append(url)
+        raise OSError('Connection reset by peer')
+    source=CaptureRgbSource('127.0.0.1',8781,factory)
+    source.start(['camera_c']);source.threads[0].join(timeout=2)
+    assert len(attempts)==1 and 'Connection reset by peer' in source.error
+    source.close()
+
+
+def test_trial_host_deadline_saves_and_holds_without_browser_timer(tmp_path):
+    with recorder_at(tmp_path) as (recorder, source, _):
+        held=[];recorder.on_time_limit=lambda:held.append(True)
+        trial={'session_id':'deadline','index':1,'total':3,'condition':'fixed_rgb','display_mode':'rgb_camera',
+               'task_id':'count_blocks','time_limit_seconds':1}
+        recorder.start('page-a','Count blocks',trial=trial)
+        wait_for(lambda:recorder.status()['state']=='idle',timeout=4)
+        saved=recorder.last_saved
+        assert saved['timed_out'] and saved['status']=='complete' and held==[True]
+        assert 1<=saved['active_duration_seconds']<1.3
+        assert saved['trial']['time_limit_seconds']==1
+        with pytest.raises(RecordingError):recorder.set_block_count('other',4)
+        for bad in (-1,True,1.5,10000):
+            with pytest.raises(RecordingError):recorder.set_block_count('page-a',bad)
+        result=recorder.set_block_count('page-a',0)
+        assert result['last_saved']['block_count']==0
+        manifest=json.loads((tmp_path/saved['episode']/'episode.json').read_text())
+        assert manifest['block_count']==0 and manifest['timed_out']
+
+
+def test_trial_deadline_excludes_paused_time(tmp_path):
+    with recorder_at(tmp_path) as (recorder, source, _):
+        trial={'session_id':'paused-deadline','index':1,'total':3,'condition':'fixed_rgb','display_mode':'rgb_camera','time_limit_seconds':1}
+        recorder.start('page-a','Pause deadline',trial=trial)
+        wait_for(lambda:recorder.status()['state']=='recording')
+        recorder.set_paused('page-a',True);time.sleep(1.1)
+        assert recorder.state=='paused'
+        recorder.set_paused('page-a',False)
+        wait_for(lambda:recorder.state=='idle',timeout=3)
+        assert recorder.last_saved['timed_out']
+        assert recorder.last_saved['duration_seconds']>1.8
+
+
+@pytest.mark.parametrize('task_id', ['single_block', 'custom'])
+def test_binary_trial_finish_before_limit_passes_and_timeout_fails(tmp_path, task_id):
+    trial = {'session_id': 'binary', 'index': 1, 'total': 18, 'condition': 'fixed_rgb',
+             'display_mode': 'rgb_camera', 'task_id': task_id, 'time_limit_seconds': 1,
+             'success_metric': 'pass_fail', 'outcome_rule': 'finish_before_limit'}
+    with recorder_at(tmp_path) as (recorder, _, _):
+        recorder.start('page-a', 'Balance test', trial=trial)
+        wait_for(lambda: recorder.samples >= 3)
+        recorder.stop('page-a')
+        wait_for(lambda: recorder.state == 'idle')
+        assert recorder.last_saved['outcome'] == 'success'
+        assert not recorder.last_saved['timed_out']
+        recorder.start('page-a', 'Balance test', trial=trial)
+        wait_for(lambda: recorder.state == 'idle', timeout=4)
+        assert recorder.last_saved['outcome'] == 'failure'
+        assert recorder.last_saved['timed_out']
+        saved = json.loads((tmp_path/recorder.last_saved['episode']/'episode.json').read_text())
+        assert saved['outcome'] == 'failure' and saved['trial']['outcome_rule'] == 'finish_before_limit'
+
+
+def test_binary_trial_manual_failure_and_discard_do_not_auto_pass(tmp_path):
+    trial = {'session_id': 'binary', 'index': 1, 'total': 18, 'condition': 'fixed_rgb',
+             'display_mode': 'rgb_camera', 'task_id': 'custom', 'time_limit_seconds': 75,
+             'success_metric': 'pass_fail', 'outcome_rule': 'finish_before_limit'}
+    with recorder_at(tmp_path) as (recorder, _, _):
+        for extra, expected in [({'outcome': 'failure'}, 'failure'), ({'discard': True}, 'unrated')]:
+            recorder.start('page-a', 'Balance test', trial=trial)
+            wait_for(lambda: recorder.samples >= 3)
+            recorder.stop('page-a', **extra)
+            wait_for(lambda: recorder.state == 'idle')
+            assert recorder.last_saved['outcome'] == expected
+
+
+def test_count_metric_is_configurable_without_changing_task_identity(tmp_path):
+    trial = {'session_id': 'counting', 'index': 1, 'total': 18, 'condition': 'fixed_rgb',
+             'display_mode': 'rgb_camera', 'task_id': 'custom', 'time_limit_seconds': 75,
+             'success_metric': 'block_count', 'outcome_rule': 'manual'}
+    with recorder_at(tmp_path) as (recorder, _, _):
+        recorder.start('page-a', 'Balance test', trial=trial)
+        wait_for(lambda: recorder.samples >= 3)
+        recorder.stop('page-a')
+        wait_for(lambda: recorder.state == 'idle')
+        assert recorder.last_saved['outcome'] == 'unrated'
+        recorder.set_block_count('page-a', 0)
+        assert recorder.last_saved['block_count'] == 0
+
+
+def test_result_prompt_review_is_saved_before_next_and_owned_by_recorder(tmp_path):
+    trial = {'session_id': 'review', 'index': 1, 'total': 18, 'condition': 'fixed_rgb',
+             'display_mode': 'rgb_camera', 'task_id': 'custom', 'time_limit_seconds': 75,
+             'success_metric': 'pass_fail', 'outcome_rule': 'finish_before_limit', 'result_prompt': True}
+    with recorder_at(tmp_path) as (recorder, _, _):
+        recorder.start('page-a', 'Balance test', trial=trial)
+        wait_for(lambda: recorder.samples >= 3)
+        recorder.stop('page-a')
+        wait_for(lambda: recorder.state == 'idle')
+        with pytest.raises(RecordingError):recorder.set_outcome('other', 'failure')
+        assert not recorder.last_saved.get('result_reviewed')
+        recorder.set_outcome('page-a', 'failure')
+        assert recorder.last_saved['result_reviewed'] and recorder.last_saved['outcome'] == 'failure'
+        saved = json.loads((tmp_path/recorder.last_saved['episode']/'episode.json').read_text())
+        assert saved['result_reviewed'] and saved['outcome'] == 'failure'
+        with pytest.raises(RecordingError):recorder.resume_result_review('refreshed-page', 'wrong-session')
+        recorder.resume_result_review('refreshed-page', 'review')
+        recorder.set_outcome('refreshed-page', 'success')
+        assert recorder.last_saved['outcome'] == 'success'

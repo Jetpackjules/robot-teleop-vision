@@ -109,7 +109,18 @@ class CaptureRgbSource:
         try:
             subscribed_unix_ns = time.time_ns()
             options = urlencode({'camera': name, 'w': 3840, 'q': 95})
-            reader = self.reader_factory(f'http://{self.host}:{self.port}/camera-rgb-stream?{options}')
+            url = f'http://{self.host}:{self.port}/camera-rgb-stream?{options}'
+            for attempt in range(4):
+                try:
+                    reader = self.reader_factory(url)
+                    break
+                except OSError as exc:
+                    # Finished camera-list/viewer requests can occupy a slot
+                    # until the capture loop next cleans up its connections.
+                    if '503' not in str(exc) or attempt == 3:
+                        raise
+                    if self.stopping.wait(.1 * (attempt + 1)):
+                        return
             with self.lock:
                 self.readers.append(reader)
             if self.stopping.is_set():
@@ -143,7 +154,8 @@ class CaptureRgbSource:
         except Exception as exc:
             if not self.stopping.is_set():
                 with self.lock:
-                    self.error = str(exc) if isinstance(exc, RecordingError) else 'Original RGB stopped or its timestamp/format became invalid.'
+                    self.error = str(exc) if isinstance(exc, RecordingError) else (
+                        f'Original RGB camera {name} failed: {type(exc).__name__}: {str(exc)[:200]}')
         finally:
             if reader is not None:
                 reader.close()
@@ -187,7 +199,7 @@ class CaptureRgbSource:
 
 class HostEpisodeRecorder:
     def __init__(self, root: Path, operator, source_factory: Callable,
-                 minimum_free_bytes: int = 512*1024*1024):
+                 minimum_free_bytes: int = 512*1024*1024, on_time_limit: Callable | None = None):
         self.root, self.operator, self.source_factory = Path(root).resolve(), operator, source_factory
         self.minimum_free_bytes = minimum_free_bytes
         self.lock = threading.RLock()
@@ -207,6 +219,9 @@ class HostEpisodeRecorder:
         self.discard = False
         self.outcome = 'unrated'
         self.trial = None
+        self.on_time_limit = on_time_limit
+        self.timed_out = False
+        self.last_saved_owner = ''
 
     def observe_robot(self, status: dict, received_ns: int | None = None) -> None:
         """Called by the existing UDP listener; never performs file I/O."""
@@ -235,6 +250,52 @@ class HostEpisodeRecorder:
                     round(elapsed, 1) if self.state in ('recording', 'paused', 'saving') else 0,
                     'is_owner': not self.owner or client == self.owner, 'last_saved': self.last_saved,
                     'trial': self.trial}
+
+    def set_block_count(self, client: str, count: int) -> dict:
+        if type(count) is not int or not 0 <= count <= 9999:
+            raise RecordingError('Enter a whole block count between 0 and 9999.')
+        with self.lock:
+            saved = self.last_saved
+            if (self.state != 'idle' or not saved or saved.get('status') != 'complete'
+                    or ((saved.get('trial') or {}).get('success_metric') or
+                        ('block_count' if (saved.get('trial') or {}).get('task_id') == 'count_blocks' else 'pass_fail')) != 'block_count'
+                    or self.last_saved_owner != client):
+                raise RecordingError('Only the controller that recorded this completed counting task can save its count.')
+            path = self.root / saved['episode'] / 'episode.json'
+            manifest = json.loads(path.read_text())
+            manifest['block_count'] = count
+            manifest['result_reviewed'] = True
+            write_json(path, manifest)
+            saved['block_count'] = count
+            saved['result_reviewed'] = True
+            self.message = f"Episode saved; {count} blocks in the cup."
+            return self.status(client)
+
+    def set_outcome(self, client: str, outcome: str) -> dict:
+        if outcome not in ('success', 'failure'):
+            raise RecordingError('Choose pass or fail.')
+        with self.lock:
+            saved = self.last_saved
+            if (self.state != 'idle' or not saved or saved.get('status') != 'complete'
+                    or self.last_saved_owner != client
+                    or ((saved.get('trial') or {}).get('success_metric') == 'block_count'
+                        or ((saved.get('trial') or {}).get('success_metric') is None
+                            and (saved.get('trial') or {}).get('task_id') == 'count_blocks'))):
+                raise RecordingError('Only the owner of this completed trial can save its result.')
+            path = self.root / saved['episode'] / 'episode.json'
+            manifest = json.loads(path.read_text())
+            manifest.update(outcome=outcome, result_reviewed=True)
+            write_json(path, manifest)
+            saved.update(outcome=outcome, result_reviewed=True)
+            return self.status(client)
+
+    def resume_result_review(self, client: str, session_id: str) -> None:
+        """The gateway checks the active controller before calling this."""
+        with self.lock:
+            if (self.state != 'idle' or not self.last_saved or self.last_saved.get('status') != 'complete'
+                    or not session_id or (self.last_saved.get('trial') or {}).get('session_id') != session_id):
+                raise RecordingError('This result belongs to a different or unfinished study session.')
+            self.last_saved_owner = client
 
     def _trial_clock(self, at_ns: int | None = None) -> tuple[float, bool]:
         """Task time excludes pauses; capture timestamps always keep real time."""
@@ -282,12 +343,16 @@ class HostEpisodeRecorder:
             raise RecordingError('Select distinct cameras.')
         if trial is not None:
             fields = {'session_id', 'index', 'total', 'condition', 'display_mode'}
-            if not isinstance(trial, dict) or set(trial) != fields:
+            if not isinstance(trial, dict) or not fields <= set(trial) or set(trial)-fields-{'task_id', 'time_limit_seconds', 'session_name', 'success_metric', 'outcome_rule', 'result_prompt'}:
                 raise RecordingError('Invalid trial metadata fields.')
             session = trial['session_id']
             if not isinstance(session, str) or not 1 <= len(session) <= 80 or any(
                     c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in session):
                 raise RecordingError('Invalid trial session identifier.')
+            if 'session_name' in trial and (not isinstance(trial['session_name'], str)
+                    or not trial['session_name'].strip() or len(trial['session_name']) > 200
+                    or any(ord(c) < 32 or ord(c) == 127 for c in trial['session_name'])):
+                raise RecordingError('Invalid trial session name (up to 200 characters).')
             if (type(trial['index']) is not int or type(trial['total']) is not int
                     or not 1 <= trial['index'] <= trial['total'] <= 30):
                 raise RecordingError('Invalid trial number.')
@@ -297,6 +362,19 @@ class HostEpisodeRecorder:
                 raise RecordingError('Invalid trial display mode.')
             if (trial['condition'] == 'fixed_rgb') != (trial['display_mode'] == 'rgb_camera'):
                 raise RecordingError('Trial condition does not match the display mode.')
+            if 'time_limit_seconds' in trial and (type(trial['time_limit_seconds']) is not int or not 1 <= trial['time_limit_seconds'] <= 7200):
+                raise RecordingError('Trial time limit must be between 1 and 7200 seconds.')
+            if trial.get('task_id', 'custom') not in ('single_block', 'count_blocks', 'custom'):
+                raise RecordingError('Invalid trial task.')
+            if trial.get('success_metric', 'pass_fail') not in ('pass_fail', 'block_count'):
+                raise RecordingError('Invalid trial success metric.')
+            if trial.get('outcome_rule', 'manual') not in ('manual', 'finish_before_limit'):
+                raise RecordingError('Invalid trial outcome rule.')
+            if 'result_prompt' in trial and type(trial['result_prompt']) is not bool:
+                raise RecordingError('Invalid trial result prompt.')
+            if trial.get('outcome_rule') == 'finish_before_limit' and (
+                    trial.get('success_metric', 'pass_fail') != 'pass_fail' or 'time_limit_seconds' not in trial):
+                raise RecordingError('Automatic pass/fail requires a time limit and pass/fail scoring.')
             trial = dict(trial)
         with self.lock:
             if self.worker is not None and self.worker.is_alive():
@@ -306,11 +384,12 @@ class HostEpisodeRecorder:
             if not self.telemetry or time.monotonic_ns()-self.telemetry[-1]['measured_ns'] > 350_000_000:
                 raise RecordingError('Fresh measured robot feedback and an applied position target are required before recording.')
             self.owner, self.state, self.samples = client, 'preparing', 0
-            self.message = 'Checking original RGB and measured robot feedback…'
+            self.message = 'Checking original RGB and measured robot feedbackâ€¦'
             self.episode = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ_')+uuid.uuid4().hex[:12]
             self.stop_event = threading.Event()
             self.interruption, self.discard, self.outcome = '', False, 'unrated'
             self.trial = trial
+            self.timed_out = False
             self.started_ns = 0
             self.stopped_ns = 0
             self.pauses = []
@@ -331,7 +410,7 @@ class HostEpisodeRecorder:
                 self.discard, self.outcome = discard, outcome
                 self.stopped_ns = time.monotonic_ns()
                 self._close_pause(self.stopped_ns)
-                self.state, self.message = 'saving', 'Finishing the episode on the host…'
+                self.state, self.message = 'saving', 'Finishing the episode on the hostâ€¦'
                 self.stop_event.set()
             return self.status(client)
 
@@ -341,7 +420,7 @@ class HostEpisodeRecorder:
                 self.interruption = reason
                 self.stopped_ns = time.monotonic_ns()
                 self._close_pause(self.stopped_ns)
-                self.state, self.message = 'saving', 'Preserving the interrupted episode…'
+                self.state, self.message = 'saving', 'Preserving the interrupted episodeâ€¦'
                 self.stop_event.set()
 
     def close(self) -> None:
@@ -362,9 +441,11 @@ class HostEpisodeRecorder:
         with self.lock:
             if not self.telemetry:
                 raise RecordingError('Measured robot feedback became unavailable.')
-            robot = min(self.telemetry, key=lambda s: abs(s['measured_ns']-anchor))
-            if now-self.telemetry[-1]['measured_ns'] > 350_000_000 or abs(robot['measured_ns']-anchor) > 100_000_000:
+            aligned = [s for s in self.telemetry if all(
+                abs(s['measured_ns']-frame.capture_monotonic_ns) <= 100_000_000 for frame in frames)]
+            if now-self.telemetry[-1]['measured_ns'] > 350_000_000 or not aligned:
                 raise RecordingError('Robot feedback and camera capture differ by more than 100 ms.')
+            robot = min(aligned, key=lambda s: abs(s['measured_ns']-anchor))
         return frames, robot
 
     def _record(self, task: str, cameras: list[str] | None, fps: int, trial: dict | None) -> None:
@@ -427,6 +508,15 @@ class HostEpisodeRecorder:
             tick = time.monotonic()
             with (destination/'frames.jsonl').open('x', encoding='utf-8') as journal:
                 while not self.stop_event.is_set():
+                    with self.lock:
+                        limit = (trial or {}).get('time_limit_seconds')
+                        expired = limit is not None and self._trial_clock()[0] >= limit
+                    if expired:
+                        self.timed_out = True
+                        if self.on_time_limit is not None:
+                            self.on_time_limit()
+                        self.stop_event.set()
+                        break
                     current = self._sample(source)
                     if current is None:
                         raise RecordingError('An RGB camera stopped supplying frames.')
@@ -436,7 +526,8 @@ class HostEpisodeRecorder:
                     if [f.camera for f in frames] != actual_cameras:
                         raise RecordingError('The RGB source camera order changed.')
                     if rows and any(f.sequence < rows[-1]['camera_sequence'][i] or
-                                    f.capture_unix_ns < rows[-1]['capture_unix_ns'][i] for i, f in enumerate(frames)):
+                                    f.capture_unix_ns < rows[-1]['capture_unix_ns'][i] or
+                                    f.capture_monotonic_ns < rows[-1]['capture_monotonic_ns'][i] for i, f in enumerate(frames)):
                         raise RecordingError('Camera source timestamps or frame counters ran backwards.')
                     row = {'timestamp': (frames[0].capture_monotonic_ns-self.started_ns)/1e9,
                            'state': robot['state'], 'action': robot['action'],
@@ -486,6 +577,8 @@ class HostEpisodeRecorder:
                 except Exception:
                     failure = failure or 'The RGB subscription did not close cleanly.'
             failure = failure or self.interruption
+            if not failure and not self.discard and len(rows) >= 2 and rows[-1]['timestamp']-rows[0]['timestamp'] < .001:
+                failure = 'No advancing RGB capture was recorded. The episode was preserved as incomplete.'
             try:
                 if destination is not None and manifest is not None:
                     if rows:
@@ -506,7 +599,16 @@ class HostEpisodeRecorder:
                         with (destination/'episode.npz').open('xb') as data:
                             np.savez_compressed(data, **arrays)
                     status = 'discarded' if self.discard else 'incomplete' if failure or len(rows) < 2 else 'complete'
+                    if status == 'complete' and (trial or {}).get('outcome_rule') == 'finish_before_limit':
+                        # Host active time excludes pauses and settles races between
+                        # Finish and the deadline. Incomplete/discarded captures
+                        # must never acquire an automatic success rating.
+                        if self.timed_out or active_duration >= trial['time_limit_seconds']:
+                            self.outcome = 'failure'
+                        elif self.outcome == 'unrated':
+                            self.outcome = 'success'
                     manifest.update(status=status, outcome=self.outcome, frames=len(rows), bytes=saved_bytes,
+                                    timed_out=self.timed_out,
                                     pauses=pauses, active_duration_seconds=round(active_duration, 3),
                                     error=failure, finished_utc=datetime.now(timezone.utc).isoformat())
                     write_json(destination/'episode.json', manifest)
@@ -514,11 +616,12 @@ class HostEpisodeRecorder:
                                        'outcome': self.outcome, 'host_folder': str(destination),
                                        'duration_seconds': round(rows[-1]['timestamp']+1/fps, 3) if rows else 0,
                                        'active_duration_seconds': round(active_duration, 3),
-                                       'trial': trial}
+                                       'trial': trial, 'timed_out': self.timed_out}
+                    self.last_saved_owner = self.owner
             except Exception:
                 failure = 'Episode finalization failed; preserve the host folder for recovery.'
             with self.lock:
                 self.state = 'error' if failure else 'idle'
                 self.message = failure or ('Episode discarded and retained locally.' if self.discard else
-                                           'Episode saved on the host.' if len(rows) >= 2 else 'No complete episode was saved.')
+                                           ('Time limit reached; episode saved on the host.' if self.timed_out else 'Episode saved on the host.') if len(rows) >= 2 else 'No complete episode was saved.')
                 self.owner = ''
