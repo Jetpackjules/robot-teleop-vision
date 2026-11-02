@@ -114,6 +114,7 @@ const VIEW_MARKUP = `
   <label class="toggle-row"><span>Show commanded target ghost</span><input id="so101-target-ghost-enabled" type="checkbox" checked></label>
   <button id="so101-calibrate" class="primary" type="button">Align Arm</button>
   <p class="helper-text">Uses a measured base sweep to align the whole arm. Existing joint settings and claw geometry stay fixed.</p>
+  <button id="so101-claw-adjust" type="button">Adjust Claw Translation</button>
   <button id="so101-base-adjust" type="button">Adjust Base in 3D</button>
   <p id="so101-base-status" class="helper-text" role="status"></p>
   <div class="calibration-progress"><progress id="so101-calibration-progress" max="1" value="0"></progress><span id="so101-calibration-progress-value" class="value-label">0%</span></div>
@@ -159,6 +160,12 @@ const FLOATING_MARKUP = `
   <section id="so101-manual-workspace" hidden aria-label="Manual joint tuning">
     <strong>Manual joint tuning</strong>
     <p class="so101-manual-note">Match the overlay to the real arm. These are adjustments to the saved angles; base placement stays fixed.</p>
+    <fieldset><legend>Claw translation only</legend>
+      <p class="helper-text">Local claw axes, in millimetres (0.25 cm = 2.5 mm). Moves the claw overlay only; base and joint angles stay fixed. Preview, then Save Calibration.</p>
+      <div class="so101-manual-controls"><label>Claw X (mm)<input data-manual-number="manual_tool_x" data-manual-scale="1000" type="number" min="-50" max="50" step="0.1" value="0" aria-label="Claw X translation in millimetres"><input data-manual-key="manual_tool_x" type="range" min="-0.05" max="0.05" step="0.0001" value="0" aria-label="Claw X translation"></label>
+<label>Claw Y (mm)<input data-manual-number="manual_tool_y" data-manual-scale="1000" type="number" min="-50" max="50" step="0.1" value="0" aria-label="Claw Y translation in millimetres"><input data-manual-key="manual_tool_y" type="range" min="-0.05" max="0.05" step="0.0001" value="0" aria-label="Claw Y translation"></label>
+<label>Claw Z (mm)<input data-manual-number="manual_tool_z" data-manual-scale="1000" type="number" min="-50" max="50" step="0.1" value="0" aria-label="Claw Z translation in millimetres"><input data-manual-key="manual_tool_z" type="range" min="-0.05" max="0.05" step="0.0001" value="0" aria-label="Claw Z translation"></label>
+    </div></fieldset>
     ${JOINT_TUNING_MARKUP}
     <details class="advanced-disclosure"><summary>Wrist / claw close-up</summary>
     <div class="so101-manual-preview-grid">
@@ -170,9 +177,6 @@ const FLOATING_MARKUP = `
     <div class="so101-manual-controls">
       <label>Wrist direction<select id="so101-manual-wrist-direction"><option value="0" selected>Keep saved direction</option><option value="1">Normal (+)</option><option value="-1">Reversed (−)</option></select></label>
       <label>Overlay opacity <span data-manual-value="manual_overlay_opacity" class="value-label">30%</span><input data-manual-key="manual_overlay_opacity" type="range" min="0.05" max="0.9" step="0.05" value="0.3"></label>
-      <label>Tool X <span data-manual-value="manual_tool_x" class="value-label">0.0 mm</span><input data-manual-key="manual_tool_x" type="range" min="-0.05" max="0.05" step="0.0005" value="0"></label>
-      <label>Tool Y <span data-manual-value="manual_tool_y" class="value-label">0.0 mm</span><input data-manual-key="manual_tool_y" type="range" min="-0.05" max="0.05" step="0.0005" value="0"></label>
-      <label>Tool Z <span data-manual-value="manual_tool_z" class="value-label">0.0 mm</span><input data-manual-key="manual_tool_z" type="range" min="-0.05" max="0.05" step="0.0005" value="0"></label>
       <label>Tool roll <span data-manual-value="manual_tool_roll" class="value-label">0.0°</span><input data-manual-key="manual_tool_roll" type="range" min="-180" max="180" step="0.5" value="0"></label>
       <label>Tool pitch <span data-manual-value="manual_tool_pitch" class="value-label">0.0°</span><input data-manual-key="manual_tool_pitch" type="range" min="-180" max="180" step="0.5" value="0"></label>
       <label>Tool yaw <span data-manual-value="manual_tool_yaw" class="value-label">0.0°</span><input data-manual-key="manual_tool_yaw" type="range" min="-180" max="180" step="0.5" value="0"></label>
@@ -289,7 +293,7 @@ class So101WebModule {
       const output = document.querySelector(`[data-manual-value="${key}"]`);
       const value = Number(input.value);
       const numeric = document.querySelector(`[data-manual-number="${key}"]`);
-      if (numeric && document.activeElement !== numeric) numeric.value = input.value;
+      if (numeric && document.activeElement !== numeric) numeric.value = String(Number(input.value) * Number(numeric.dataset.manualScale || 1));
       if (!output) continue;
       output.textContent = key === "manual_overlay_opacity" ? `${Math.round(value * 100)}%`
         : key === "manual_opening_scale" ? `${value.toFixed(3)}×`
@@ -581,6 +585,7 @@ class So101WebModule {
     const manualBusy = ["capturing", "solving"].includes(calibration.state) || Boolean(this.manualPending);
     element("so101-base-adjust").disabled = manualOffline || manualBusy || manual.enabled === true || base.enabled === true || base.supported !== true;
     element("so101-manual-open").disabled = manualOffline || manualBusy || !manual.registered || base.enabled === true;
+    element("so101-claw-adjust").disabled = element("so101-manual-open").disabled;
     element("so101-calibration-export").disabled = manualOffline || manualBusy || !manual.registered || manual.enabled === true || base.enabled === true;
     element("so101-calibration-import").disabled = manualOffline || manualBusy || manual.enabled === true || base.enabled === true;
     if (this.baseEditor?.active && !this.baseEditor.finishing && !this.manualPending && base.enabled !== true) {
@@ -743,7 +748,7 @@ class So101WebModule {
       if (!capturing && !await this.confirmAction("The follower will run a measured base sweep to align the whole arm. Joint settings and claw geometry will stay fixed.\n\nClear its workspace and stay ready to remove physical power.", "Start Alignment")) return;
       this.requestCalibration(capturing ? { cancel_robot_position_calibration: true } : { calibrate_robot_position: true });
     });
-    element("so101-manual-open").addEventListener("click", async () => {
+    const openManualPreview = async () => {
       if (await this.performManualAction("begin")) {
         this.resetManualControls();
         this.manualReady = true;
@@ -751,12 +756,14 @@ class So101WebModule {
         element("so101-manual-workspace").hidden = false;
         element("so101-manual-workspace").querySelector("input[type=number]").focus();
       }
-    });
+    };
+    element("so101-manual-open").addEventListener("click", openManualPreview);
+    element("so101-claw-adjust").addEventListener("click", openManualPreview);
     for (const input of this.manualInputs) input.addEventListener("input", () => this.queueManualPreview());
     for (const input of document.querySelectorAll("[data-manual-number]")) input.addEventListener("input", () => {
       if (!input.checkValidity() || !Number.isFinite(input.valueAsNumber)) return;
       const slider = this.manualInputs.find((candidate) => candidate.dataset.manualKey === input.dataset.manualNumber);
-      slider.value = input.value;
+      slider.value = String(input.valueAsNumber / Number(input.dataset.manualScale || 1));
       this.queueManualPreview();
     });
     element("so101-manual-wrist-direction").addEventListener("change", () => this.queueManualPreview());

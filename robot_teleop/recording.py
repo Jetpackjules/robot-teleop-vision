@@ -27,6 +27,10 @@ class RecordingError(ValueError):
     pass
 
 
+class _AlignmentPending(RecordingError):
+    pass
+
+
 def write_json(path: Path, data: dict) -> None:
     temporary = path.with_suffix('.new')
     temporary.write_text(json.dumps(data, indent=2, allow_nan=False), encoding='utf-8')
@@ -228,9 +232,21 @@ class HostEpisodeRecorder:
         sample = self.operator.recording_sample(status)
         if sample is not None:
             received_ns = received_ns or time.monotonic_ns()
-            sample = {**sample, 'received_ns': received_ns,
-                      'measured_ns': received_ns-int(sample['read_age_ms']*1_000_000),
-                      'applied_ns': received_ns-int(sample['write_age_ms']*1_000_000)}
+            # Camera capture uses the producer's Unix timestamp, not arrival.
+            # Map feedback from that same host clock so queued UDP cannot shift
+            # encoder reads forward in time. Old services without a stamp retain
+            # receipt-based timing; malformed/stale stamped packets are rejected.
+            measured_origin = received_ns
+            if 'sent_unix_ms' in status:
+                sent = status['sent_unix_ms']
+                delay_ms = time.time_ns()/1_000_000 - sent if type(sent) in (int, float) else float('nan')
+                if not np.isfinite(delay_ms) or not -100 <= delay_ms <= 1000:
+                    sample = None
+                else:
+                    measured_origin -= int(delay_ms*1_000_000)
+            sample = None if sample is None else {**sample, 'received_ns': received_ns,
+                      'measured_ns': measured_origin-int(sample['read_age_ms']*1_000_000),
+                      'applied_ns': measured_origin-int(sample['write_age_ms']*1_000_000)}
         with self.lock:
             # Invalid feedback must invalidate the current window immediately.
             if sample is None:
@@ -343,7 +359,7 @@ class HostEpisodeRecorder:
             raise RecordingError('Select distinct cameras.')
         if trial is not None:
             fields = {'session_id', 'index', 'total', 'condition', 'display_mode'}
-            if not isinstance(trial, dict) or not fields <= set(trial) or set(trial)-fields-{'task_id', 'time_limit_seconds', 'session_name', 'success_metric', 'outcome_rule', 'result_prompt', 'phase', 'point_preview_detail', 'stream_preset', 'robot_overlay_enabled', 'control_source'}:
+            if not isinstance(trial, dict) or not fields <= set(trial) or set(trial)-fields-{'task_id', 'time_limit_seconds', 'session_name', 'success_metric', 'outcome_rule', 'result_prompt', 'phase', 'point_cleanup_support', 'point_cleanup_tolerance_mm', 'point_preview_detail', 'stream_preset', 'robot_overlay_enabled', 'control_source'}:
                 raise RecordingError('Invalid trial metadata fields.')
             session = trial['session_id']
             if not isinstance(session, str) or not 1 <= len(session) <= 80 or any(
@@ -377,6 +393,12 @@ class HostEpisodeRecorder:
             if 'point_preview_detail' in trial and (type(trial['point_preview_detail']) is not int
                     or trial['point_preview_detail'] not in (0, -2, -1, 20000, 40000)):
                 raise RecordingError('Invalid trial point detail.')
+            if 'point_cleanup_support' in trial and (type(trial['point_cleanup_support']) is not int
+                    or not 0 <= trial['point_cleanup_support'] <= 8):
+                raise RecordingError('Invalid preview cleanup support.')
+            if 'point_cleanup_tolerance_mm' in trial and (type(trial['point_cleanup_tolerance_mm']) not in (int, float)
+                    or not np.isfinite(trial['point_cleanup_tolerance_mm']) or not 1 <= trial['point_cleanup_tolerance_mm'] <= 100):
+                raise RecordingError('Invalid preview cleanup tolerance.')
             if 'stream_preset' in trial and trial['stream_preset'] not in ('quality', 'latency'):
                 raise RecordingError('Invalid trial stream preset.')
             if 'robot_overlay_enabled' in trial and type(trial['robot_overlay_enabled']) is not bool:
@@ -445,6 +467,16 @@ class HostEpisodeRecorder:
             self.worker.join(timeout=12)
 
     def _sample(self, source) -> tuple[list[RgbFrame], dict] | None:
+        deadline = time.monotonic()+.1
+        while True:
+            try:
+                return self._sample_once(source)
+            except _AlignmentPending as exc:
+                if time.monotonic() >= deadline or self.stop_event.is_set():
+                    raise RecordingError(str(exc)) from None
+                self.stop_event.wait(.005)
+
+    def _sample_once(self, source) -> tuple[list[RgbFrame], dict] | None:
         frames = source.snapshot()
         if not frames:
             return None
@@ -459,8 +491,10 @@ class HostEpisodeRecorder:
                 raise RecordingError('Measured robot feedback became unavailable.')
             aligned = [s for s in self.telemetry if all(
                 abs(s['measured_ns']-frame.capture_monotonic_ns) <= 100_000_000 for frame in frames)]
-            if now-self.telemetry[-1]['measured_ns'] > 350_000_000 or not aligned:
-                raise RecordingError('Robot feedback and camera capture differ by more than 100 ms.')
+            if now-self.telemetry[-1]['measured_ns'] > 350_000_000:
+                raise RecordingError('Measured robot feedback became stale.')
+            if not aligned:
+                raise _AlignmentPending('Robot feedback and camera capture differ by more than 100 ms. Start this trial again when ready.')
             robot = min(aligned, key=lambda s: abs(s['measured_ns']-anchor))
         return frames, robot
 

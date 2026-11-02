@@ -44,7 +44,9 @@ const server = http.createServer((req, res) => {
   if(req.url==='/module.js') {
     res.setHeader('Content-Type','text/javascript');
     res.end(readFileSync(resolve(root,'robot_modules/so101/web/module.js')));
-  } else if(req.url.endsWith('.js')) {
+  } else if(req.url.split('?')[0]==='/safeguard_toasts.js') {
+    res.setHeader('Content-Type','text/javascript');res.end(readFileSync(resolve(root,'robot_modules/so101/web/safeguard_toasts.js')));
+  } else if(req.url.split('?')[0].endsWith('.js')) {
     // Disable WebSerial and auxiliary camera startup in this test-only page.
     res.setHeader('Content-Type','text/javascript'); res.end('export {};');
   } else {res.setHeader('Content-Type','text/html');res.end(html);}
@@ -56,7 +58,7 @@ const server = http.createServer((req, res) => {
     const page=await browser.newPage({viewport:{width:1280,height:900}});
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}`);
-    await page.waitForFunction(()=>window.testModule);
+    await page.waitForFunction(()=>window.testModule,{},{timeout:10000}).catch(e=>{console.error(errors);throw e;});
     await page.locator('#so101-overlay-scope').selectOption('claw');
     assert(await page.locator('#so101-overlay-occlusion-enabled').isDisabled(),'claw-only keeps the scanned arm visible');
     assert.equal(await page.evaluate(()=>testModule.extendViewSettings({}).robot_overlay_scope),'claw');
@@ -67,6 +69,9 @@ const server = http.createServer((req, res) => {
     await page.getByRole('button',{name:'Manual Joint Tuning',exact:true}).click();
     const panel=page.locator('#so101-manual-workspace');
     await panel.waitFor({state:'visible'});
+    await page.getByRole('spinbutton',{name:'Claw X translation in millimetres',exact:true}).fill('2.5');
+    await page.waitForFunction(()=>window.sent.some(p=>Math.abs(p.manual_tool_x-.0025)<1e-9));
+    assert.equal(await page.locator('[data-manual-key="manual_shoulder_lift_trim_degrees"]').inputValue(),'0');
     const continuous=await page.evaluate(async()=>{
       const input=document.querySelector('[data-manual-key="manual_elbow_flex_trim_degrees"]');
       const before=sent.filter(p=>p.robot_visual_calibration_action?.operation==='preview').length;

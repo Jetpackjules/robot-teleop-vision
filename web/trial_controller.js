@@ -50,7 +50,7 @@ export function makeTrialPlan(state, random = Math.random) {
     for (let i = activities.length - 1; i > 0; i--) { const j = Math.floor(random() * (i + 1)); [activities[i], activities[j]] = [activities[j], activities[i]]; }
   }
   const order = () => state.randomize !== false ? randomizedConditions(random) : state.order;
-  const training = practice ? order().map(condition => ({task_id: 'single_block', task: state.tasks.single_block.instruction,
+  const training = practice ? DEFAULT_ORDER.map(condition => ({task_id: 'single_block', task: state.tasks.single_block.instruction,
     time_limit_seconds: state.practiceSeconds || 60, condition, phase: 'practice', success_metric: 'practice', outcome_rule: 'manual'})) : [];
   return training.concat(activities.flatMap(task_id => Array.from({length: 2}, () =>
     order().map(condition => ({
@@ -145,6 +145,8 @@ export class TrialController {
         ...(['0','-2','-1','20000','40000'].includes(detail) ? {point_preview_detail:Number(detail)} : {}),
         ...(['quality','latency'].includes(preset) ? {stream_preset:preset} : {}),
         ...(overlay ? {robot_overlay_enabled:overlay.checked} : {}),
+        point_cleanup_support:Number(byId('point-cleanup-support')?.value || 0),
+        point_cleanup_tolerance_mm:Number(byId('point-cleanup-tolerance')?.value || 15),
         ...(['keyboard','leader'].includes(input) ? {control_source:input} : {})};
     };
     recording.root.addEventListener('recordingchange', () => this.render());
@@ -358,6 +360,7 @@ export class TrialController {
     this.state.plan = plan;
     this.state.id = this.sessionId(); this.state.index = 0; this.state.completed = []; this.state.finished = false;
     this.state.prepared = false; this.state.name = '';
+    this.autoPractice = false; this.practiceStartPending = false;
     this.lastElapsed = 0; this.persist();
     if (applyView) await this.apply();
     else { this.syncTask(); this.render(); }
@@ -397,8 +400,9 @@ export class TrialController {
     this.setupPending = true; this.viewError = ''; this.render();
     try {
       if (this.state.guided) await this.prepareTrial();
-      await this.recording.command('start');
-    } catch (error) { this.viewError = String(error.message || error); }
+      const started = await this.recording.command('start');
+      if (this.state.guided && this.practice) this.autoPractice = started !== false;
+    } catch (error) { this.autoPractice = false; this.viewError = String(error.message || error); }
     finally { this.setupPending = false; this.render(); }
   }
 
@@ -456,9 +460,39 @@ export class TrialController {
     this.render();
   }
 
+  cyclePractice(locked) {
+    if (this.recording.offline || this.recording.status?.state === 'error' || (!this.active && this.recording.status?.last_saved?.status === 'incomplete'
+        && this.recording.status.last_saved.trial?.session_id === this.state.id
+        && this.recording.status.last_saved.trial?.index === this.state.index+1)) {
+      this.autoPractice = false; this.practiceStartPending = false;
+    }
+    if (!this.autoPractice || locked || !this.state.guided || this.practiceTransition) return;
+    if (!this.practice || this.state.finished) { this.autoPractice = false; return; }
+    if (this.saved) {
+      if (this.state.index === this.state.plan.length-1) { this.autoPractice = false; return; }
+      const episode = this.saved.episode, index = this.state.index;
+      this.practiceTransition = true;
+      queueMicrotask(async () => {
+        try {
+          if (this.saved?.episode !== episode || this.state.index !== index) return;
+          await this.act();
+          if (this.state.index !== index && this.practice && !this.state.finished) this.practiceStartPending = true;
+          else this.autoPractice = false;
+        } catch (error) { this.autoPractice = false; this.viewError = String(error.message || error); }
+        finally { this.practiceTransition = false; this.render(); }
+      });
+    } else if (this.practiceStartPending && this.state.prepared && this.sessionConnected()
+        && this.matchesView && this.viewReady()
+        && (this.condition !== 'head_3d' || window.godotWebcamTrackerLatest?.active)) {
+      this.practiceStartPending = false;
+      queueMicrotask(() => this.act());
+    }
+  }
+
   render() {
     const recorder = this.recording, status = recorder.status || {};
     const active = this.active, locked = active || recorder.busy || this.pending || !!this.pausePending || !!this.setupPending;
+    this.cyclePractice(locked);
     if (this.robotPaused && !this.pausePending && !['recording', 'paused'].includes(status.state)) {
       this.robotPaused = false;
       this.finishRobotPause?.();

@@ -22,6 +22,9 @@
     const pointPreviewToggle = document.getElementById('point-preview-enabled');
     const pointPreviewActive=()=>pointPreviewToggle.value==='-1'||Number(pointPreviewToggle.value)>0;
     const selectedPointBudget=()=>pointPreviewToggle.value==='-1'?0:Number(pointPreviewToggle.value)===40000?40000:20000;
+    const cleanupSupport=document.getElementById('point-cleanup-support');
+    const cleanupTolerance=document.getElementById('point-cleanup-tolerance');
+    const cleanupSettings=()=>({point_cleanup_support:Number(cleanupSupport.value),point_cleanup_tolerance_mm:Number(cleanupTolerance.value)});
     const blendControls=document.getElementById('blendpcr-controls');
     const blendDepth=document.getElementById('blend-depth'),blendSupport=document.getElementById('blend-support'),blendEdge=document.getElementById('blend-edge');
     let storedBlend={};try{storedBlend=JSON.parse(localStorage.getItem('robotTeleopBlendControls')||'{}')||{};}catch{}
@@ -33,10 +36,13 @@
     pointPreviewToggle.value=resolvePointDetail({},savedPointDetail);
     const applyPointOptions=()=>{
       blendControls.hidden=displayModeSelect.value!=='blendpcr'||pointPreviewActive();
+      document.getElementById('point-cleanup-controls').hidden=!pointPreviewActive() || displayModeSelect.value==='rgb_camera';
+      document.getElementById('point-cleanup-support-value').textContent=Number(cleanupSupport.value) ? cleanupSupport.value+' / 8' : 'Off';
+      document.getElementById('point-cleanup-tolerance-value').textContent=cleanupTolerance.value+' mm';
       document.getElementById('blend-depth-value').textContent=Number(blendDepth.value).toFixed(1)+'Ã—';
       document.getElementById('blend-support-value').textContent=blendSupport.value;
       document.getElementById('blend-edge-value').textContent=blendEdge.value+' mm';
-      workspaceStreamControl.update({rgbd_client_id:window.robotTeleopPageId,point_preview_enabled:pointPreviewActive(),point_preview_budget:selectedPointBudget(),display_mode:displayModeSelect.value});
+      workspaceStreamControl.update({...cleanupSettings(),rgbd_client_id:window.robotTeleopPageId,point_preview_enabled:pointPreviewActive(),point_preview_budget:selectedPointBudget(),display_mode:displayModeSelect.value});
       window.setGodotHybridViewSettings?.({point_preview_enabled:pointPreviewActive(),mesh_preview_enabled:pointPreviewToggle.value==='-2',point_preview_budget:selectedPointBudget(),blendpcr_depth_tolerance:Number(blendDepth.value),blendpcr_support:Number(blendSupport.value),blendpcr_max_edge:Number(blendEdge.value)/1000});
     };
     applyPointOptions();
@@ -217,6 +223,7 @@
         rgbd_client_id:window.robotTeleopPageId,
         point_preview_enabled:pointPreviewActive(),point_preview_budget:selectedPointBudget(),
         point_preview_detail:Number(pointPreviewToggle.value),
+        ...cleanupSettings(),
       workspace_stream_crop_enabled:!document.body.classList.contains('workspace-editing'),
         // Mouse navigation and click-to-focus are always available. Head
         // tracking layers onto this orbit rather than selecting another mode.
@@ -299,6 +306,8 @@
     function restoreViewSettings(savedInput = null, {preferLastTable = true} = {}) {
       const localSaved = localSavedViewSettings();
       const saved = savedInput && Object.keys(savedInput).length ? { ...localSaved, ...savedInput } : localSaved;
+      cleanupSupport.value=Number.isInteger(saved.point_cleanup_support)?Math.max(0,Math.min(8,saved.point_cleanup_support)):0;
+      cleanupTolerance.value=Math.max(1,Math.min(100,Number(saved.point_cleanup_tolerance_mm)||15));
       const pointDefault = JSON.stringify([saved?.settings_version,saved?.point_preview_detail]);
       const samePointDefault = localStorage.getItem('robotTeleopPointDetailHostDefault') === pointDefault;
       pointPreviewToggle.value=resolvePointDetail(saved,localStorage.getItem('robotTeleopPointDetail'),preferLastTable && samePointDefault);
@@ -1285,6 +1294,17 @@
       if(new URLSearchParams(location.search).get('native_point_webrtc')==='1'&&activeViewportMode==='hybrid'
           &&Boolean(rgbdDataChannel?.nativePointStream)!==(pointPreviewActive()))startHybridViewport();
       pointPreviewToggle.blur();updateStatus();
+    });
+    for(const slider of [cleanupSupport,cleanupTolerance]) slider.addEventListener('input',()=>{applyPointOptions();sendViewSettings();});
+    document.getElementById('point-cleanup-save').addEventListener('click',async event=>{
+      const button=event.currentTarget,status=document.getElementById('point-cleanup-status');button.disabled=true;
+      try {
+        const saved=await fetchSiteSettings();
+        const response=await fetch('/api/v1/site-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...saved,...cleanupSettings()})});
+        if(!response.ok)throw new Error(`HTTP ${response.status}`);
+        status.textContent='Cleanup saved on the host for all viewers and restarts.';
+      } catch(error){status.textContent=`Could not save cleanup: ${error.message}`;}
+      finally{button.disabled=false;}
     });
     const saveBlendControls=()=>{localStorage.setItem('robotTeleopBlendControls',JSON.stringify({depth:Number(blendDepth.value),support:Number(blendSupport.value),edge:Number(blendEdge.value)}));applyPointOptions();};
     for(const slider of [blendDepth,blendSupport,blendEdge])slider.addEventListener('input',saveBlendControls);

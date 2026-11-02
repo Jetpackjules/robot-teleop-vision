@@ -29,6 +29,23 @@ static void depth_mm_avx2(const float *source,uint16_t *out,size_t count,double 
 #endif
 
 extern "C" {
+void sparse_clean_depth(const uint16_t *depth, uint16_t *out, int w, int h,
+        int support, double tolerance) {
+    for (int y=0; y<h; ++y) for (int x=0; x<w; ++x) {
+        const int z=depth[size_t(y)*w+x];
+        int count=0;
+        if (z) for (int dy=-1; dy<=1 && count<support; ++dy) {
+            if (y+dy<0 || y+dy>=h) continue;
+            for (int dx=-1; dx<=1 && count<support; ++dx) {
+                if ((!dx && !dy) || x+dx<0 || x+dx>=w) continue;
+                const int other=depth[size_t(y+dy)*w+x+dx];
+                count += other>0 && std::abs(z-other)<=tolerance;
+            }
+        }
+        out[size_t(y)*w+x]=count>=support ? uint16_t(z) : 0;
+    }
+}
+
 void sparse_depth_mm(const float *source,uint16_t *out,size_t count,double maximum) {
 #if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
     if(__builtin_cpu_supports("avx2"))return depth_mm_avx2(source,out,count,maximum);

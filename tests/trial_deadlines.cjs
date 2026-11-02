@@ -104,6 +104,31 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
   recording.status.last_saved={episode:'review-error',status:'complete',outcome:'success',trial:{session_id:c.state.id,index:2,condition:c.condition,task_id:'custom',result_prompt:true}};
   c.render();recording.command=async()=>false;await c.saveResult();assert.equal(c.state.index,1,'a failed result save cannot advance');assert.equal(dialog.open,true);assert.equal(node('trial-result-error').hidden,false);
   recording.command=originalCommand;
+  c.state.activitySelection='all';await c.newSession();c.state.prepared=true;
+  c.viewReady=c.sessionConnected=()=>true;
+  const flush=()=>new Promise(resolve=>setImmediate(resolve));
+  const practiceSaved=(index,timed_out=false)=>({episode:'auto-'+index,status:'complete',outcome:'unrated',timed_out,
+    trial:{session_id:c.state.id,index:index+1,condition:c.condition,phase:'practice',success_metric:'practice'}});
+  await c.act();assert.equal(c.autoPractice,true,'an explicit Start practice arms automatic cycling');
+  let before=calls.filter(p=>p[0]==='start').length;
+  recording.status.last_saved=practiceSaved(0,true);c.render();await flush();await flush();
+  assert.equal(c.state.index,1,'a practice timeout advances automatically');
+  assert.equal(calls.filter(p=>p[0]==='start').length,before+1,'the next practice starts automatically');
+  window.godotWebcamTrackerLatest.active=false;
+  recording.status.last_saved=practiceSaved(1);c.render();await flush();await flush();
+  assert.equal(c.state.index,2);assert.equal(c.practiceStartPending,true,'Head practice waits for valid tracking');
+  before=calls.filter(p=>p[0]==='start').length;
+  c.render();await flush();assert.equal(calls.filter(p=>p[0]==='start').length,before);
+  window.godotWebcamTrackerLatest.active=true;c.render();await flush();
+  assert.equal(calls.filter(p=>p[0]==='start').length,before+1);
+  recording.status.last_saved=practiceSaved(2,true);c.render();await flush();await flush();
+  assert.equal(c.state.index,3);assert.equal(c.practice,false);assert.equal(c.autoPractice,false);
+  assert.equal(calls.filter(p=>p[0]==='start').length,before+1,'measured trials never auto-start');
+  c.state.activitySelection='single_block';await c.newSession();c.state.index=2;c.state.prepared=true;
+  await c.apply();const practiceSession=c.state.id;c.autoPractice=true;
+  recording.status.last_saved=practiceSaved(2,true);c.render();await flush();await flush();
+  assert.equal(c.state.id,practiceSession,'practice-only completion never restarts a session');
+  assert.equal(c.state.finished,true);assert.equal(c.autoPractice,false);
   console.log('PASS named setup/start/restart, date suffix, no setup recording, six trials per activity, independent rounds, refresh preservation, zero score and manual Next');
  }finally{clearInterval(c.timer);}
 })().catch(e=>{console.error(e.message);process.exitCode=1;});

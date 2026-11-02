@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 import av
 import numpy as np
 
+from tools.point_preview_cleanup import clean_preview_depth
 from tools.workspace_stream_crop import _decode_depth, crop_volumes, retained_depth
 
 ENCODING = "u16_mm_sparse_points_deflate"
@@ -63,12 +64,12 @@ def sample_rgb_pixels(rgb, camera, indices, depths):
     return result
 
 
-def _encode_camera(camera, color_bytes, depth_bytes, budget, cropper=None, volumes=None):
+def _encode_camera(camera, color_bytes, depth_bytes, budget, cropper=None, volumes=None, cleanup=None):
     if cropper is None:
-        return _encode_camera_uncached(camera, color_bytes, depth_bytes, budget, cropper, volumes)
+        return _encode_camera_uncached(camera, color_bytes, depth_bytes, budget, cropper, volumes, cleanup)
     geometry = json.dumps({k:camera.get(k) for k in ('width','height','intrinsics','transform','depth_encoding','color_encoding','color_space','color_projection','color_width','color_height')},sort_keys=True)
     volume_key = tuple((tuple(center),tuple(inverse.flat),tuple(half)) for center,inverse,half in (volumes or []))
-    key = (budget,geometry,volume_key,color_bytes,depth_bytes)
+    key = (budget,geometry,volume_key,json.dumps(cleanup or {},sort_keys=True),color_bytes,depth_bytes)
     identity = str(camera.get('id',''))
     with cropper.cache_lock:
         cache = getattr(cropper,'sparse_camera_cache',None)
@@ -88,8 +89,8 @@ def _encode_camera(camera, color_bytes, depth_bytes, budget, cropper=None, volum
     return encoded
 
 
-def _encode_camera_uncached(camera, color_bytes, depth_bytes, budget, cropper=None, volumes=None):
-    depth = _decode_depth(depth_bytes, camera)
+def _encode_camera_uncached(camera, color_bytes, depth_bytes, budget, cropper=None, volumes=None, cleanup=None):
+    depth = clean_preview_depth(_decode_depth(depth_bytes, camera), cleanup or {})
     if volumes:
         depth = retained_depth(depth, camera, volumes, cropper._bounds(depth, camera, volumes))
     depth = depth.ravel()
@@ -123,12 +124,13 @@ def sparse_point_packet_for_view(packet, budget, cropper, settings):
         volumes = crop_volumes(settings)
     except (ValueError, TypeError, OverflowError):
         volumes = None
-    if not volumes:
+    cleanup = {k:settings[k] for k in ('point_cleanup_support','point_cleanup_tolerance_mm') if k in settings}
+    if not volumes and not cleanup.get('point_cleanup_support'):
         return sparse_point_packet(packet, budget)
-    return _point_packet(packet, budget, cropper, volumes)
+    return _point_packet(packet, budget, cropper, volumes, cleanup)
 
 
-def _point_packet(packet, budget, cropper=None, volumes=None):
+def _point_packet(packet, budget, cropper=None, volumes=None, cleanup=None):
     if type(budget) is not int or budget not in (0, 20000, 40000):
         raise ValueError("point preview budget must be 0 (all), 20000 or 40000")
     if packet[:5] != b"RGBD1" or len(packet) < 9:
@@ -142,7 +144,7 @@ def _point_packet(packet, budget, cropper=None, volumes=None):
         depth_end = color_end + int(camera["depth_length"])
         if depth_end > len(packet):
             raise ValueError("truncated sparse source packet")
-        payloads.append(_WORKERS.submit(_encode_camera, camera, packet[offset:color_end], packet[color_end:depth_end], budget, cropper, volumes))
+        payloads.append(_WORKERS.submit(_encode_camera, camera, packet[offset:color_end], packet[color_end:depth_end], budget, cropper, volumes, cleanup))
         offset = depth_end
     if offset != len(packet):
         raise ValueError("unexpected trailing sparse source bytes")

@@ -463,6 +463,14 @@
           <label>Point detail<select id="point-preview-enabled"><option value="0">Full detail</option><option value="-2">Balanced mesh (compressed)</option><option value="-1">All native points (squares)</option><option value="40000">40k points per camera</option><option value="20000">20k points per camera</option></select></label>
           <p id="point-preview-help" class="helper-text">All native points uses the same coloured squares as 20k/40k, with every valid sample in the workspace crop. Balanced mesh uses fewer depth samples and compressed RGB. Quality and Low latency can be combined with any point detail. Preview only; capture and recording stay unchanged.</p>
           <p id="point-counts" class="helper-text">Waiting for point counts…</p>
+          <fieldset id="point-cleanup-controls">
+            <legend>Point cleanup</legend>
+            <label>Required neighbours <output id="point-cleanup-support-value"></output><input id="point-cleanup-support" type="range" min="0" max="8" step="1" value="0"></label>
+            <label>Depth tolerance <output id="point-cleanup-tolerance-value"></output><input id="point-cleanup-tolerance" type="range" min="1" max="100" step="1" value="15"></label>
+            <p class="helper-text">Removes isolated depth pixels before sampling. Zero neighbours turns cleanup off. Higher support removes more speckles and may remove thin details; a larger tolerance keeps more neighbours. Native point previews only; capture and recording stay unchanged.</p>
+            <button id="point-cleanup-save" type="button">Save cleanup for everyone</button>
+            <p id="point-cleanup-status" class="helper-text" role="status"></p>
+          </fieldset>
           <fieldset id="blendpcr-controls">
             <legend>BlendPCR surface controls</legend>
             <label>Depth tolerance <output id="blend-depth-value"></output><input id="blend-depth" type="range" min="1" max="100" step="0.1" value="1"></label>

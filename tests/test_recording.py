@@ -367,6 +367,32 @@ def test_robot_feedback_must_align_with_every_camera(tmp_path, has_aligned_feedb
             recorder._sample(source)
 
 
+def test_feedback_uses_producer_timestamp_despite_udp_delay(tmp_path):
+    recorder = HostEpisodeRecorder(tmp_path, load_robot_operator('so101'), SyntheticSource)
+    now = time.monotonic_ns()
+    status = {**feedback(), 'sent_unix_ms': time.time_ns()/1_000_000-180, 'last_read_age_ms': 10}
+    recorder.observe_robot(status, received_ns=now)
+    sample = recorder.telemetry[-1]
+    assert 185_000_000 < now-sample['measured_ns'] < 195_000_000
+    assert sample['received_ns'] == now
+    recorder.observe_robot({**status, 'sent_unix_ms': 1})
+    assert not recorder.telemetry
+
+
+def test_transient_mismatch_waits_for_a_genuinely_aligned_pair(tmp_path):
+    recorder = HostEpisodeRecorder(tmp_path, load_robot_operator('so101'), SyntheticSource)
+    mono = time.monotonic_ns()
+    recorder.observe_robot(feedback(), received_ns=mono-200_000_000)
+    frame = RgbFrame('left', JPEG, 64, 48, 1, 'capture', time.time_ns(), mono, mono)
+    worker = threading.Timer(.025, lambda: recorder.observe_robot(feedback()))
+    worker.start()
+    try:
+        frames, sample = recorder._sample(SimpleNamespace(snapshot=lambda: [frame]))
+        assert abs(sample['measured_ns']-frames[0].capture_monotonic_ns) <= 100_000_000
+    finally:
+        worker.join()
+
+
 def test_frozen_short_capture_is_not_reported_as_complete(tmp_path):
     with recorder_at(tmp_path) as (recorder, source, _):
         snapshot = source.snapshot

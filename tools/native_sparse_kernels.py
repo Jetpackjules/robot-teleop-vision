@@ -20,6 +20,8 @@ def _load():
         pointer=ctypes.c_void_p
         lib.sparse_depth_mm.argtypes=[pointer,pointer,ctypes.c_size_t,ctypes.c_double]
         lib.sparse_depth_mm.restype=None
+        lib.sparse_clean_depth.argtypes=[pointer,pointer,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_double]
+        lib.sparse_clean_depth.restype=None
         lib.sparse_pack.argtypes=[pointer,ctypes.c_int,ctypes.c_int,pointer,ctypes.c_int,
             ctypes.c_int,ctypes.c_int,ctypes.c_int,pointer,ctypes.c_uint32,pointer,
             ctypes.c_size_t,ctypes.POINTER(ctypes.c_uint32)]
@@ -29,6 +31,15 @@ def _load():
 
 
 LIBRARY=_load()
+
+
+def clean_depth(depth, support, tolerance):
+    if LIBRARY is None or depth.dtype!=np.uint16 or not depth.flags.c_contiguous:
+        return None
+    out=np.empty_like(depth)
+    height,width=depth.shape
+    LIBRARY.sparse_clean_depth(depth.ctypes.data,out.ctypes.data,width,height,int(support),tolerance)
+    return out
 
 
 def depth_mm(snapshot):

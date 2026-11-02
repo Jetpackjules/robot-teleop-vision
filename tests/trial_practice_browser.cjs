@@ -29,10 +29,8 @@ let logs='';server.stderr.on('data',d=>logs+=d);
  assert.equal(starts.length,0,'setup must not record');
  const layouts=[];
  for(let index=0;index<3;index++){
-  await page.waitForFunction(()=>document.getElementById('trial-action').textContent==='Start practice'&&!document.getElementById('trial-action').disabled);
-  assert.equal(await page.locator('#trial-position').textContent(),`Practice ${index+1}/3`);
-  await page.locator('#trial-action').click();
-  await page.waitForFunction(()=>window.testTrials.recording.status?.state==='recording'&&window.testTrials.recording.status.frames>=3);
+  if(index===0) {await page.waitForFunction(()=>document.getElementById('trial-action').textContent==='Start practice'&&!document.getElementById('trial-action').disabled);await page.locator('#trial-action').click();}
+  await page.waitForFunction(i=>window.testTrials.state.index===i&&window.testTrials.recording.status?.state==='recording'&&window.testTrials.recording.status.frames>=3,index);
   assert.equal(await page.locator('#trial-action').textContent(),'Done');
   assert.match(await page.locator('#trial-message').textContent(),[/switching cameras/,/orbiting/,/Move your head/][index]);
   for(const [width,height]of [[1024,768],[1920,1080]]){
@@ -41,13 +39,10 @@ let logs='';server.stderr.on('data',d=>logs+=d);
    await page.screenshot({path:path.join(out,`practice-${index+1}-${width}.png`)});layouts.push({mode:plan[index].condition,width,...box});
   }
   await page.locator('#trial-action').click();
-  await page.waitForFunction(()=>window.testTrials.saved?.status==='complete'&&window.testTrials.recording.status.state==='idle');
+  await page.waitForFunction(i=>window.testTrials.state.index===i+1,index);
   assert.equal(await page.locator('#trial-result-dialog').evaluate(el=>el.open),false);
-  assert.equal(await page.evaluate(()=>window.testTrials.saved.outcome),'unrated');
-  assert.equal(starts.length,index+1);
-  await page.locator('#trial-action').click();
-  assert.equal(starts.length,index+1,'Next never starts a recording');
  }
+ assert.equal(starts.length,3,'practice cycles all views and stops before measured recording');
  await page.waitForFunction(()=>window.testTrials.state.taskId==='count_blocks'&&!document.getElementById('trial-action').disabled);
  assert.equal(await page.locator('#trial-position').textContent(),'1/12');
  await page.locator('#trial-action').click();
