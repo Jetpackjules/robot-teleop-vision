@@ -44,7 +44,7 @@ export class EpisodeRecordingControl {
     if (!this.closed) this.timer = setTimeout(() => this.poll(), this.interval);
   }
 
-  async command(command) {
+  async command(command, extra = {}) {
     if (this.busy) return false;
     if (command === 'start' && !this.task.reportValidity()) return false;
     this.revision++;
@@ -58,7 +58,10 @@ export class EpisodeRecordingControl {
         const context = this.context?.();
         if (context) payload.trial = context;
       }
+      else if (command === 'score') payload.block_count = extra.block_count;
+      else if (command === 'rate') payload.outcome = extra.outcome;
       else payload.outcome = this.outcome.value;
+      if (['score', 'rate'].includes(command) && extra.session_id) payload.session_id = extra.session_id;
       const response = await this.request('/api/v1/recording', {method: 'POST',
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
       const result = await response.json();

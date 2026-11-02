@@ -56,6 +56,7 @@ from robot_teleop.camera_preview import CameraPreviewEncoder
 from robot_teleop.modules import public_robot_module
 from robot_teleop.operator import RobotCommandError, load_robot_operator
 from robot_teleop.recording import CaptureRgbSource, HostEpisodeRecorder, RecordingError, camera_id
+from robot_teleop.trial_protocol import load_protocol, save_protocol
 from robot_teleop.state import godot_app_userdata_root
 from tools.godot_desktop_stream import DesktopStreamConfig, GodotDesktopStream
 from tools.workspace_stream_crop import STREAM_SETTING_KEYS, WorkspaceStreamCropper
@@ -1839,10 +1840,13 @@ class LanRemoteServer(ThreadingHTTPServer):
         )
         self.robot_operator = load_robot_operator(self.robot_module, module_paths)
         self.trial_control_lock = threading.RLock()
+        self.trial_protocol_lock = threading.Lock()
+        self.trial_protocol_path = root.parent / '.teleop' / 'trial-protocol.json'
         self.episode_recorder = HostEpisodeRecorder(
             recording_root or root.parent / ".teleop" / "recordings", self.robot_operator,
             lambda: CaptureRgbSource(self.stream_host, self.capture_port, MultipartRawFrameReader,
                                      self.robot_view_hubs),
+            on_time_limit=lambda: self.forward_robot(self.robot_operator.hold_message()),
         )
         self.stream_crop_lock = threading.Lock()
         self.stream_crop_clients: dict[str, tuple[dict, WorkspaceStreamCropper]] = {}
@@ -2398,6 +2402,13 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/v1/site-settings":
             self.serve_json(self.server.load_site_settings())
             return
+        if parsed.path == '/api/v1/trial-protocol':
+            try:
+                with self.server.trial_protocol_lock:
+                    self.serve_json(load_protocol(self.server.trial_protocol_path))
+            except (OSError, ValueError) as exc:
+                self.send_error(503, 'Saved trial settings could not be read: '+str(exc)[:120])
+            return
         if parsed.path == "/api/v1/recording":
             self.serve_recording_status(parsed.query)
             return
@@ -2617,7 +2628,26 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/v1/recording":
             self.handle_recording_command()
             return
+        if parsed.path == '/api/v1/trial-protocol':
+            self.handle_trial_protocol_save()
+            return
         self.send_error(404, "Not found")
+
+    def handle_trial_protocol_save(self) -> None:
+        origin = urlsplit(self.headers.get('Origin', ''))
+        if origin.scheme not in ('http', 'https') or origin.netloc.lower() != self.headers.get('Host', '').lower():
+            self.send_error(403, 'Task settings require a same-origin page')
+            return
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+            if not 0 < length <= 8192 or self.headers.get('Content-Type', '').split(';', 1)[0] != 'application/json':
+                raise ValueError('Task settings require a small JSON request.')
+            value = json.loads(self.rfile.read(length))
+            with self.server.trial_protocol_lock:
+                result = save_protocol(self.server.trial_protocol_path, value)
+            self.serve_json(result)
+        except (ValueError, TypeError, OSError) as exc:
+            self.serve_json({'error': str(exc)[:200]}, status=409)
 
     def serve_recording_status(self, query: str) -> None:
         client = parse_qs(query).get("client", [""])[0]
@@ -2845,9 +2875,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
 </html>
 """.encode("utf-8")
 
-    def serve_json(self, payload: object, include_body: bool = True) -> None:
+    def serve_json(self, payload: object, include_body: bool = True, status: int = 200) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

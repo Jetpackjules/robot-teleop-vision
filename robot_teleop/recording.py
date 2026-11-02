@@ -384,7 +384,7 @@ class HostEpisodeRecorder:
             if not self.telemetry or time.monotonic_ns()-self.telemetry[-1]['measured_ns'] > 350_000_000:
                 raise RecordingError('Fresh measured robot feedback and an applied position target are required before recording.')
             self.owner, self.state, self.samples = client, 'preparing', 0
-            self.message = 'Checking original RGB and measured robot feedbackâ€¦'
+            self.message = 'Checking original RGB and measured robot feedback…'
             self.episode = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ_')+uuid.uuid4().hex[:12]
             self.stop_event = threading.Event()
             self.interruption, self.discard, self.outcome = '', False, 'unrated'
@@ -410,7 +410,7 @@ class HostEpisodeRecorder:
                 self.discard, self.outcome = discard, outcome
                 self.stopped_ns = time.monotonic_ns()
                 self._close_pause(self.stopped_ns)
-                self.state, self.message = 'saving', 'Finishing the episode on the hostâ€¦'
+                self.state, self.message = 'saving', 'Finishing the episode on the host…'
                 self.stop_event.set()
             return self.status(client)
 
@@ -420,7 +420,7 @@ class HostEpisodeRecorder:
                 self.interruption = reason
                 self.stopped_ns = time.monotonic_ns()
                 self._close_pause(self.stopped_ns)
-                self.state, self.message = 'saving', 'Preserving the interrupted episodeâ€¦'
+                self.state, self.message = 'saving', 'Preserving the interrupted episode…'
                 self.stop_event.set()
 
     def close(self) -> None:

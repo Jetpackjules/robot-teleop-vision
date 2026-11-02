@@ -1397,6 +1397,9 @@
     robotModule.bind?.({ sendViewSettings, updateStatus });
     robotModule.start?.({ sendViewSettings, updateStatus });
     const trialController = new TrialController({recording: episodeRecording,
+      prepareSession: () => robotModule.prepareSession?.(),
+      prepareTrial: () => robotModule.prepareTrial?.(),
+      sessionConnected: () => robotModule.sessionConnected?.() ?? true,
       pauseRobot: typeof robotModule.pauseTrial === 'function' ? () => robotModule.pauseTrial() : null,
       resumeRobot: typeof robotModule.resumeTrial === 'function' ? () => robotModule.resumeTrial() : null,
       finishRobotPause: () => robotModule.finishTrialPause?.(),

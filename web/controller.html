@@ -320,17 +320,15 @@
 
     <section id="trial-hud" aria-label="Current trial">
       <div class="trial-copy">
-        <h1 id="trial-task">Place the block in the cup</h1>
+        <h1 id="trial-task">Move the object from one plate to the other</h1>
         <div class="trial-meta"><span id="trial-position" aria-label="Trial 1 of 3">1/3</span><span class="meta-divider" aria-hidden="true">/</span><span id="trial-condition">Fixed cameras</span></div>
       </div>
       <div class="trial-clock"><output id="trial-timer" aria-label="Trial elapsed time" aria-live="off">00:00</output><span id="trial-recording-state" hidden></span></div>
       <div class="trial-actions">
-        <button id="trial-pause" type="button" hidden>Pause</button>
-        <button id="trial-action" class="primary" type="button" disabled>Start trial</button>
+        <button id="trial-action" class="primary" type="button" disabled>Set up session</button>
       </div>
       <progress id="trial-progress" value="0" max="600" aria-label="Trial elapsed time"></progress>
       <p id="trial-message" role="status" aria-live="polite" hidden></p>
-      <div id="trial-outcome-control" hidden><label>Outcome<select id="trial-outcome"><option value="unrated">Not rated</option><option value="success">Success</option><option value="failure">Failure</option></select></label></div>
     </section>
 
     <details id="connection-details" class="connection-details">
@@ -338,6 +336,17 @@
       <div class="connection-body"><div id="status-lines" class="status-lines">Preparing controller</div><div id="robot-status-root"></div></div>
     </details>
   </header>
+
+  <dialog id="trial-result-dialog" aria-labelledby="trial-result-title">
+    <form id="trial-result-form">
+      <h2 id="trial-result-title">Trial complete</h2>
+      <p id="trial-result-summary"></p>
+      <div id="trial-block-result" hidden><label>Count in cup<input id="trial-block-count" type="number" min="0" max="9999" step="1" required></label><output id="trial-block-score" aria-live="polite"></output></div>
+      <div id="trial-outcome-control" hidden><label>Result<select id="trial-outcome"><option value="success">Pass</option><option value="failure">Fail</option></select></label></div>
+      <p id="trial-result-error" role="alert" hidden></p>
+      <div class="trial-result-actions"><button id="trial-result-close" type="button">Close</button><button id="trial-save-block-count" class="primary" type="button">Save &amp; Next</button></div>
+    </form>
+  </dialog>
 
   <div id="view-navigation" aria-label="View controls">
     <div id="camera-navigation" hidden>
@@ -365,9 +374,10 @@
           <section id="episode-recording" class="episode-recording" aria-labelledby="recording-title">
             <h3 id="recording-title" class="section-title">Demonstration recording</h3>
             <label>Task instruction
-              <input data-recording-task type="text" required maxlength="500" value="Place the block in the cup" placeholder="Place the block in the cup" autocomplete="off">
+              <input data-recording-task type="text" required maxlength="500" value="Move the object from one plate to the other" placeholder="Move the object from one plate to the other" autocomplete="off">
             </label>
             <details class="advanced-disclosure"><summary>Recording controls and host status</summary><div class="disclosure-body">
+            <button id="trial-pause" type="button" hidden>Pause</button>
             <p class="helper-text">Records original RGB from all active capture cameras and any open wrist view, plus measured joints and applied actions, on the robot host.</p>
             <button data-recording-start class="primary" type="button" disabled>Start recording</button>
             <label>Episode outcome
@@ -386,9 +396,22 @@
           </section>
           <section class="advanced-section">
             <h3>Trial plan</h3>
+            <label id="trial-session-edit">Session name<input id="trial-session-input" type="text" maxlength="120" required value="Session" placeholder="e.g., Participant 01" autocomplete="off" title="The date and time are saved with the recording."></label>
             <label class="toggle-row"><span>Guided trials</span><input id="guided-trials" type="checkbox" checked></label>
             <p class="helper-text">One view at a time. The facilitator starts and saves each trial, then clicks Next.</p>
-            <label>Condition order<select id="trial-order">
+            <label>Session activities<select id="trial-task-kind"><option value="all" selected>All configured activities</option><option value="single_block">Task 1 only · Pick and place</option><option value="count_blocks">Task 2 only · Objects in cup</option><option id="trial-task3-option" value="custom">Task 3 only · Balance test</option></select></label>
+            <label class="toggle-row"><span>Randomize activity order</span><input id="random-activity-order" type="checkbox" checked></label>
+            <details class="advanced-disclosure"><summary>Task instructions and scoring</summary><div class="disclosure-body">
+              <p class="helper-text">Pass/fail: Finish before the time limit passes; timeout fails. An early unsuccessful attempt can be marked Failure in recording controls. Count scoring requires a saved count before Next.</p>
+              <label>Task 1 instruction<input id="trial-task1-instruction" type="text" required maxlength="500"></label>
+              <label>Task 1 scoring<select id="trial-task1-metric"><option value="pass_fail">Pass / fail</option><option value="block_count">Count in cup</option></select></label>
+              <label>Task 2 instruction<input id="trial-task2-instruction" type="text" required maxlength="500"></label>
+              <label>Task 2 scoring<select id="trial-task2-metric"><option value="block_count">Count in cup</option><option value="pass_fail">Pass / fail</option></select></label>
+              <label>Task 3 instruction<input id="trial-task3-instruction" type="text" required maxlength="500"></label>
+              <label>Task 3 scoring<select id="trial-task3-metric"><option value="pass_fail">Pass / fail</option><option value="block_count">Count in cup</option></select></label>
+            </div></details>
+            <label>View order within each activity<select id="trial-order">
+              <option value="random" selected>Randomize separately for each round</option>
               <option value="fixed_rgb,mouse_3d,head_3d">Fixed cameras → Mouse 3D → Head tracking</option>
               <option value="fixed_rgb,head_3d,mouse_3d">Fixed cameras → Head tracking → Mouse 3D</option>
               <option value="mouse_3d,fixed_rgb,head_3d">Mouse 3D → Fixed cameras → Head tracking</option>
@@ -396,8 +419,10 @@
               <option value="head_3d,fixed_rgb,mouse_3d">Head tracking → Fixed cameras → Mouse 3D</option>
               <option value="head_3d,mouse_3d,fixed_rgb">Head tracking → Mouse 3D → Fixed cameras</option>
             </select></label>
-            <label>Time target (minutes)<input id="trial-duration" type="number" required min="0.5" max="120" step="0.5" value="10" title="Sets the time bar. Trials finish manually."></label>
-            <p id="trial-plan-help" class="helper-text">Use the same 3D renderer for both 3D conditions. Choose it in View. Turn off guided trials for free configuration.</p>
+            <label>Trial time limit (seconds)<input id="trial-duration" type="number" required min="30" max="7200" step="1" value="75" title="Applies to new sessions. Recording stops and the arm holds when the active-time limit is reached."></label>
+            <button id="trial-save-protocol" type="button">Save task settings on host</button>
+            <p id="trial-protocol-status" class="helper-text" role="status">Loading task settings…</p>
+            <p id="trial-plan-help" class="helper-text">Each activity has two rounds of all three views (six trials). Use the same 3D renderer for both 3D conditions; choose it in View. Turn off guided trials for free configuration.</p>
             <button id="restore-trial-view" type="button">Restore current trial view</button>
             <button id="new-trial-session" type="button">New session</button>
             <p id="trial-session-status" class="helper-text" role="status"></p>

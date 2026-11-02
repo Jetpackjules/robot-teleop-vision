@@ -135,7 +135,7 @@ TRIAL = {'session_id': 'test-session', 'index': 1, 'total': 3,
 def test_trial_metadata_survives_host_save(tmp_path, total):
     with recorder_at(tmp_path) as (recorder, _, _):
         expected = {**TRIAL, 'total': total, 'index': total,
-                    'session_name': 'Participant Î± / test â€” 2026-10-28 16:00:00 GMT+1'}
+                    'session_name': 'Participant α / test — 2026-10-28 16:00:00 GMT+1'}
         supplied = dict(expected)
         recorder.start('page-a', 'Match the viewing condition', trial=supplied)
         supplied['condition'] = 'head_3d'
