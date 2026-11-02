@@ -595,6 +595,13 @@ class So101WebModule {
     this.renderStatus();
   }
 
+  prepareSession() { return window.so101ArmController.prepareTrialControl({connect: true}); }
+  prepareTrial() { return window.so101ArmController.prepareTrialControl(); }
+  sessionConnected() {
+    const arm = window.so101ArmController?.latest;
+    return arm?.serverConnected === true && arm.followerConnected === true
+      && (arm.leaderConnected === true || arm.keyboardConnected === true);
+  }
   pauseTrial() { return window.so101ArmController.pauseTrial(); }
   resumeTrial() { return window.so101ArmController.resumeTrial(); }
   finishTrialPause() { window.so101ArmController.finishTrialPause(); }

@@ -521,7 +521,7 @@ export class TrialController {
       : active ? status.is_owner === false ? 'This recording belongs to another controller page.'
         : needsView ? 'Live view interrupted. Hold the arm if needed; the host is still recording.'
           : guided && this.practice ? PRACTICE_HINTS[this.condition] : ''
-      : needsSetup ? `Set up connects the physical leader arm and enables control. Recording starts with ${this.practice ? 'Start practice' : 'Start trial'}.`
+      : needsSetup ? `Set up prepares the selected arm controls. Recording starts with ${this.practice ? 'Start practice' : 'Start trial'}.`
       : needsTask ? ''
       : mismatch ? 'The view was changed in Settings. Restore the trial view, or turn off guided trials.'
       : needsTracking ? 'Waiting for head tracking. Look toward the laptop camera, then reset head tracking.'

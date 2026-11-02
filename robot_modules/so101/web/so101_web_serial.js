@@ -554,6 +554,35 @@ export class So101ArmController extends EventTarget {
     this.scheduleLoop(Math.max(0, period - this.lastLoopMs));
   }
 
+  leaderInputFresh() {
+    return !!this.lastLeaderPositions && !this.leaderReadFault && MOTOR_IDS.every(id => (
+      this.lastLeaderReadTimes.has(id) && performance.now() - this.lastLeaderReadTimes.get(id) <= MAX_LEADER_SAMPLE_AGE_MS
+    ));
+  }
+
+  async prepareTrialControl(options = {}) {
+    // Keyboard is opt-in. The study's normal setup still uses the physical leader.
+    if (!this.latest.keyboardConnected) return this.prepareLeaderTrial(options);
+    if (this.trialSuspended) throw new Error("Resume or finish the paused trial before setting up control.");
+    await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected && status.keyboardConnected);
+    this.clearKeyboardMotion();
+    if (!this.latest.armed || (this.latest.status?.control_source ?? this.latest.controlMode) !== "keyboard") this.enableArm();
+    await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected && status.keyboardConnected
+      && status.armed && (status.status?.control_source ?? status.controlMode) === "keyboard");
+  }
+
+  async prepareLeaderTrial({connect = false} = {}) {
+    if (this.trialSuspended) throw new Error("Resume or finish the paused trial before setting up control.");
+    if (!this.latest.leaderConnected) {
+      if (!connect) throw new Error("Reconnect the physical leader arm with Set up session.");
+      await this.connectLeader();
+    }
+    await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected
+      && status.leaderConnected && this.leaderInputFresh());
+    if (!this.latest.armed || (this.latest.status?.control_source ?? this.latest.controlMode) !== "leader") this.enableArm();
+    await this.waitForTrialStatus(status => status.armed && (status.status?.control_source ?? status.controlMode) === "leader");
+  }
+
   enableArm() {
     const source = this.latest.keyboardConnected ? "keyboard" : "leader";
     if (source === "leader" && !this.latest.leaderConnected) throw new Error("Connect the leader arm or enable keyboard control first");
