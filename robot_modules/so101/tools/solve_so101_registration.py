@@ -106,7 +106,7 @@ class PlacementFit:
         self.seed = correction @ initial[:3, :3]
         self.e1, self.e2 = self.seed[:, 0], self.seed[:, 2]
         self.pivot = np.asarray(self.frames[0]["joint_frames"][0]["pivot"], dtype=float)
-        self.models, self.views = [], []
+        self.models, self.views, self.motion_views = [], [], []
         for frame in self.frames:
             model = {name: points(value) for name, value in frame["mesh_points"].items()
                      if name in LINKS and len(value) >= 8}
@@ -133,6 +133,19 @@ class PlacementFit:
             if not views:
                 raise ValueError("no usable camera depth in a pose")
             self.views.append(views)
+            motion = {}
+            for camera in frame.get("camera_points", []):
+                if not camera.get("points"):
+                    continue
+                cloud = points(camera["points"])
+                height = (cloud - self.axis) @ self.normal
+                # Remove table/disocclusion evidence, independently of a tested heading.
+                cloud = cloud[(height > 0.025) & (height < 0.65)
+                              & (np.linalg.norm(cloud - self.axis, axis=1) < 0.7)]
+                if len(cloud) > 600:
+                    cloud = cloud[np.linspace(0, len(cloud) - 1, 600).astype(int)]
+                motion[camera["name"]] = cloud
+            self.motion_views.append(motion)
         if not any(self.reference in view for view in self.views):
             raise ValueError("selected reference camera is missing from the capture")
         # No single pose may fit and validate itself. Keep measured viewpoints
@@ -216,6 +229,39 @@ class PlacementFit:
             [r["links"] for r in reports if r["pose"] == index])}
                 for index in range(len(self.frames))]
 
+    @staticmethod
+    def passes_pose_validation(loss, poses):
+        return loss <= 0.022 and all(
+            r["loss_m"] is not None and r["loss_m"] <= 0.03
+            and r["visible_samples"] >= 48 and r["coverage_weight"] >= 1.5
+            and len(r["supported_links"]) >= 3 and not r["contradicted_links"]
+            for r in poses)
+
+    def validate_motion(self, value, cameras):
+        """Require observed moving geometry to agree too, when capture has enough.
+
+        This checks fixed hypotheses only. Withheld poses never fit parameters.
+        Legacy/low-motion captures retain the original ambiguity requirement.
+        """
+        basis, origin = self.transform(value)
+        reports = []
+        for index, motion in enumerate(self.motion_views):
+            observed = [motion[name] for name in cameras if name in motion and len(motion[name])]
+            if not observed or sum(map(len, observed)) < 80:
+                continue
+            tree = cKDTree(np.concatenate(list(self.models[index].values())) @ basis.T + origin)
+            distances = tree.query(np.concatenate(observed))[0]
+            trimmed = np.sort(np.minimum(distances, 0.08))[:max(1, int(len(distances) * 0.7))]
+            reports.append({"pose": index, "samples": len(distances),
+                            "support": float(np.mean(distances < 0.025)),
+                            "trimmed_loss_m": float(np.mean(trimmed))})
+        available = (len(reports) >= 2 and any(r["pose"] in self.validation for r in reports)
+                     and any(r["pose"] in self.training for r in reports))
+        return {"available": available,
+                "valid": not available or all(r["support"] >= 0.45 and r["trimmed_loss_m"] <= 0.025
+                                              for r in reports),
+                "pose_results": reports}
+
     def optimize(self):
         available = sorted(set().union(*(view.keys() for view in self.views)) - {self.reference})
         cameras = [self.reference, *available]
@@ -263,8 +309,30 @@ class PlacementFit:
             rescored.sort(key=lambda item: item[0])
             best_loss, best = rescored[0]
             candidates = rescored
-        # Assess ambiguity only after removing inconsistent camera geometry.
-        for loss, alternative in candidates[1:]:
+        # Validate fixed training hypotheses before asking whether two placements
+        # are plausible. Withheld poses reject hypotheses, never fit parameters.
+        rejected_headings, validated = [], []
+        for training_loss, candidate in candidates:
+            candidate_loss, candidate_reports = self.score(
+                candidate, cameras, range(len(self.frames)), True)
+            candidate_poses = self.pose_reports(candidate_reports)
+            candidate_motion = self.validate_motion(candidate, cameras)
+            if (np.max(np.abs(candidate[1:])) > TRANSLATION_LIMIT_M - 0.0005
+                    or not self.passes_pose_validation(candidate_loss, candidate_poses)
+                    or not candidate_motion["valid"]):
+                rejected_headings.append({
+                    "yaw_degrees": math.degrees(float(candidate[0])),
+                    "training_loss_m": training_loss, "validation_loss_m": candidate_loss,
+                    "pose_results": candidate_poses, "motion_validation": candidate_motion,
+                    "reason": "failed placement or motion validation"})
+                LOGGER.info("Competing heading %.2f degrees rejected by placement validation",
+                            math.degrees(float(candidate[0])))
+            else:
+                validated.append((training_loss, candidate))
+        if not validated:
+            raise ValueError("whole-arm placement failed link coverage, moving-arm evidence, or withheld-pose validation")
+        best_loss, best = validated[0]
+        for loss, alternative in validated[1:]:
             separation = abs(math.atan2(math.sin(alternative[0] - best[0]), math.cos(alternative[0] - best[0])))
             if separation > math.radians(15) and loss < best_loss + max(0.0015, best_loss * 0.12):
                 raise ValueError("whole-arm heading is ambiguous; previous placement retained")
@@ -284,10 +352,11 @@ class PlacementFit:
             raise ValueError("whole-arm fit reached the pivot translation limit")
         loss, reports = self.score(best, cameras, range(len(self.frames)), True)
         poses = self.pose_reports(reports)
-        if loss > 0.022 or any(r["loss_m"] is None or r["loss_m"] > 0.03
-                              or r["visible_samples"] < 48 or r["coverage_weight"] < 1.5
-                              or len(r["supported_links"]) < 3 or r["contradicted_links"] for r in poses):
+        if not self.passes_pose_validation(loss, poses):
             raise ValueError("whole-arm placement failed link coverage or withheld-pose validation")
+        motion_validation = self.validate_motion(best, cameras)
+        if not motion_validation["valid"]:
+            raise ValueError("whole-arm placement disagrees with observed moving-arm geometry; previous placement retained")
         basis, origin = self.transform(best)
         return {"ok": True, "type": "so101_rigid_registration",
                 "method": "fixed_kinematics_whole_arm_registration",
@@ -296,6 +365,8 @@ class PlacementFit:
                                       "origin": origin.tolist()},
                 "confidence": max(0.0, min(1.0, 1 - loss / 0.04)),
                 "metrics": {"loss_m": loss, "cameras": cameras, "excluded_cameras": excluded,
+                            "rejected_heading_alternatives": rejected_headings,
+                            "motion_validation": motion_validation,
                             "validation_poses": self.validation, "pose_camera_results": reports,
                             "pose_results": poses, "visibility_scoring": "observed_links_across_cameras",
                             "yaw_correction_degrees": math.degrees(float(best[0])),
@@ -332,10 +403,12 @@ def refine_validated_placement(payload, evidence, coarse, fit):
             try:
                 fit.transform = lambda _: (proposed[:3, :3], proposed[:3, 3])
                 loss, reports = fit.score(None, coarse["metrics"]["cameras"], range(len(fit.frames)), True)
+                motion_validation = fit.validate_motion(None, coarse["metrics"]["cameras"])
             finally:
                 fit.transform = original_transform
             poses = fit.pose_reports(reports)
             valid = (np.max(np.abs(shift)) < TRANSLATION_LIMIT_M - .0005
+                     and motion_validation["valid"]
                      and loss <= min(.022, coarse["metrics"]["loss_m"] + .002)
                      and all(p["loss_m"] is not None and p["loss_m"] <= .03
                              and p["visible_samples"] >= 48 and p["coverage_weight"] >= 1.5
@@ -346,6 +419,7 @@ def refine_validated_placement(payload, evidence, coarse, fit):
                                                "origin": proposed[:3, 3].tolist()}
                 result["confidence"] = max(0.0, min(1.0, 1 - loss / .04))
                 result["metrics"].update(loss_m=loss, pose_camera_results=reports, pose_results=poses,
+                                          motion_validation=motion_validation,
                                           pivot_translation_m=shift.tolist(), yaw_correction_degrees=math.degrees(float(
                                               Rotation.from_matrix(basis @ fit.seed.T).as_rotvec() @ fit.normal)))
                 metadata["status"] = "accepted"

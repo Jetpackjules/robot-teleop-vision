@@ -110,6 +110,68 @@ def test_unobservable_heading_is_rejected():
         registration.fit_registration(payload, evidence)
 
 
+@pytest.mark.parametrize("alternative_in_withheld", [False, True])
+def test_heading_tie_requires_a_second_valid_placement(monkeypatch, alternative_in_withheld):
+    payload, evidence, basis, origin = capture(noise=0)
+    fit = registration.PlacementFit(payload, evidence)
+    correct = np.array([np.radians(43), -0.009, 0.006])
+    alternative = np.array([np.radians(-137), -0.009, 0.006])
+    other_basis, other_origin = fit.transform(alternative)
+    for index, frame in enumerate(payload["frames"]):
+        frame["camera_points"] = copy.deepcopy(frame["full_camera_points"])
+        if index in fit.training or alternative_in_withheld:
+            other_cloud = np.concatenate(list(fit.models[index].values())) @ other_basis.T + other_origin
+            for camera in frame["full_camera_points"]:
+                camera["points"].extend(other_cloud.tolist())
+            if alternative_in_withheld:
+                for camera in frame["camera_points"]:
+                    camera["points"].extend(other_cloud.tolist())
+    original = copy.deepcopy(payload)
+    calls = 0
+
+    def candidates(objective, *_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        value = alternative if calls == 2 else correct
+        return types.SimpleNamespace(x=value.copy(), fun=objective(value), nfev=1)
+
+    monkeypatch.setattr(registration, "minimize", candidates)
+    if alternative_in_withheld:
+        with pytest.raises(ValueError, match="heading is ambiguous"):
+            registration.fit_registration(payload, evidence)
+    else:
+        result = registration.fit_registration(payload, evidence)
+        fitted = registration.matrix(result["preview_transform"])
+        assert fitted[:3, :3] == pytest.approx(basis, abs=0.008)
+        assert fitted[:3, 3] == pytest.approx(origin, abs=0.002)
+        assert len(result["metrics"]["rejected_heading_alternatives"]) == 1
+        assert result["metrics"]["joint_mapping_changed"] is False
+    assert payload == original
+
+
+def test_empty_motion_evidence_keeps_original_validation_path():
+    payload, evidence, *_ = capture(noise=0)
+    for frame in payload["frames"]:
+        frame["camera_points"] = [{"name": "primary", "points": []}]
+    fit = registration.PlacementFit(payload, evidence)
+    report = fit.validate_motion(np.array([np.radians(43), -0.009, 0.006]), ["primary"])
+    assert report["available"] is False
+    assert report["pose_results"] == []
+
+
+def test_scene_match_cannot_override_contradictory_moving_geometry(monkeypatch):
+    payload, evidence, *_ = capture(noise=0)
+    for frame in payload["frames"]:
+        frame["camera_points"] = copy.deepcopy(frame["full_camera_points"])
+        for camera in frame["camera_points"]:
+            camera["points"] = (np.asarray(camera["points"]) + [0, .20, 0]).tolist()
+    correct = np.array([np.radians(43), -0.009, 0.006])
+    monkeypatch.setattr(registration, "minimize", lambda objective, *a, **k:
+                        types.SimpleNamespace(x=correct.copy(), fun=objective(correct), nfev=1))
+    with pytest.raises(ValueError, match="moving-arm evidence"):
+        registration.fit_registration(payload, evidence)
+
+
 def test_visibility_excludes_occlusion_but_keeps_free_space_errors():
     snapshot = {"camera_inverse": transform(np.eye(3), [0, 0, 0]),
                 "intrinsics": [10, 10, 1, 1], "grid_stride": 1, "sample_step": 1,
