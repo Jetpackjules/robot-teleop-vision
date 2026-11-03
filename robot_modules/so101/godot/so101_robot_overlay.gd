@@ -273,6 +273,7 @@ var _manual_base_offsets := Vector3.ZERO # world X, world Z, yaw in degrees
 var _manual_base_offset_y := 0.0
 var _manual_base_last_update_msec := 0
 var _registration_modified_time: int = 0
+var _last_rigid_registration_error: String = ""
 var _next_registration_poll_msec: int = 0
 var _scene_fallback_transform := Transform3D.IDENTITY
 var _scene_fallback_mapping: Dictionary = {}
@@ -685,6 +686,7 @@ func _handle_manual_base_action(action: Dictionary) -> Dictionary:
 	_registration_status["registered"] = true
 	_registration_status["confidence"] = 0.0 # user alignment, not automatic validation
 	_registration_status["registration_source"] = "manual_base_placement"
+	_registration_status["base_reference_only"] = false
 	_registration_status["saved_unix_ms"] = Time.get_unix_time_from_system() * 1000.0
 	var payload := _build_registration_payload()
 	payload["manual_base_adjustment"] = {"offset_x": offsets.x, "offset_y": float(height), "offset_z": offsets.y, "yaw_degrees": offsets.z, "previous_source": str(previous_status.get("registration_source", "scene"))}
@@ -748,6 +750,7 @@ func _import_visual_calibration(file: Variant, restore_base: bool) -> String:
 	payload["confidence"] = 0.0
 	payload["joint_refinement"] = {"manual_import": {"saved_unix_ms": payload.saved_unix_ms, "restored_base": restore_base}}
 	if restore_base:
+		payload["base_reference_only"] = bool(file.get("base_reference_only", false))
 		payload.erase("base_axis_fit")
 		payload.erase("base_registration_source")
 		payload.erase("calibrated_through_joint")
@@ -1159,8 +1162,17 @@ func get_alignment_token() -> String:
 	return (JSON.stringify(payload) + file_text).sha256_text()
 
 
+func get_last_rigid_registration_error() -> String:
+	return _last_rigid_registration_error
+
+
 func apply_rigid_registration(value: Transform3D, confidence: float, started_unix_ms: float, metrics: Dictionary, expected_token: String) -> bool:
-	if expected_token.is_empty() or expected_token != get_alignment_token() or not value.is_finite() or not _registration_is_upright(value):
+	_last_rigid_registration_error = ""
+	if expected_token.is_empty() or expected_token != get_alignment_token():
+		_last_rigid_registration_error = "Robot placement, joint settings, or the saved file changed during alignment."
+		return false
+	if not _global_registration_is_upright(value):
+		_last_rigid_registration_error = "The fitted world placement is invalid or its base up direction is unsafe."
 		return false
 	var previous_transform := transform
 	var previous_status := _registration_status.duplicate(true)
@@ -1170,6 +1182,7 @@ func apply_rigid_registration(value: Transform3D, confidence: float, started_uni
 		transform = Transform3D(value.basis.orthonormalized(), value.origin)
 	_registration_status["registered"] = true
 	_registration_status["base_registration_source"] = "fixed_kinematics_whole_arm_registration"
+	_registration_status["base_reference_only"] = false
 	_registration_status["registration_source"] = "fixed_kinematics_whole_arm_registration"
 	_registration_status["confidence"] = clampf(confidence, 0.0, 1.0)
 	_registration_status["calibration_started_unix_ms"] = started_unix_ms
@@ -1178,6 +1191,7 @@ func apply_rigid_registration(value: Transform3D, confidence: float, started_uni
 	payload["registration_fit"] = metrics.duplicate(true)
 	if _write_registration_payload(payload):
 		return true
+	_last_rigid_registration_error = str(_registration_status.get("fault", "Could not write the robot registration file."))
 	transform = previous_transform
 	_registration_status = previous_status
 	return false
@@ -1189,7 +1203,7 @@ func apply_calibrated_global_transform(
 	calibration_started_unix_ms: float = 0.0,
 	registration_source: String = "markerless_motion_fit",
 ) -> bool:
-	if not value.is_finite() or not _registration_is_upright(value):
+	if not _global_registration_is_upright(value):
 		return false
 	var existing := _read_registration_payload()
 	var existing_started := float(existing.get("calibration_started_unix_ms", 0.0))
@@ -1304,16 +1318,19 @@ func _reset_to_scene_fallback() -> void:
 	_apply_moving_jaw_visual_geometry()
 
 
-func _registration_is_upright(value: Transform3D) -> bool:
+func _global_registration_is_upright(value: Transform3D) -> bool:
+	# Solver outputs are already in world space. Apply no parent rotation here.
 	if not value.is_finite() or value.basis.determinant() <= 0.0:
 		return false
-	var world_up := value.basis.orthonormalized().y.normalized()
+	return value.basis.orthonormalized().y.normalized().dot(Vector3.UP) >= MINIMUM_REGISTRATION_WORLD_UP_DOT
+
+
+func _registration_is_upright(value: Transform3D) -> bool:
+	# Saved registrations and manual base edits are local to WorldLevelAnchor.
 	var parent := get_parent() as Node3D
 	if parent != null:
-		world_up = (
-			parent.global_transform.basis.orthonormalized() * world_up
-		).normalized()
-	return world_up.dot(Vector3.UP) >= MINIMUM_REGISTRATION_WORLD_UP_DOT
+		return _global_registration_is_upright(parent.global_transform * value)
+	return _global_registration_is_upright(value)
 
 
 func clear_saved_registration() -> void:
@@ -2171,6 +2188,7 @@ func _build_registration_payload() -> Dictionary:
 	payload["calibration_started_unix_ms"] = float(_registration_status.get("calibration_started_unix_ms", 0.0))
 	payload["saved_unix_ms"] = _registration_status.get("saved_unix_ms", Time.get_unix_time_from_system() * 1000.0)
 	payload["registration_source"] = str(_registration_status.get("registration_source", "markerless_motion_fit"))
+	payload["base_reference_only"] = bool(_registration_status.get("base_reference_only", false))
 	payload["joint_angle_directions"] = _packed_float_array_to_array(joint_angle_directions)
 	payload["joint_angle_offsets_degrees"] = _packed_float_array_to_array(joint_angle_offsets_degrees)
 	payload["force_wrist_roll_straight"] = force_wrist_roll_straight
@@ -2338,6 +2356,7 @@ func _load_registration() -> void:
 	transform = loaded
 	_registration_status = {
 		"registered": true,
+		"base_reference_only": bool(parsed.get("base_reference_only", false)),
 		"confidence": float(parsed.get("confidence", 0.0)),
 		"calibration_started_unix_ms": float(parsed.get("calibration_started_unix_ms", 0.0)),
 		"saved_unix_ms": float(parsed.get("saved_unix_ms", 0.0)),

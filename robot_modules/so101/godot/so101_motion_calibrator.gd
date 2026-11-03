@@ -5317,7 +5317,10 @@ func _finish_solution(result: Dictionary) -> void:
 			return
 		var accepted := bool(alignment_overlay.call("apply_rigid_registration", _transform_from_external_preview(alignment_preview), float(result.get("confidence", 0.0)), _started_unix_ms, result.get("metrics", {}), _registration_token))
 		if not accepted:
-			_fail("Alignment was not saved: the model changed or the file could not be written. Previous calibration retained.")
+			var reason := "The model changed or the file could not be written."
+			if alignment_overlay.has_method("get_last_rigid_registration_error"):
+				reason = str(alignment_overlay.call("get_last_rigid_registration_error"))
+			_fail("Alignment was not saved: %s Previous calibration retained." % reason)
 			return
 		_state = "complete"
 		_set_status("complete", "Whole arm aligned and saved. Joint settings and claw geometry preserved.", 1.0, float(result.get("confidence", 0.0)))

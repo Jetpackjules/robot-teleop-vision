@@ -3,6 +3,11 @@ extends SceneTree
 const Overlay := preload("res://robot_modules/so101/godot/so101_robot_overlay.gd")
 const Calibrator := preload("res://robot_modules/so101/godot/so101_motion_calibrator.gd")
 
+class NoIoOverlay:
+	extends Overlay
+	func _ready() -> void:
+		set_process(false)
+
 func _initialize() -> void:
 	call_deferred("run")
 
@@ -113,6 +118,33 @@ func run() -> void:
 	assert(exported.frames[0].link_visual_transforms.base_link.has("basis_x"))
 	assert(calibrator._sweep_command_type() == "arm_base_axis_sweep")
 	calibrator.free()
+	# A solver returns a WORLD transform. The parent world-level rotation must
+	# not be applied to its up direction for a second time. Override _ready so
+	# these tree-attached nodes never open telemetry or load real calibration.
+	var parent := Node3D.new()
+	parent.transform = Transform3D(Basis(Vector3.RIGHT, deg_to_rad(75)), Vector3(0.1, 0.6, -0.3))
+	root.add_child(parent)
+	var attached := NoIoOverlay.new()
+	attached._registration_path = "res://rotated-parent-registration.json"
+	parent.add_child(attached)
+	var world_target := Transform3D(Basis(Vector3.RIGHT, deg_to_rad(5)), Vector3(0.2, 0.1, -0.5))
+	var attached_offsets := attached.joint_angle_offsets_degrees.duplicate()
+	attached._registration_status["base_reference_only"] = true
+	assert(attached._build_registration_payload().base_reference_only)
+	token = attached.get_alignment_token()
+	assert(attached.apply_rigid_registration(world_target, 0.9, 20.0, {}, token), "Valid world placement rejected under rotated parent")
+	assert(attached.global_transform.is_equal_approx(world_target))
+	assert(not attached._build_registration_payload().base_reference_only)
+	assert(attached.joint_angle_offsets_degrees == attached_offsets)
+	var stored_local := attached._transform_from_dictionary(attached._read_registration_payload())
+	assert((parent.global_transform * stored_local).is_equal_approx(world_target))
+	token = attached.get_alignment_token()
+	var committed := FileAccess.get_file_as_bytes(attached._registration_path)
+	assert(not attached.apply_rigid_registration(Transform3D(Basis(Vector3.RIGHT, PI), Vector3.ZERO), 1.0, 21.0, {}, token))
+	assert(FileAccess.get_file_as_bytes(attached._registration_path) == committed)
+	assert(attached.global_transform.is_equal_approx(world_target))
+	assert(attached.apply_calibrated_global_transform(world_target, 0.9, 22.0))
+	parent.free()
 	overlay.free()
 	print("SO101_RIGID_REGISTRATION_PASS")
 	quit()

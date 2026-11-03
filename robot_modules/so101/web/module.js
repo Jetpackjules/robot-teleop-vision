@@ -240,6 +240,10 @@ class So101WebModule {
     if (viewRoot) viewRoot.innerHTML = VIEW_MARKUP;
     if (statusRoot) statusRoot.innerHTML = STATUS_MARKUP;
     if (floatingRoot) floatingRoot.innerHTML = FLOATING_MARKUP;
+    import('./legacy_visual_corrections.js?v=20261103').then(({mountLegacyCorrections}) =>
+      mountLegacyCorrections(this, element('so101-manual-open'))).catch(error => {
+      element('so101-calibration-file-status').textContent = error.message;
+    });
     this.manualInputs = Array.from(document.querySelectorAll("[data-manual-key]"));
     await import("./so101_web_serial.js?v=20261101_watchdog_diagnostics");
     const {ArmToastStack} = await import("./safeguard_toasts.js?v=20261028_toggle");

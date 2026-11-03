@@ -1131,7 +1131,7 @@ func level_world_from_robot_base(persist: bool = true) -> bool:
 	var registration: Dictionary = {}
 	if overlay.has_method("get_registration_status"):
 		registration = overlay.call("get_registration_status")
-	if not bool(registration.get("registered", false)):
+	if not bool(registration.get("registered", false)) or bool(registration.get("base_reference_only", false)):
 		world_level_status = "Calibrate the robot position before leveling the merged point cloud."
 		return false
 	var current_up := (overlay.global_transform.basis.orthonormalized() * Vector3.UP).normalized()
