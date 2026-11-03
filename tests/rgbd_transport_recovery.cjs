@@ -23,7 +23,7 @@ const source = fs.readFileSync(path.join(__dirname,'../web/hybrid_rgbd_renderer.
   .replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 vm.runInContext('globalThis.RobotPosePreview=(()=>{'+fs.readFileSync(path.join(__dirname,'../web/robot_pose_preview.js'),'utf8').replace(/^export /gm,'')+';return RobotPosePreview;})();',context);
 vm.runInContext('globalThis.MeasuredJointAnimation=(()=>{'+fs.readFileSync(path.join(__dirname,'../web/robot_joint_animation.js'),'utf8').replace(/^export /gm,'')+';return MeasuredJointAnimation;})();',context);
-vm.runInContext(source+'\nwindow.probe={state,startRgbdWebSocket,closeRgbdSocket,gpuFrameReady,markGpuFrame};',context);
+vm.runInContext(source+'\nwindow.probe={state,startRgbdWebSocket,closeRgbdSocket,gpuFrameReady,markGpuFrame,readRgbdHttpPacket};',context);
 const {state,startRgbdWebSocket,closeRgbdSocket} = context.window.probe;
 let httpStarts=0;
 context.httpSpy=()=>httpStarts++;
@@ -37,12 +37,14 @@ function tick() {
 function open() { const s=sockets.at(-1);s.readyState=1;s.onopen();return s; }
 startRgbdWebSocket(options);
 assert.equal(timers.size,1,'a connection that never opens has a deadline');
-let first=open();assert.equal(timers.size,0);
+let first=open();assert.equal(timers.size,1,'an open socket still needs a first-frame deadline');
+assert.equal(state.stats.connected,false,'an empty socket is not a connected preview');
 assert.ok(first.url.includes('flow_control=1'),'independent native packets request bounded WAN flow control');
-vm.runInContext('handleRgbdPacket=()=>{}',context);
+vm.runInContext('handleRgbdPacket=()=>true',context);
 first.onmessage({data:JSON.stringify({type:'rgbd-sequence',sequence:7})});
 first.onmessage({data:new ArrayBuffer(0)});
 assert.deepEqual(first.messages,[{type:'rgbd-ack',sequence:7}],'consumed native packet releases its exact server credit');
+assert.equal(timers.size,0,'a usable frame cancels its first-frame deadline');
 first.onclose({code:1006});tick();
 assert.equal(sockets.length,2,'a transient close retries WebSocket before HTTPS');
 assert.equal(httpStarts,0); open();
@@ -59,7 +61,11 @@ assert.equal(sockets.at(-1),first,'stopping during backoff cannot reconnect');
 state.running=true;state.reconnectAttempt=0;
 startRgbdWebSocket(options);const stalled=sockets.at(-1);tick();
 assert.equal(stalled.readyState,3,'a stuck connecting socket is closed');
+assert.equal(httpStarts,2,'a connection timeout switches transport without repeating three cold deadlines');
 closeRgbdSocket();assert.equal(timers.size,0,'explicit reconnect/stop cancels the pending retry');
+startRgbdWebSocket(options);first=open();tick();
+assert.equal(first.readyState,3,'an open socket that never delivers a frame is closed');
+assert.equal(httpStarts,3,'first-frame timeout also switches transport immediately');
 startRgbdWebSocket(options);first=open();first.onclose({code:1006});
 context.document.hidden=true;tick();
 assert.equal(sockets.at(-1),first,'hidden tabs cannot resurrect their stream');
@@ -76,3 +82,22 @@ assert.equal(deletes,0);ready=true;
 assert.equal(context.window.probe.gpuFrameReady(),true,'completed GPU work releases the newest capture');
 assert.equal(deletes,2);assert.equal(state.renderFences.length,0);assert.equal(flushes,2);assert.equal(polls,4);
 console.log('GPU pacing: nonblocking fence polling, completion and cleanup passed');
+
+(async()=>{
+  const chunks=[new Uint8Array([1,2]),new Uint8Array([3]),new Uint8Array([4,5])];
+  let progress=0,released=false;
+  const response={body:{getReader(){return{
+    async read(){return chunks.length?{done:false,value:chunks.shift()}:{done:true};},
+    releaseLock(){released=true;}
+  };}}};
+  const packet=await context.window.probe.readRgbdHttpPacket(response,()=>progress++);
+  assert.deepEqual([...new Uint8Array(packet)],[1,2,3,4,5],'streaming fallback preserves every byte in order');
+  assert.equal(progress,4,'header and every data chunk refresh the inactivity deadline');
+  assert.equal(released,true);
+  let failedRelease=false;
+  await assert.rejects(context.window.probe.readRgbdHttpPacket({body:{getReader(){return{
+    async read(){throw new Error('aborted');},releaseLock(){failedRelease=true;}
+  };}}},()=>{}),/aborted/);
+  assert.equal(failedRelease,true,'abort releases the reader instead of retaining the old response');
+  console.log('Progressing response assembly, exact bytes and abort cleanup passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});

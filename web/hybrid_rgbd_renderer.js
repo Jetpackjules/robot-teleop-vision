@@ -2929,9 +2929,7 @@ function trimIndependentFrameQueue(queue, limit = 4) {
 }
 
 function handleRgbdPacket(arrayBuffer, transport) {
-  if (!(arrayBuffer instanceof ArrayBuffer)) return;
-  state.lastPacketMs = performance.now();
-  state.reconnectAttempt = 0;
+  if (!(arrayBuffer instanceof ArrayBuffer)) return false;
   state.stats.received += 1;
   state.stats.bytes += arrayBuffer.byteLength;
   state.stats.transport = transport;
@@ -2940,9 +2938,12 @@ function handleRgbdPacket(arrayBuffer, transport) {
     parsed = parsePacket(arrayBuffer);
   } catch (error) {
     state.stats.status = `packet error: ${error.message || error}`;
-    return;
+    return false;
   }
-  if(parsed.metadata.preview_transport==='host_sampled_points_v1'&&(!state.settings.point_preview_enabled||parsed.payloads.some(p=>p.metadata.preview_budget!==(state.settings.point_preview_budget===0?0:state.settings.point_preview_budget===40000?40000:20000))))return;
+  if(parsed.metadata.preview_transport==='host_sampled_points_v1'&&(!state.settings.point_preview_enabled||parsed.payloads.some(p=>p.metadata.preview_budget!==(state.settings.point_preview_budget===0?0:state.settings.point_preview_budget===40000?40000:20000))))return false;
+  state.lastPacketMs = performance.now();
+  state.reconnectAttempt = 0;
+  state.stats.connected = true;
   // Parallel HTTPS requests can complete in small bursts. Preserve complete
   // chronological frames instead of overwriting one while its predecessor is
   // decoding. The hard cap still prevents latency from accumulating.
@@ -2983,6 +2984,7 @@ function handleRgbdPacket(arrayBuffer, transport) {
     }
   }
   decodeNewestPackets();
+  return true;
 }
 
 function clearRgbdHttpReorder() {
@@ -3104,12 +3106,15 @@ function startRgbdWebSocket(options) {
   state.stats.connected = false;
   state.stats.status = "RGB-D WebSocket connecting";
   state.stats.transport = "WebSocket latest-frame";
-  state.reconnectTimer = window.setTimeout(() => {
+  const timedOut = () => {
     state.reconnectTimer = 0;
     if (state.socket !== socket) return;
     closeRgbdSocket();
-    scheduleRgbdSocketRecovery(options);
-  }, 5000);
+    // Repeating cold connection deadlines can leave a WAN preview blank for
+    // tens of seconds. A timed-out attempt uses the alternate transport now.
+    startRgbdHttpLatest(options);
+  };
+  state.reconnectTimer = window.setTimeout(timedOut, 5000);
   socket.onopen = () => {
     if (!state.running || state.socket !== socket) return;
     window.clearTimeout(state.reconnectTimer);
@@ -3117,8 +3122,9 @@ function startRgbdWebSocket(options) {
     const now = performance.now();
     state.socketOpenedMs = now;
     state.lastPacketMs = now;
-    state.stats.connected = true;
-    state.stats.status = "RGB-D WebSocket connected";
+    state.stats.connected = false;
+    state.stats.status = "RGB-D WebSocket open; waiting for camera frame";
+    state.reconnectTimer = window.setTimeout(timedOut, 2500);
   };
   socket.onmessage = (event) => {
     if (!state.running || state.socket !== socket || document.hidden) return;
@@ -3131,7 +3137,11 @@ function startRgbdWebSocket(options) {
       } catch (_) { /* Older transports need no acknowledgement. */ }
       return;
     }
-    handleRgbdPacket(event.data, "WebSocket latest-frame");
+    if (handleRgbdPacket(event.data, "WebSocket latest-frame")) {
+      window.clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = 0;
+      state.stats.status = "RGB-D WebSocket connected";
+    }
     if (socket.latestFrameSequence && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({type: "rgbd-ack", sequence: socket.latestFrameSequence}));
       socket.latestFrameSequence = 0;
@@ -3200,11 +3210,22 @@ async function runRgbdHttpWorker(options, worker, generation) {
         await waitMilliseconds(250);
         continue;
       }
+      // Bootstrap with two requests so six large cold responses do not divide
+      // the WAN bandwidth before the first camera frame has completed.
+      if (worker > 1 && !state.stats.connected) {
+        await waitMilliseconds(100);
+        continue;
+      }
       const controller = new AbortController();
       state.httpControllers.add(controller);
       // A native RGB-D response can be over a megabyte. Allow a cold crop
       // cache and a WAN transfer to finish instead of aborting every response.
-      const timeout = window.setTimeout(() => controller.abort(), 5000);
+      let timeout = 0;
+      const progressed = () => {
+        window.clearTimeout(timeout);
+        timeout = window.setTimeout(() => controller.abort(), 5000);
+      };
+      progressed();
       try {
         const response = await fetch(
           latestRgbdUrl(options, state.httpSequence, worker),
@@ -3228,7 +3249,7 @@ async function runRgbdHttpWorker(options, worker, generation) {
         }
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const sequence = Number(response.headers.get("X-RGBD-Sequence") || 0);
-        const packet = await response.arrayBuffer();
+        const packet = await readRgbdHttpPacket(response, progressed);
         if (generation !== state.httpGeneration || !state.running) return;
         state.httpSequence = Math.max(state.httpSequence, sequence);
         state.stats.connected = true;
@@ -3256,6 +3277,27 @@ async function runRgbdHttpWorker(options, worker, generation) {
       state.httpWorkers = Math.max(0, state.httpWorkers - 1);
     }
   }
+}
+
+async function readRgbdHttpPacket(response, progressed) {
+  // The deadline measures inactivity, not total transfer time. Keep the exact
+  // bytes of a progressing high-quality frame instead of repeatedly discarding it.
+  progressed();
+  if (!response.body?.getReader) return response.arrayBuffer();
+  const reader = response.body.getReader(), chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      chunks.push(value); size += value.byteLength; progressed();
+    }
+  } finally { reader.releaseLock(); }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes.buffer;
 }
 
 function startRgbdHttpLatest(options) {
