@@ -145,6 +145,19 @@ func run() -> void:
 	assert(attached.global_transform.is_equal_approx(world_target))
 	assert(attached.apply_calibrated_global_transform(world_target, 0.9, 22.0))
 	parent.free()
+	# A validated opening curve may exceed the nominal stock visual range.
+	# Both runtime and browser honor the visual clamp flag; hardware limits live
+	# in the follower and are unaffected by these display-only values.
+	var gain_arm := Overlay.new()
+	gain_arm.moving_jaw_calibration_enabled = false
+	gain_arm.clamp_visual_joint_limits = false
+	gain_arm.gripper_angle_samples_normalized = PackedFloat32Array([0, 100])
+	gain_arm.gripper_angle_samples_degrees = PackedFloat32Array([-10, 116.241758])
+	assert(is_equal_approx(rad_to_deg(gain_arm._normalized_joint_angle(5, 0)), -10.0))
+	assert(is_equal_approx(rad_to_deg(gain_arm._normalized_joint_angle(5, 100)), 116.241758))
+	gain_arm.clamp_visual_joint_limits = true
+	assert(is_equal_approx(rad_to_deg(gain_arm._normalized_joint_angle(5, 100)), 100.0))
+	gain_arm.free()
 	overlay.free()
 	print("SO101_RIGID_REGISTRATION_PASS")
 	quit()

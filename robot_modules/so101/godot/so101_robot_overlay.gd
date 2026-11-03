@@ -1114,6 +1114,7 @@ func get_browser_kinematics() -> Dictionary:
 		"manual_active": manual_claw_calibration_enabled or manual_base_calibration_enabled,
 		"gripper": {
 			"moving_jaw": moving_jaw_calibration_enabled,
+			"clamp_limits": clamp_visual_joint_limits,
 			"samples_normalized": Array(gripper_angle_samples_normalized),
 			"samples_degrees": Array(moving_jaw_opening_samples_degrees if moving_jaw_calibration_enabled else gripper_angle_samples_degrees),
 			"fallback_samples_degrees": Array(gripper_angle_samples_degrees),
@@ -1997,7 +1998,7 @@ func _normalized_joint_angle(index: int, normalized: float) -> float:
 		)
 		if manual_claw_calibration_enabled:
 			calibrated = calibrated * manual_opening_scale + deg_to_rad(manual_opening_offset_degrees)
-		return clampf(calibrated, limits.x, limits.y)
+		return clampf(calibrated, limits.x, limits.y) if clamp_visual_joint_limits else calibrated
 	if index == 4 and force_wrist_roll_straight and not manual_claw_calibration_enabled:
 		return 0.0
 	var direction := manual_wrist_roll_direction if manual_claw_calibration_enabled and index == 4 else _joint_direction(index)

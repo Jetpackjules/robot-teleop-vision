@@ -17,6 +17,15 @@ const fs=require('node:fs'),path=require('node:path'),assert=require('node:asser
   }
   const item=cases[0],robot={kinematics:item.robot.kinematics,measured_joint_history:[
     {unix_ms:1000,normalized:[0,0,0,0,170,0]}, {unix_ms:1100,normalized:[10,20,30,40,-170,100]}]};
+  const gainModel=structuredClone(item.robot.kinematics);
+  gainModel.manual_active=false;gainModel.clamp_limits=false;
+  Object.assign(gainModel.gripper,{moving_jaw:false,clamp_limits:false,samples_normalized:[0,100],samples_degrees:[-10,116.241758]});
+  const pose=[...item.normalized];pose[5]=100;
+  const unclamped=measuredJointTransforms(gainModel,pose);
+  const reference=structuredClone(gainModel);reference.gripper.moving_jaw=true;
+  assert.deepEqual(unclamped,measuredJointTransforms(reference,pose),'saved jaw gain is not clipped by the stock visual range');
+  gainModel.gripper.clamp_limits=true;reference.gripper.moving_jaw=false;reference.gripper.samples_degrees=[-10,180];reference.gripper.clamp_limits=true;
+  assert.deepEqual(measuredJointTransforms(gainModel,pose),measuredJointTransforms(reference,pose),'explicit visual clamping still works');
   const animation=new MeasuredJointAnimation();assert(animation.accept(robot));
   animation.sample(1050);assert.equal(animation.status.mode,'interpolated');assert.equal(animation.status.errorMs,0);
   const midpoint=measuredJointTransforms(robot.kinematics,[5,10,15,20,180,50]);

@@ -38,7 +38,9 @@ export function measuredJointTransforms(model, normalized) {
       if(degrees===null && g.moving_jaw) degrees=curve(normalized[i],g.samples_normalized,g.fallback_samples_degrees);
       if(degrees===null) degrees=g.offset+g.scale*normalized[i]+g.curvature*normalized[i]*(100-normalized[i])/100;
       angle=radians(degrees);
-      if(!g.moving_jaw) angle=clamp(angle,...j.limits);
+      // Old hosts always clipped the stock jaw. New hosts export its visual
+      // clamp explicitly so a validated opening curve can use its full range.
+      if(!g.moving_jaw && g.clamp_limits!==false) angle=clamp(angle,...j.limits);
     } else {
       angle=j.force_zero?0:wrap(radians(normalized[i]*j.direction+j.offset_degrees));
       if(!j.force_zero && model.clamp_limits) angle=clamp(angle,...j.limits);
