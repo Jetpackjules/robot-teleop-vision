@@ -103,6 +103,8 @@ const SETUP_MARKUP = `
 `;
 
 const VIEW_MARKUP = `
+  <label class="toggle-row"><span>Mirror view left/right</span><input id="so101-mirror-view" type="checkbox"></label>
+  <p class="helper-text">Mirrors RGB, point clouds and the arm overlay together. Physical arm controls stay unchanged. Remembered in this browser.</p>
   <label class="toggle-row"><span>Robot overlay</span><input id="so101-overlay-enabled" type="checkbox" checked></label>
   <label>Show
     <select id="so101-overlay-scope"><option value="full">Full arm</option><option value="claw">Claw only</option></select>
@@ -210,6 +212,8 @@ function element(id) { return document.getElementById(id); }
 
 class So101WebModule {
   constructor(manifest) {
+    this.mirrorView = false;
+    try { this.mirrorView = localStorage.getItem('robotTeleopMirrorView') === 'true'; } catch {}
     this.notificationsEnabled = true;
     try { this.notificationsEnabled = localStorage.getItem(NOTIFICATIONS_STORAGE_KEY) !== "false"; } catch { /* Storage is optional. */ }
     this.manifest = manifest;
@@ -265,6 +269,7 @@ class So101WebModule {
       robot_overlay_enabled: element("so101-overlay-enabled")?.checked !== false,
       robot_overlay_scope: element("so101-overlay-scope")?.value || "full",
       robot_overlay_style: element("so101-overlay-style")?.value || "realistic",
+      view_mirror_left_right: this.mirrorView,
       robot_overlay_claw_opacity: Number(element("so101-claw-opacity")?.value ?? 1),
       robot_overlay_claw_buffer_mm: Number(element("so101-claw-buffer")?.value ?? 0),
       robot_overlay_body_buffer_mm: Number(element("so101-mask-buffer")?.value ?? 0),
@@ -281,6 +286,7 @@ class So101WebModule {
 
   restoreViewSettings(saved) {
     if (!saved) return;
+    this.applyMirrorView(this.mirrorView);
     element("so101-overlay-enabled").checked = saved.robot_overlay_enabled !== false;
     element("so101-overlay-scope").value = saved.robot_overlay_scope === "claw" ? "claw" : "full";
     element("so101-overlay-style").value = ["realistic", "solid", "alignment"].includes(saved.robot_overlay_style) ? saved.robot_overlay_style : "realistic";
@@ -294,6 +300,13 @@ class So101WebModule {
     element("so101-d455-visual-correction-enabled").checked = saved.arm_d455_visual_correction_enabled === true;
     element("so101-idle-return-enabled").checked = saved.arm_idle_return_enabled !== false;
     this.syncOverlayScopeControls();
+  }
+
+  applyMirrorView(enabled) {
+    this.mirrorView = enabled === true;
+    document.documentElement.classList.toggle('teleop-mirror-view',this.mirrorView);
+    if(element('so101-mirror-view'))element('so101-mirror-view').checked=this.mirrorView;
+    window.setGodotHybridViewSettings?.({view_mirror_left_right:this.mirrorView});
   }
 
   syncOverlayScopeControls() {
@@ -728,6 +741,12 @@ class So101WebModule {
 
   bind({ sendViewSettings, updateStatus }) {
     this.sendViewSettings = sendViewSettings;
+    this.applyMirrorView(this.mirrorView);
+    element('so101-mirror-view').addEventListener('change',event=>{
+      this.applyMirrorView(event.currentTarget.checked);
+      try{localStorage.setItem('robotTeleopMirrorView',String(this.mirrorView));}catch{}
+      sendViewSettings();
+    });
     this.updateStatus = updateStatus;
     element("so101-notifications-enabled").addEventListener("change", (event) => {
       this.notificationsEnabled = event.currentTarget.checked;

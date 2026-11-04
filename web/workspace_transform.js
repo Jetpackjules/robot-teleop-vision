@@ -40,9 +40,11 @@ export function rayAxis(ray,point,axis) {
 export function projectWorld(point,view) {
   const m=view.viewProjection,p=[...point,1],q=[0,1,2,3].map(i=>p.reduce((s,v,j)=>s+m[j*4+i]*v,0));
   if(q[3]<=0.001)return null;
-  return [(q[0]/q[3]+1)*view.width/2,(1-q[1]/q[3])*view.height/2,q[2]/q[3]];
+  const x=(q[0]/q[3]+1)*view.width/2;
+  return [view.mirrored?view.width-x:x,(1-q[1]/q[3])*view.height/2,q[2]/q[3]];
 }
 export function screenRay(x,y,view) {
+  if(view.mirrored)x=view.width-x;
   const f=Math.tan(view.fov*Math.PI/360),m=view.viewer;
   const local=[(2*x/view.width-1)*f*view.width/view.height,(1-2*y/view.height)*f,-1];
   return {origin:Array.from(m.slice(12,15)),direction:vunit(transform3([m[0],m[1],m[2],m[4],m[5],m[6],m[8],m[9],m[10]],local))};

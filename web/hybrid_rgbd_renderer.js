@@ -1099,7 +1099,7 @@ function drawCameraGuides(viewProjection) {
     label.hidden = clip[3] <= 0 || Math.abs(x) > 1 || Math.abs(y) > 1;
     label.textContent = `${camera.metadata.model || "Camera"} ${id.slice(-4)}${fresh ? "" : " (stale)"}`;
     label.style.color = `rgb(${color.map(value => Math.round(value * 255)).join(",")})`;
-    label.style.transform = `translate(${rect.left + (x + 1) * rect.width * 0.5 + 8}px, ${rect.top + (1 - y) * rect.height * 0.5 - 18}px)`;
+    label.style.transform = `translate(${rect.left + ((state.settings.view_mirror_left_right ? -x : x) + 1) * rect.width * 0.5 + 8}px, ${rect.top + (1 - y) * rect.height * 0.5 - 18}px)`;
   }
   for (const [id, label] of state.cameraGuideLabels) {
     if (present.has(id)) continue;
@@ -2429,7 +2429,7 @@ function attachPointerNavigation(options = {}) {
     if (!drag.active || event.pointerId !== drag.id) return;
     if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
     drag.moved = true;
-    const dx = event.clientX - drag.x;
+    const dx = (event.clientX - drag.x) * (state.settings.view_mirror_left_right ? -1 : 1);
     const dy = event.clientY - drag.y;
     drag.x = event.clientX;
     drag.y = event.clientY;
@@ -2554,7 +2554,7 @@ function renderImpl() {
   state.viewProjection = viewProjection;
   if(state.workspaceEditor?.active) {
     const rect=state.canvas.getBoundingClientRect();
-    state.workspaceEditor.update({viewProjection,viewer:viewerTransform,fov,width:rect.width,height:rect.height,left:rect.left,top:rect.top});
+    state.workspaceEditor.update({viewProjection,viewer:viewerTransform,fov,mirrored:state.settings.view_mirror_left_right===true,width:rect.width,height:rect.height,left:rect.left,top:rect.top});
   }
 
   gl.viewport(0, 0, dimensions.width, dimensions.height);
@@ -3826,11 +3826,11 @@ export function focusGodotHybridRendererAt(clientX, clientY) {
   if (!state.canvas || !state.viewProjection) return false;
   const rect = state.canvas.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return false;
-  const targetX = ((clientX - rect.left) / rect.width) * 2 - 1;
+  const targetX = (((clientX - rect.left) / rect.width) * 2 - 1) * (state.settings.view_mirror_left_right ? -1 : 1);
   const targetY = 1 - ((clientY - rect.top) / rect.height) * 2;
   const table = modeledWorkspace(state.settings);
   const ray = state.currentViewer ? screenRay(clientX-rect.left,clientY-rect.top,{
-    width:rect.width,height:rect.height,viewer:state.currentViewer,
+    width:rect.width,height:rect.height,viewer:state.currentViewer,mirrored:state.settings.view_mirror_left_right===true,
     fov:Number(state.settings.fov || state.baseViewer?.fov || 60),
   }) : null;
   const tableHit = raycastModeledWorkspace(ray,table);

@@ -45,6 +45,10 @@
       background: #050607;
       cursor: crosshair;
     }
+    html.teleop-mirror-view #viewport-video,
+    html.teleop-mirror-view #viewport-image,
+    html.teleop-mirror-view #hybrid-canvas,
+    html.teleop-mirror-view #rgb-camera-canvas { transform: scaleX(-1); }
     #viewport-video[hidden],
     #viewport-image[hidden],
     #hybrid-canvas[hidden],

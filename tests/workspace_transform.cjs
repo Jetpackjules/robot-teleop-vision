@@ -21,5 +21,11 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
  check(g.rayPlane({origin:[0,0,0],direction:[0,0,-1]},[0,0,-1],[0,0,1])[2]===-1,'view-plane drag intersects the actual world plane');
  check(g.rayPlane({origin:[0,0,0],direction:[1,0,0]},[0,0,-1],[0,0,1])===null,'parallel drag never creates a jump');
  check(near(g.rayAxis({origin:[0,0,0],direction:g.vunit([2,0,-1])},[0,0,-1],[1,0,0]),2),'axis dragging follows the picked ray at the handle depth');
+ const identity=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+ const view={width:100,height:100,fov:60,viewer:identity,viewProjection:identity};
+ const ordinary=g.projectWorld([.2,.3,0],view),mirrored=g.projectWorld([.2,.3,0],{...view,mirrored:true});
+ check(near(ordinary[0]+mirrored[0],100)&&near(ordinary[1],mirrored[1]),'mirror reflects horizontal handle position only');
+ const ray=g.screenRay(20,40,view),mirrorRay=g.screenRay(80,40,{...view,mirrored:true});
+ check(ray.direction.every((v,i)=>near(v,mirrorRay.direction[i])),'mirror screen ray still picks the same world point');
  console.log(`${checks} workspace transform checks passed`);
 })();
