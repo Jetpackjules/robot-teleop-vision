@@ -533,6 +533,8 @@
             <button id="modeled-workspace-edit" class="primary" type="button">Edit Table in 3D</button>
             <button id="modeled-workspace-align" type="button">Place Below Arm Base</button>
             <p class="helper-text">Starts below the calibrated arm base when available. Use the green Y handle to tune the height, then Done to keep it or Cancel to restore it. Camera and arm calibration stay unchanged.</p>
+            <label>Tabletop noise cutoff <output id="modeled-workspace-clearance-value">6 mm</output><input id="modeled-workspace-clearance" type="range" min="0" max="30" step="1" value="6" aria-describedby="tabletop-cutoff-help"></label>
+            <p id="tabletop-cutoff-help" class="helper-text">Hides measured points within this height above the table without moving it. Applies to all cameras. Increase only enough to remove floor speckles; larger values also hide thin objects near the surface. Saved with your table settings.</p>
             <details class="advanced-disclosure"><summary>Exact placement and lighting</summary><div class="disclosure-body">
             <button id="modeled-workspace-orbit" type="button">Place Tabletop at Orbit Point</button>
             <label class="toggle-row"><span>Scene lighting</span><input id="scene-lighting-enabled" type="checkbox" checked></label>
@@ -541,8 +543,6 @@
             <label>Table height (m)<input id="modeled-workspace-table-height" type="number" min="0.1" max="4" step="0.01" value="0.72"></label>
             <label>Table width (m)<input id="modeled-workspace-width" type="number" min="0.1" max="4" step="0.01" value="1.2"></label>
             <label>Table depth (m)<input id="modeled-workspace-depth" type="number" min="0.1" max="4" step="0.01" value="0.8"></label>
-            <label>Tabletop exclusion (mm)<input id="modeled-workspace-clearance" type="number" min="0" max="30" step="1" value="6"></label>
-            <p class="helper-text">A smaller exclusion preserves thin objects. Increase it only enough to hide tabletop noise.</p>
 
                 <label>Center X (m)<input id="modeled-workspace-x" type="number" min="-20" max="20" step="0.001" value="0"></label>
                 <label>Tabletop Y (m)<input id="modeled-workspace-y" type="number" min="-20" max="20" step="0.001" value="0"></label>

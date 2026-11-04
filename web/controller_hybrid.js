@@ -172,6 +172,8 @@
     function updateModeledControls() {
       const settings = modeledViewSettings(),valid = modeledWorkspace({...settings,modeled_workspace_enabled:true});
       document.getElementById('modeled-workspace-options').hidden = !settings.modeled_workspace_enabled;
+      const cutoffLabel=document.getElementById('modeled-workspace-clearance-value');
+      if(cutoffLabel)cutoffLabel.textContent=Math.round(settings.modeled_workspace_clearance*1000)+' mm';
       for (const name of modeledFields) {
         const input = document.getElementById(`modeled-workspace-${name}`),n=input.valueAsNumber;
         input.setCustomValidity(Number.isFinite(n) && n >= Number(input.min) && n <= Number(input.max)
@@ -1384,7 +1386,7 @@
     document.getElementById('modeled-workspace-orbit').addEventListener('click',()=>{if(alignModeledTable('orbit'))sendViewSettings();});
     for (const name of modeledFields) {
       const input = document.getElementById(`modeled-workspace-${name}`);
-      input.addEventListener(name === 'light-angle' ? 'input' : 'change', () => {
+      input.addEventListener(['light-angle','clearance'].includes(name) ? 'input' : 'change', () => {
         if (updateModeledControls()) {modeledWorkspaceConfigured=true;sendViewSettings();}
       });
     }
