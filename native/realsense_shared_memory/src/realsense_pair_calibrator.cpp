@@ -22,6 +22,7 @@
 
 #if defined(REALSENSE_DIRECT_ENABLED) && defined(REALSENSE_NATIVE_CALIBRATION_ENABLED)
 #include <librealsense2/rs.hpp>
+#include "charuco_pose.h"
 #if __has_include(<opencv2/objdetect/aruco_detector.hpp>)
 #include <opencv2/objdetect/aruco_detector.hpp>
 #define REALSENSE_MODERN_ARUCO
@@ -407,15 +408,18 @@ bool capture_camera_once(
             if (p_need_marker && int(r_capture.marker_to_depth.size()) < wanted_marker_frames) {
                 cv::Matx44d marker_to_color;
                 double reprojection = 0.0;
-                if (detect_marker_pose(
-                    bgr,
-                    r_capture.color_intrinsics,
-                    p_options.marker_id,
-                    p_options.marker_size_m,
-                    marker_to_color,
-                    nullptr,
-                    reprojection
-                )) {
+                bool detected = false;
+                if (p_options.mode == "charuco") {
+                    int corners = 0;
+                    const teleop_charuco::Spec board{p_options.charuco_squares_x, p_options.charuco_squares_y,
+                        p_options.charuco_square_m, p_options.marker_size_m, p_options.charuco_dictionary};
+                    detected = teleop_charuco::detect_pose(bgr, camera_matrix(r_capture.color_intrinsics), board,
+                        marker_to_color, reprojection, corners);
+                } else {
+                    detected = detect_marker_pose(bgr, r_capture.color_intrinsics, p_options.marker_id,
+                        p_options.marker_size_m, marker_to_color, nullptr, reprojection);
+                }
+                if (detected) {
                     r_capture.marker_to_depth.push_back(r_capture.depth_to_color.inv() * marker_to_color);
                     r_capture.marker_reprojection.push_back(reprojection);
                     if (reprojection < 2.0) {
@@ -443,7 +447,7 @@ bool capture_camera_once(
         r_capture.aligned_depth_m = median_depth(aligned_depth_frames);
         if (p_need_marker && int(r_capture.marker_to_depth.size()) < 8) {
             std::ostringstream message;
-            message << "camera " << p_serial << " saw ArUco " << p_options.marker_id << " in only "
+            message << "camera " << p_serial << " saw " << (p_options.mode == "charuco" ? "a usable ChArUco board" : "the ArUco marker") << " in only "
                     << r_capture.marker_to_depth.size() << " frames";
             r_error = message.str();
             return false;
@@ -580,6 +584,28 @@ cv::Matx44d average_transforms(const std::vector<cv::Matx44d> &p_transforms) {
         output(row, 3) = translation[row];
     }
     return output;
+}
+
+bool stable_charuco_poses(Capture &capture) {
+    const auto &poses = capture.marker_to_depth;
+    if (poses.size() < 8) return false;
+    size_t medoid = 0;
+    double best = std::numeric_limits<double>::infinity();
+    for (size_t i=0;i<poses.size();++i) {
+        double score=0;
+        for (const auto &pose:poses) {auto delta=transform_delta(poses[i],pose);score+=delta.first/.01+delta.second/2.0;}
+        if(score<best){best=score;medoid=i;}
+    }
+    std::vector<cv::Matx44d> kept;
+    std::vector<double> reprojection;
+    for(size_t i=0;i<poses.size();++i){
+        auto delta=transform_delta(poses[medoid],poses[i]);
+        if(delta.first<=.01&&delta.second<=2.0){kept.push_back(poses[i]);reprojection.push_back(capture.marker_reprojection[i]);}
+    }
+    if(kept.size()<8||kept.size()*4<poses.size()*3)return false;
+    capture.marker_to_depth=std::move(kept);
+    capture.marker_reprojection=std::move(reprojection);
+    return true;
 }
 
 cv::Vec3d deproject(const rs2_intrinsics &p_intrinsics, double p_x, double p_y, double p_depth) {
@@ -2411,6 +2437,10 @@ bool RealSensePairCalibrator::start(const Dictionary &p_options) {
     options.profile = utf8(String(p_options.get("profile", "highres30")));
     options.model_path = utf8(String(p_options.get("model_path", "")));
     options.onnx_backend = utf8(String(p_options.get("onnx_backend", "onnx_cuda")));
+    options.charuco_squares_x = int(p_options.get("charuco_squares_x", 0));
+    options.charuco_squares_y = int(p_options.get("charuco_squares_y", 0));
+    options.charuco_dictionary = int(p_options.get("charuco_dictionary", 0));
+    options.charuco_square_m = double(p_options.get("charuco_square_m", 0.0));
     options.marker_id = int(p_options.get("marker_id", 49));
     options.marker_size_m = double(p_options.get("marker_size_m", 0.15));
     options.capture_frames = std::clamp(int(p_options.get("capture_frames", 10)), 4, 96);
@@ -2442,10 +2472,17 @@ bool RealSensePairCalibrator::start(const Dictionary &p_options) {
         set_status("Native calibration needs two different RealSense serials");
         return false;
     }
-    if (options.mode != "aruco" && options.mode != "markerless" && options.mode != "refine") {
-        set_status("Native calibration mode must be aruco, markerless, or refine");
+    if (options.mode != "aruco" && options.mode != "charuco" && options.mode != "markerless" && options.mode != "refine") {
+        set_status("Native calibration mode must be aruco, charuco, markerless, or refine");
         return false;
     }
+#if defined(REALSENSE_DIRECT_ENABLED) && defined(REALSENSE_NATIVE_CALIBRATION_ENABLED)
+    if (options.mode == "charuco") {
+        const teleop_charuco::Spec board{options.charuco_squares_x,options.charuco_squares_y,
+            options.charuco_square_m,options.marker_size_m,options.charuco_dictionary};
+        if (!teleop_charuco::valid(board)) {set_status("Invalid ChArUco board specifications");return false;}
+    }
+#endif
     if (options.mode == "refine" && !options.has_initial_transform) {
         set_status("Native refine mode needs an initial transform");
         return false;
@@ -2586,7 +2623,7 @@ void RealSensePairCalibrator::run(Options p_options) {
     Capture reference;
     Capture target;
     std::string error;
-    const bool need_marker = p_options.mode == "aruco";
+    const bool need_marker = p_options.mode == "aruco" || p_options.mode == "charuco";
     set_status("Capturing reference RealSense " + p_options.reference_serial);
     if (!capture_camera(p_options, p_options.reference_serial, need_marker, cancel_requested, reference, error)) {
         output.status = error;
@@ -2605,6 +2642,11 @@ void RealSensePairCalibrator::run(Options p_options) {
         return;
     }
 
+    if (p_options.mode == "charuco" && (!stable_charuco_poses(reference) || !stable_charuco_poses(target))) {
+        output.status = "ChArUco poses are unstable across frames; keep the board rigid and still. Previous alignment retained.";
+        finish(output);
+        return;
+    }
     cv::Matx44d initial = cv::Matx44d::eye();
     if (need_marker) {
         set_status("Averaging ArUco poses in depth-camera coordinates");
@@ -2703,7 +2745,7 @@ void RealSensePairCalibrator::run(Options p_options) {
     output.refined_overlap_score = refined_score.score;
     cv::Matx44d selected_transform = initial;
     double selected_overlap_score = initial_score.score;
-    if (refined_score.score > initial_score.score + 0.001) {
+    if (p_options.mode != "charuco" && refined_score.score > initial_score.score + 0.001) {
         selected_transform = icp.transform;
         selected_overlap_score = refined_score.score;
         output.refinement_selected = true;
@@ -2808,7 +2850,7 @@ void RealSensePairCalibrator::run(Options p_options) {
     output.ok = true;
     std::ostringstream message;
     const char *label = need_marker
-        ? "Native ArUco"
+        ? (p_options.mode == "charuco" ? "Native ChArUco" : "Native ArUco")
         : (p_options.mode == "markerless" ? "Native markerless" : "Native guarded refine");
     message << label << " alignment accepted"
             << " | fit=" << icp.fitness << " rmse=" << icp.rmse

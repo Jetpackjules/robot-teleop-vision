@@ -22,6 +22,8 @@ public:
         std::string profile = "highres30";
         std::string model_path;
         std::string onnx_backend = "onnx_cuda";
+        int charuco_squares_x = 0, charuco_squares_y = 0, charuco_dictionary = 0;
+        double charuco_square_m = 0.0;
         int marker_id = 49;
         double marker_size_m = 0.15;
         int capture_frames = 10;

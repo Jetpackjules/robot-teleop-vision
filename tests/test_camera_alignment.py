@@ -73,3 +73,11 @@ def test_aruco_mm_is_forwarded_exactly_and_invalid_sizes_do_not_start(alignment)
     alignment.start('aruco','idle',{},sent.append,123.4,7)
     packet=json.loads(sent[0])
     assert packet['mode']=='aruco' and packet['marker_size_mm']==123.4 and packet['marker_id']==7
+
+
+def test_charuco_specs_are_validated_and_forwarded(alignment):
+    board = {'squares_x':10,'squares_y':16,'square_mm':30,'marker_mm':22,'dictionary':1}
+    for changes in [{'squares_x':True},{'squares_y':2},{'square_mm':float('nan')},{'marker_mm':30},{'dictionary':0},{'dictionary':'1'}]:
+        with pytest.raises(ValueError):alignment.start('charuco','idle',{},lambda _:pytest.fail('must not send'),board={**board,**changes})
+    sent=[];alignment.start('charuco','idle',{},sent.append,board=board)
+    assert json.loads(sent[0])['charuco_board']==board

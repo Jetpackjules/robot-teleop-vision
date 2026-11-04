@@ -7,10 +7,11 @@ export class CameraAlignmentControl {
     this.sending = false;
     this.status = root.querySelector('#camera-alignment-status');
     this.backup = root.querySelector('#camera-alignment-backup');
-    this.buttons = [root.querySelector('#camera-align-auto'), root.querySelector('#camera-align-refine'), root.querySelector('#camera-align-aruco')];
+    this.buttons = [root.querySelector('#camera-align-auto'), root.querySelector('#camera-align-refine'), root.querySelector('#camera-align-aruco'), root.querySelector('#camera-align-charuco')];
     this.buttons[0].addEventListener('click', () => this.start('markerless'));
     this.buttons[1].addEventListener('click', () => this.start('refine'));
     this.buttons[2].addEventListener('click', () => this.start('aruco'));
+    this.buttons[3].addEventListener('click', () => this.start('charuco'));
     this.poll();
   }
   render(value) {
@@ -30,6 +31,18 @@ export class CameraAlignmentControl {
   }
   async start(mode) {
     const payload = {mode};
+    if (mode === 'charuco') {
+      payload.board = {};
+      for (const [key,id] of Object.entries({squares_x:'x',squares_y:'y',square_mm:'square',marker_mm:'marker',dictionary:'dictionary'})) {
+        const input = this.root.querySelector(`#camera-charuco-${id}`);
+        if (!input.reportValidity()) return;
+        payload.board[key] = Number(input.value);
+      }
+      if (payload.board.marker_mm >= payload.board.square_mm) {
+        this.status.textContent = 'The marker must be smaller than its checker square.';
+        return;
+      }
+    }
     if (mode === 'aruco') {
       const size = this.root.querySelector('#camera-aruco-size'), id = this.root.querySelector('#camera-aruco-id');
       if (!size.reportValidity() || !id.reportValidity()) return;

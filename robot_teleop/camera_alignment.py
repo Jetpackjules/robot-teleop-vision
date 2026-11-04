@@ -59,14 +59,30 @@ class CameraAlignment:
         self.last_backup = str(target)
         return self.last_backup
 
-    def start(self, mode, recording_state, robot, send, marker_size_mm=None, marker_id=49):
-        if mode not in ('markerless', 'refine', 'aruco'):
+    def start(self, mode, recording_state, robot, send, marker_size_mm=None, marker_id=49, board=None):
+        if mode not in ('markerless', 'refine', 'aruco', 'charuco'):
             raise ValueError('Choose Auto align or Refine current alignment.')
         if mode == 'aruco':
             if type(marker_size_mm) not in (int, float) or not math.isfinite(marker_size_mm) or not 20 <= marker_size_mm <= 1000:
                 raise ValueError('ArUco black square size must be 20–1000 mm.')
             if type(marker_id) is not int or not 0 <= marker_id <= 99:
                 raise ValueError('ArUco DICT_4X4_100 marker ID must be 0–99.')
+        if mode == 'charuco':
+            if not isinstance(board, dict) or set(board) != {'squares_x','squares_y','square_mm','marker_mm','dictionary'}:
+                raise ValueError('Enter the complete ChArUco board specifications.')
+            for key in ['squares_x','squares_y']:
+                if type(board[key]) is not int or not 3 <= board[key] <= 40:
+                    raise ValueError('ChArUco square counts must be integers from 3 to 40.')
+            for key in ['square_mm','marker_mm']:
+                if type(board[key]) not in (int,float) or not math.isfinite(board[key]) or not .5 <= board[key] <= 1000:
+                    raise ValueError('Enter physical ChArUco sizes in mm.')
+            if board['square_mm'] < 1 or board['marker_mm'] >= board['square_mm']:
+                raise ValueError('Each marker must be smaller than its checker square.')
+            if type(board['dictionary']) is not int or not 0 <= board['dictionary'] <= 15:
+                raise ValueError('Select the ChArUco marker dictionary.')
+            capacity = [50,100,250,1000][board['dictionary'] % 4]
+            if board['squares_x'] * board['squares_y'] // 2 > capacity:
+                raise ValueError('This dictionary has too few markers for this board.')
         with self.lock:
             status = self.status()
             if not status.get('online'):
@@ -83,6 +99,6 @@ class CameraAlignment:
             request_id = uuid.uuid4().hex
             self.pending = {'request_id': request_id, 'sent': time.monotonic()}
             send(json.dumps({'type': 'camera_alignment', 'mode': mode, 'request_id': request_id,
-                             'marker_size_mm': marker_size_mm, 'marker_id': marker_id,
+                             'marker_size_mm': marker_size_mm, 'marker_id': marker_id, 'charuco_board': board,
                              'project_root': str(self.root) + '/', 'sent_unix_ms': time.time()*1000}).encode())
             return self.status()

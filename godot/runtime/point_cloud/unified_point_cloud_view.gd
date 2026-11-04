@@ -962,6 +962,7 @@ func _exit_tree() -> void:
 		_send_all_stream_commands(false)
 	_free_debug_panel()
 
+var _web_charuco_board: Dictionary = {}
 var _web_alignment_request_id := ""
 var _web_alignment_status_msec := 0
 
@@ -971,8 +972,13 @@ func apply_remote_camera_alignment(payload: Dictionary) -> void:
 	var age := Time.get_unix_time_from_system() * 1000.0 - float(payload.get("sent_unix_ms", 0.0))
 	if request_id.is_empty() or request_id == _web_alignment_request_id or age < -1000.0 or age > 5000.0:
 		return
-	if mode not in ["markerless", "refine", "aruco"] or _realsense_cloud_alignment_running():
+	if mode not in ["markerless", "refine", "aruco", "charuco"] or _realsense_cloud_alignment_running():
 		return
+	if mode == "charuco":
+		var board = payload.get("charuco_board")
+		if not board is Dictionary:
+			return
+		_web_charuco_board = board.duplicate(true)
 	if mode == "aruco":
 		var size_mm := float(payload.get("marker_size_mm", 0.0))
 		var marker_id := int(payload.get("marker_id", -1))
@@ -2751,7 +2757,7 @@ func _native_realsense_saved_prior(reference_id: String, target_id: String) -> P
 
 func _request_native_realsense_calibration(mode: String) -> void:
 	mode = mode.strip_edges().to_lower()
-	if mode not in ["aruco", "markerless", "refine"]:
+	if mode not in ["aruco", "charuco", "markerless", "refine"]:
 		mode = "markerless"
 	if not is_inside_tree():
 		calibration_status = "Open the Unified Point Clouds scene before starting calibration."
@@ -2819,11 +2825,17 @@ func _start_next_native_realsense_pair() -> void:
 		"model_path": ProjectSettings.globalize_path(REALSENSE_NATIVE_CALIBRATION_MODEL_PATH),
 		"marker_id": realsense_calibration_marker_id,
 		"marker_size_m": realsense_calibration_marker_size_m,
-		"capture_frames": 24 if mode == "aruco" else 48,
+		"capture_frames": 24 if mode in ["aruco", "charuco"] else 48,
 		"marker_frames": 24,
 		"min_depth_m": calibration_min_depth,
 		"max_depth_m": calibration_max_depth,
 	}
+	if mode == "charuco":
+		options["charuco_squares_x"] = int(_web_charuco_board.get("squares_x", 0))
+		options["charuco_squares_y"] = int(_web_charuco_board.get("squares_y", 0))
+		options["charuco_dictionary"] = int(_web_charuco_board.get("dictionary", -1))
+		options["charuco_square_m"] = float(_web_charuco_board.get("square_mm", 0.0)) / 1000.0
+		options["marker_size_m"] = float(_web_charuco_board.get("marker_mm", 0.0)) / 1000.0
 	if mode == "refine":
 		var reference_world: Transform3D = _native_realsense_rig.transforms[reference_id]
 		options["initial_transform"] = _packed_realsense_transform(
@@ -2876,7 +2888,7 @@ func _finish_native_realsense_rig() -> void:
 			_alignment_transforms.merge(rig.transforms, true)
 			_camera_alignment_registry_token = ""
 			calibration_status = status
-			if mode == "aruco":
+			if mode in ["aruco", "charuco"]:
 				if _realsense_alignment_ground_truth_path.is_empty():
 					_realsense_alignment_ground_truth_path = ProjectSettings.globalize_path(REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH)
 				var truth := _read_camera_registry()

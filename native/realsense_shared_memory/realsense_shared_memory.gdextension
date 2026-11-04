@@ -5,8 +5,8 @@ compatibility_minimum = "4.6"
 [libraries]
 windows.debug.x86_64 = "res://native/realsense_shared_memory/bin/realsense_shared_memory.dll"
 windows.release.x86_64 = "res://native/realsense_shared_memory/bin/realsense_shared_memory.dll"
-linux.debug.x86_64 = "res://native/realsense_shared_memory/bin/librealsense_shared_memory_color_authority.so"
-linux.release.x86_64 = "res://native/realsense_shared_memory/bin/librealsense_shared_memory_color_authority.so"
+linux.debug.x86_64 = "res://native/realsense_shared_memory/bin/librealsense_charuco_candidate.so"
+linux.release.x86_64 = "res://native/realsense_shared_memory/bin/librealsense_charuco_candidate.so"
 
 [dependencies]
 windows.x86_64 = {
