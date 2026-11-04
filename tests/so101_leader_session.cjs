@@ -25,6 +25,10 @@ const assert = require('node:assert/strict'), fs = require('node:fs'), path = re
   const arm = make(), setup = arm.prepareLeaderTrial({connect: true});
   assert.equal(arm.connections, 1, 'USB selection starts directly from the setup click');
   await setup;
+  const chooser = make();
+  chooser.connectKeyboard = async()=>{throw Error('Keyboard must never be silently selected');};
+  await chooser.prepareTrialControl({connect:true,keyboardFallback:true});
+  assert.equal(chooser.connections,1,'generic setup opens the leader chooser even for a legacy keyboard fallback caller');
   assert.deepEqual(arm.sent.filter(m=>m.type!=='arm_status_request'), [{type: 'arm_enable', source: 'leader'}]);
   await arm.prepareLeaderTrial(); assert.equal(arm.sent.filter(m=>m.type==='arm_enable').length, 1, 'ready leader is reused');
   arm.latest.armed = false; await arm.prepareLeaderTrial();

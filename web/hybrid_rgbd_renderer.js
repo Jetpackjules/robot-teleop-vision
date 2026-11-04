@@ -152,6 +152,7 @@ const state = {
     mesh_preview_enabled: false,
     robot_overlay_enabled: true,
     robot_overlay_scope: "full",
+    robot_overlay_body_opacity: 1,
     robot_overlay_style: "alignment",
     robot_overlay_mask_scanned_robot: true,
     white_background_enabled: false,
@@ -1109,8 +1110,8 @@ function drawCameraGuides(viewProjection) {
 }
 
 function robotLinkVisible(name) {
-  return state.settings.robot_overlay_scope !== "claw"
-    || (state.robotRenderer.endEffectorLinks || []).includes(name);
+  const claw = (state.robotRenderer.endEffectorLinks || []).includes(name);
+  return claw || (state.settings.robot_overlay_scope !== "claw" && state.settings.robot_overlay_body_opacity > 0);
 }
 
 function raycastRobotOverlay(ray,limit=Infinity) {
@@ -1155,10 +1156,13 @@ function drawRobotOverlay(viewProjection) {
   const alignmentStyle = state.settings.robot_overlay_style === "alignment";
   const realisticStyle = state.settings.robot_overlay_style === "realistic";
   bindSceneLighting(gl,state.robotProgram,state.settings,state.currentViewer?.slice(12,15),state.sceneShadow,!alignmentStyle);
-  const drawLinks = (outline) => {
+  const drawLinks = (outline, pass = null) => {
     gl.uniform1f(state.robotUniforms.outlinePixels, outline ? 1.75 : 0.0);
     for (const [name, primitives] of Object.entries(state.robotMeshes)) {
       if (!robotLinkVisible(name)) continue;
+      const claw = (state.robotRenderer.endEffectorLinks || []).includes(name);
+      const opacity = claw ? 1 : state.settings.robot_overlay_body_opacity;
+      if (pass === 'opaque' && opacity < 1 || pass === 'ghost' && opacity >= 1) continue;
       const globalMatrix = transformDictionaryMatrix(state.robotTransforms[name]);
       if (!globalMatrix) continue;
       const accentLink = (state.robotRenderer.accentLinks || []).includes(name);
@@ -1170,7 +1174,7 @@ function drawRobotOverlay(viewProjection) {
       gl.uniform4fv(state.robotUniforms.color, color);
       for (const primitive of primitives) {
       const material = realisticStyle ? primitive.material : {color, roughness:.6, metalness:.08, detail:0};
-      gl.uniform4fv(state.robotUniforms.color, material.color);
+      gl.uniform4fv(state.robotUniforms.color, [...material.color.slice(0,3), material.color[3] * opacity]);
       gl.uniform2f(state.robotUniforms.material, material.roughness, material.metalness);
       gl.uniform1f(state.robotUniforms.surfaceDetail, material.detail || 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, primitive.positionBuffer);
@@ -1205,7 +1209,18 @@ function drawRobotOverlay(viewProjection) {
     gl.disable(gl.BLEND);
     gl.disable(gl.CULL_FACE);
     gl.depthMask(true);
-    drawLinks(false);
+    drawLinks(false, 'opaque');
+    if (state.settings.robot_overlay_body_opacity > 0 && state.settings.robot_overlay_body_opacity < 1) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+      drawLinks(false, 'ghost');
+      gl.disable(gl.CULL_FACE);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
   }
   gl.bindVertexArray(null);
 }
@@ -3632,6 +3647,8 @@ export function setGodotHybridViewSettings(settings = {}) {
       ? overlayStyle : state.settings.robot_overlay_style,
     robot_overlay_scope: ["full", "claw"].includes(settings.robot_overlay_scope)
       ? settings.robot_overlay_scope : state.settings.robot_overlay_scope,
+    robot_overlay_body_opacity: Number.isFinite(settings.robot_overlay_body_opacity)
+      ? clamp(settings.robot_overlay_body_opacity, 0, 1) : state.settings.robot_overlay_body_opacity,
   };
   if (["point_cloud", "shader_mesh", "independent_mesh", "unified_mesh", "blendpcr"].includes(settings.display_mode)) {
     state.settings.geometry_mode = settings.display_mode === "point_cloud" ? "points" : "mesh";

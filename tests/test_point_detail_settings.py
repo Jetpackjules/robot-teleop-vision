@@ -4,6 +4,15 @@ from robot_teleop.operator import load_robot_operator
 from tools.lan_remote_view_server import LanRemoteHandler
 
 
+def test_arm_body_opacity_persists_and_rejects_nonfinite_values():
+    handler = LanRemoteHandler.__new__(LanRemoteHandler)
+    handler.server = SimpleNamespace(robot_operator=load_robot_operator('disabled'))
+    for value, expected in [(0, 0), (.25, .25), (1, 1), (-1, 0), (2, 1)]:
+        assert handler.validate_site_settings({'robot_overlay_body_opacity':value})['robot_overlay_body_opacity'] == expected
+    for value in [True, '0.5', float('nan'), float('inf')]:
+        with pytest.raises(ValueError):handler.validate_site_settings({'robot_overlay_body_opacity':value})
+
+
 @pytest.mark.parametrize('detail', [0, -2, -1, 20000, 40000])
 def test_point_detail_is_a_valid_persistent_site_setting(detail):
     handler = LanRemoteHandler.__new__(LanRemoteHandler)

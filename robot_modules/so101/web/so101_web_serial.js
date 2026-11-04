@@ -589,10 +589,9 @@ export class So101ArmController extends EventTarget {
 
   async prepareTrialControl(options = {}) {
     if (this.trialSuspended) throw new Error("Resume or finish the paused trial before setting up control.");
-    // The explicit setup click can use keyboard when no leader is connected.
-    // An existing or partially opened leader is never silently replaced.
-    if (options.connect && options.keyboardFallback && !this.latest.leaderConnected && !this.latest.keyboardConnected && !this.port)
-      await this.connectKeyboard();
+    // A connected leader wins. With neither input selected, the setup click
+    // opens the USB chooser; keyboard requires its explicit control button.
+    if (this.latest.leaderConnected) return this.prepareLeaderTrial(options);
     if (!this.latest.keyboardConnected) return this.prepareLeaderTrial(options);
     await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected && status.keyboardConnected);
     const before = this.statusRevision || 0;

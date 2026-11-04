@@ -3505,6 +3505,10 @@ func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) ->
 	node.call("set_shared_memory_name", _camera_shm_name(camera_id))
 	if _capture_publisher() and node.has_method("set_publish_shared_memory_name"):
 		node.call("set_publish_shared_memory_name", _camera_shm_name(camera_id))
+		# Headless combined runtimes must publish the same native buffers as the
+		# dedicated capture service. The native publisher runs in capture-only mode.
+		if DisplayServer.get_name() == "headless" and node.has_method("set_capture_only"):
+			node.call("set_capture_only", true)
 	if _capture_only() and node.has_method("set_capture_only"):
 		node.call("set_capture_only", true)
 		node.call("set_publish_shared_memory_name", _camera_shm_name(camera_id))

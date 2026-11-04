@@ -121,6 +121,7 @@ CORE_PERSISTENT_VIEW_SETTINGS = frozenset(
         "robot_overlay_mask_scanned_robot",
         "robot_overlay_style",
         "robot_overlay_scope",
+        "robot_overlay_body_opacity",
         "display_mode",
         "stream_preset",
         "point_preview_detail",
@@ -4604,6 +4605,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             raise ValueError("view settings must be an object")
         bounds = {
+            "robot_overlay_body_opacity": (0.0, 1.0),
             "point_cleanup_radius_mm": (1.0, 100.0),
             "point_cleanup_tolerance_mm": (1.0, 100.0),
             "yaw_gain": (0.0, 12.0),
