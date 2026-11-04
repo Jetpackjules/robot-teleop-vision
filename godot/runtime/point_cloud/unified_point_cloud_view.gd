@@ -2,6 +2,7 @@
 extends Node3D
 
 const BoardWorldLevel = preload("res://godot/runtime/point_cloud/board_world_level.gd")
+const LockedTopCalibration = preload("res://godot/runtime/point_cloud/locked_top_camera_calibration.gd")
 const RigCalibration = preload("res://godot/runtime/point_cloud/realsense_rig_calibration.gd")
 const JointRefinement = preload("res://godot/runtime/point_cloud/realsense_joint_refinement.gd")
 const MeshFusion = preload("res://godot/runtime/point_cloud/realsense_mesh_fusion.gd")
@@ -967,6 +968,8 @@ func _exit_tree() -> void:
 	_free_debug_panel()
 
 var _web_charuco_board: Dictionary = {}
+var _web_alignment_scope := "rig"
+var _web_locked_files: Dictionary = {}
 var _web_alignment_request_id := ""
 var _web_alignment_status_msec := 0
 
@@ -978,7 +981,10 @@ func apply_remote_camera_alignment(payload: Dictionary) -> void:
 		return
 	if mode not in ["markerless", "refine", "aruco", "charuco"] or _realsense_cloud_alignment_running():
 		return
-	_web_level_from_board = bool(payload.get("board_is_tabletop", true))
+	_web_alignment_scope = str(payload.get("scope","rig"))
+	if _web_alignment_scope not in ["rig","top_only"] or (_web_alignment_scope == "top_only" and mode != "charuco"):
+		return
+	_web_level_from_board = _web_alignment_scope != "top_only" and bool(payload.get("board_is_tabletop", true))
 	if mode == "charuco":
 		var board = payload.get("charuco_board")
 		if not board is Dictionary:
@@ -1009,6 +1015,7 @@ func _publish_web_camera_alignment_status(force: bool = false) -> void:
 		"busy": _realsense_cloud_alignment_running(),
 		"message": calibration_status if not calibration_status.is_empty() else "Camera alignment is ready.",
 		"cameras": _enabled_realsense_serials().size(),
+		"top_only_available": true,
 		"active_depth_corrections": _active_depth_correction_labels(),
 		"world_level": {"token":_board_world_level_token,"table_y":0.0,"source":_world_level_source} if _world_level_source.begins_with("calibration_board_") else {},
 	})
@@ -2842,8 +2849,24 @@ func _request_native_realsense_calibration(mode: String) -> void:
 		calibration_status = "Native RealSense calibration is unavailable in this extension build."
 		return
 	var reference_id := _realsense_camera_id(realsense_cloud_alignment_reference_serial.strip_edges()) if not realsense_cloud_alignment_reference_serial.strip_edges().is_empty() else ids[0]
-	var rig := RigCalibration.new()
-	if not rig.begin(ids, reference_id, _alignment_transforms):
+	var rig: RigCalibration
+	if _web_alignment_scope == "top_only":
+		var target := _realsense_camera_id("262522074294")
+		var references: Array[String] = [_realsense_camera_id("262522075787"),_realsense_camera_id("262522076048")]
+		if target not in ids or references[0] not in ids or references[1] not in ids:
+			calibration_status = "Top-only alignment needs cameras A, B and C online. No calibration changed."
+			return
+		var locked := LockedTopCalibration.new()
+		if not locked.begin_locked(target,references,_alignment_transforms):
+			calibration_status = "Top-only alignment requires existing saved A/B/C poses."
+			return
+		rig = locked
+		_web_locked_files = {}
+		for file in ["user://so101_robot_registration.json",WORLD_LEVEL_PATH,CAMERA_ALIGNMENT_REGISTRY_PATH,REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH,"user://camera_depth_pose_corrections.json"]:
+			_web_locked_files[file] = FileAccess.get_file_as_bytes(file) if FileAccess.file_exists(file) else PackedByteArray()
+	else:
+		rig = RigCalibration.new()
+	if _web_alignment_scope != "top_only" and not rig.begin(ids, reference_id, _alignment_transforms):
 		calibration_status = "The reference camera must be enabled and discovered."
 		return
 	_native_realsense_rig = rig
@@ -2931,6 +2954,9 @@ func _update_native_realsense_calibration() -> void:
 	result["reference_camera"] = _native_realsense_calibration_reference_id
 	result["target_camera"] = _native_realsense_calibration_target_id
 	_native_realsense_calibrator = null
+	if _web_alignment_scope == "top_only" and not bool(result.get("depth_plane_anchored",false)):
+		result["ok"] = false
+		result["status"] = "Top-only alignment requires fresh depth-plane anchoring."
 	if _native_realsense_calibration_mode in ["aruco", "charuco"] and bool(result.get("ok",false)) and not bool(result.get("depth_plane_anchored",false)):
 		result = BoardWorldLevel.correct_pose_result(result,
 			_camera_depth_pose_correction(_native_realsense_calibration_reference_id),
@@ -2941,6 +2967,9 @@ func _update_native_realsense_calibration() -> void:
 func _finish_native_realsense_rig() -> void:
 	var rig := _native_realsense_rig
 	var mode := _native_realsense_calibration_mode
+	if _web_alignment_scope == "top_only":
+		_finish_locked_top_camera(rig)
+		return
 	if rig.complete() and mode == "markerless":
 		_joint_realsense_refinement = JointRefinement.new()
 		if _joint_realsense_refinement.begin(self, rig, _native_realsense_registry_before):
@@ -2986,7 +3015,43 @@ func _finish_native_realsense_rig() -> void:
 		calibration_status = "Camera rig calibration incomplete: %s could not be aligned. Previous alignment preserved. %s" % [", ".join(rig.pending_cameras()), " | ".join(rig.failures)]
 	_release_native_realsense_rig()
 
+func _finish_locked_top_camera(rig: RigCalibration) -> void:
+	if not rig.complete():
+		calibration_status = "A-only alignment not saved. B, C and arm unchanged. " + " | ".join(rig.failures)
+		_release_native_realsense_rig()
+		return
+	for file in _web_locked_files:
+		var current := FileAccess.get_file_as_bytes(file) if FileAccess.file_exists(file) else PackedByteArray()
+		if current != _web_locked_files[file]:
+			calibration_status = "Saved calibration changed during capture; A-only result discarded."
+			_release_native_realsense_rig()
+			return
+	var target := _realsense_camera_id("262522074294")
+	var status := "Top camera A calibrated against locked B/C. Arm and tabletop unchanged."
+	var registry = JSON.parse_string((_web_locked_files[CAMERA_ALIGNMENT_REGISTRY_PATH] as PackedByteArray).get_string_from_utf8())
+	var truth = JSON.parse_string((_web_locked_files[REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH] as PackedByteArray).get_string_from_utf8())
+	if not registry is Dictionary or not truth is Dictionary:
+		calibration_status = "A-only save requires valid existing camera and ground-truth registries."
+		_release_native_realsense_rig()
+		return
+	var updated := LockedTopCalibration.replace_target(registry,target,rig.transforms[target],status)
+	var updated_truth := LockedTopCalibration.replace_target(truth,target,rig.transforms[target],status)
+	if updated.is_empty() or updated_truth.is_empty():
+		calibration_status = "A-only result would move a locked camera; no calibration changed."
+	elif RigCalibration.write_atomic(ProjectSettings.globalize_path(CAMERA_ALIGNMENT_REGISTRY_PATH),updated) != OK:
+		calibration_status = "Could not save A; previous alignment retained."
+	elif RigCalibration.write_atomic(ProjectSettings.globalize_path(REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH),updated_truth) != OK:
+		RigCalibration.write_atomic(ProjectSettings.globalize_path(CAMERA_ALIGNMENT_REGISTRY_PATH),registry)
+		calibration_status = "Could not save A ground truth; previous camera alignment restored."
+	else:
+		_alignment_transforms[target] = rig.transforms[target]
+		_camera_alignment_registry_token = ""
+		calibration_status = status
+	_release_native_realsense_rig()
+
 func _release_native_realsense_rig() -> void:
+	_web_alignment_scope = "rig"
+	_web_locked_files = {}
 	if _joint_realsense_refinement != null: _joint_realsense_refinement.cancel()
 	_joint_realsense_refinement = null
 	_native_realsense_rig = null

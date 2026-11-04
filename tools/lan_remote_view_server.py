@@ -2715,11 +2715,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if not 0 < length <= 1024 or self.headers.get('Content-Type', '').split(';', 1)[0] != 'application/json':
                 raise ValueError('Camera alignment requires a small JSON request.')
             data = json.loads(self.rfile.read(length))
-            if not isinstance(data, dict) or ('mode' not in data or set(data) - {'mode', 'marker_size_mm', 'marker_id', 'board', 'board_is_tabletop'}):
+            if not isinstance(data, dict) or ('mode' not in data or set(data) - {'mode', 'marker_size_mm', 'marker_id', 'board', 'board_is_tabletop', 'scope'}):
                 raise ValueError('Invalid camera alignment request.')
             with self.server.camera_alignment.lock:
                 result = self.server.camera_alignment.start(data['mode'], self.server.episode_recorder.state,
-                    self.server.latest_robot_status(), self.server.forward_tracking, data.get('marker_size_mm'), data.get('marker_id', 49), data.get('board'), data.get('board_is_tabletop', True))
+                    self.server.latest_robot_status(), self.server.forward_tracking, data.get('marker_size_mm'), data.get('marker_id', 49), data.get('board'), data.get('board_is_tabletop', True), data.get('scope', 'rig'))
             self.serve_json(result)
         except (OSError, ValueError, TypeError) as exc:
             self.send_error(400, str(exc)[:180])

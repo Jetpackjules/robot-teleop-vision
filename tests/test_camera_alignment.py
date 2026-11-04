@@ -110,3 +110,18 @@ def test_board_level_updates_shared_table_once_and_preserves_other_settings(tmp_
     status['world_level']['token']=125
     server.sync_board_table_level(status)
     assert server.load_site_settings()['modeled_workspace_center']==[.2,0,.3]
+
+
+def test_top_only_forwards_scope_and_forbids_releveling(alignment):
+    sent=[]
+    board={'squares_x':16,'squares_y':10,'square_mm':18,'marker_mm':14.5,'dictionary':5}
+    alignment.start('charuco','idle',{},sent.append,board=board,scope='top_only',board_is_tabletop=True)
+    packet=json.loads(sent[0])
+    assert packet['scope']=='top_only'
+    assert packet['board_is_tabletop'] is False
+    assert packet['charuco_board']==board
+
+@pytest.mark.parametrize('mode,scope',[('refine','top_only'),('aruco','top_only'),('charuco','unknown')])
+def test_invalid_partial_scope_does_not_start(alignment,mode,scope):
+    with pytest.raises(ValueError):alignment.start(mode,'idle',{},lambda _:pytest.fail('must not send'),scope=scope)
+    assert alignment.last_backup is None

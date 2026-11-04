@@ -13,6 +13,8 @@ export class CameraAlignmentControl {
     this.buttons[1].addEventListener('click', () => this.start('refine'));
     this.buttons[2].addEventListener('click', () => this.start('aruco'));
     this.buttons[3].addEventListener('click', () => this.start('charuco'));
+    this.topOnlyButton = root.querySelector("#camera-align-top-only");
+    if(this.topOnlyButton){this.buttons.push(this.topOnlyButton);this.topOnlyButton.addEventListener("click",()=>this.start("charuco","top_only"));}
     this.poll();
   }
   render(value) {
@@ -28,7 +30,7 @@ export class CameraAlignmentControl {
       ? `Saved depth alignment correction active: ${value.active_depth_corrections.join(', ')}.` : '';
     this.status.textContent = value.message || 'Camera alignment is ready.';
     this.backup.textContent = value.backup ? `Backup saved on host: ${value.backup}` : '';
-    for (const button of this.buttons) button.disabled = this.sending || !value.online || value.busy;
+    for (const button of this.buttons) button.disabled = this.sending || !value.online || value.busy || (button === this.topOnlyButton && value.top_only_available !== true);
   }
   async poll() {
     if (this.closed) return;
@@ -40,9 +42,9 @@ export class CameraAlignmentControl {
     } catch (error) { if (!this.sending) this.render({message: error.message, online: false}); }
     if (!this.closed) this.timer = setTimeout(() => this.poll(), 2000);
   }
-  async start(mode) {
-    const payload = {mode};
-    if (mode === 'aruco' || mode === 'charuco') payload.board_is_tabletop = this.root.querySelector('#camera-board-tabletop').checked;
+  async start(mode, scope = "rig") {
+    const payload = scope === "rig" ? {mode} : {mode, scope};
+    if (mode === 'aruco' || mode === 'charuco') payload.board_is_tabletop = scope !== 'top_only' && this.root.querySelector('#camera-board-tabletop').checked;
     if (mode === 'charuco') {
       payload.board = {};
       for (const [key,id] of Object.entries({squares_x:'x',squares_y:'y',square_mm:'square',marker_mm:'marker',dictionary:'dictionary'})) {
@@ -61,7 +63,10 @@ export class CameraAlignmentControl {
       payload.marker_size_mm = Number(size.value);
       payload.marker_id = Number(id.value);
     }
-    if (this.sending || !await this.confirm('Put the arm in Hold and keep all cameras and objects still. The preview will pause while Godot aligns the cameras. Camera and arm calibration will be backed up first. Continue?')) return;
+    const confirmation = scope === 'top_only'
+      ? 'Put the arm in Hold. Keep the board flat, still and visible to all three cameras. Only A will be saved; B/C, tabletop and arm calibration stay fixed. Existing calibration will be backed up. Continue?'
+      : 'Put the arm in Hold and keep all cameras and objects still. The preview will pause while Godot aligns the cameras. Camera and arm calibration will be backed up first. Continue?';
+    if (this.sending || !await this.confirm(confirmation)) return;
     this.sending = true;
     this.render({message:'Backing up calibration and requesting Godot alignment…'});
     try {

@@ -59,9 +59,13 @@ class CameraAlignment:
         self.last_backup = str(target)
         return self.last_backup
 
-    def start(self, mode, recording_state, robot, send, marker_size_mm=None, marker_id=49, board=None, board_is_tabletop=True):
+    def start(self, mode, recording_state, robot, send, marker_size_mm=None, marker_id=49, board=None, board_is_tabletop=True, scope="rig"):
+        if scope not in ("rig", "top_only") or (scope == "top_only" and mode != "charuco"):
+            raise ValueError("Top-only alignment requires ChArUco.")
         if type(board_is_tabletop) is not bool:
             raise ValueError('Board tabletop choice must be true or false.')
+        if scope == "top_only":
+            board_is_tabletop = False
         if mode not in ('markerless', 'refine', 'aruco', 'charuco'):
             raise ValueError('Choose Auto align or Refine current alignment.')
         if mode == 'aruco':
@@ -100,7 +104,7 @@ class CameraAlignment:
             self.backup()
             request_id = uuid.uuid4().hex
             self.pending = {'request_id': request_id, 'sent': time.monotonic()}
-            send(json.dumps({'type': 'camera_alignment', 'mode': mode, 'request_id': request_id,
+            send(json.dumps({'type': 'camera_alignment', 'mode': mode, 'scope': scope, 'request_id': request_id,
                              'marker_size_mm': marker_size_mm, 'marker_id': marker_id, 'charuco_board': board, 'board_is_tabletop': board_is_tabletop,
                              'project_root': str(self.root) + '/', 'sent_unix_ms': time.time()*1000}).encode())
             return self.status()
