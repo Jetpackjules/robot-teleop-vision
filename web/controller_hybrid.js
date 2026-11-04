@@ -325,7 +325,7 @@
       }
     }
 
-    function restoreViewSettings(savedInput = null, {preferLastTable = true} = {}) {
+    function restoreViewSettings(savedInput = null, {preferLastTable = false} = {}) {
       const localSaved = localSavedViewSettings();
       const saved = savedInput && Object.keys(savedInput).length ? { ...localSaved, ...savedInput } : localSaved;
       cleanupEnabled.checked=saved.point_cleanup_enabled===true;
