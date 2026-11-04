@@ -551,6 +551,10 @@
             <button id="camera-align-auto" type="button" disabled>Auto Align Cameras</button>
             <button id="camera-align-refine" type="button" disabled>Refine Current Alignment</button>
           </div>
+          <label>ArUco black square size (mm)<input id="camera-aruco-size" type="number" min="20" max="1000" step="0.1" value="150"></label>
+          <label>ArUco marker ID · DICT_4X4_100<input id="camera-aruco-id" type="number" min="0" max="99" step="1" value="49"></label>
+          <p class="helper-text">Measure one full side of the black square, outer corner to outer corner, excluding the white margin. Keep the same marker still and visible to all cameras.</p>
+          <button id="camera-align-aruco" type="button" disabled>Align Cameras with ArUco</button>
           <div id="camera-alignment-status" class="helper-text" role="status" aria-live="polite">Checking Godot camera alignment…</div>
           <p id="camera-alignment-backup" class="helper-text"></p>
         </section>

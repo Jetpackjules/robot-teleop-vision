@@ -971,8 +971,15 @@ func apply_remote_camera_alignment(payload: Dictionary) -> void:
 	var age := Time.get_unix_time_from_system() * 1000.0 - float(payload.get("sent_unix_ms", 0.0))
 	if request_id.is_empty() or request_id == _web_alignment_request_id or age < -1000.0 or age > 5000.0:
 		return
-	if mode not in ["markerless", "refine"] or _realsense_cloud_alignment_running():
+	if mode not in ["markerless", "refine", "aruco"] or _realsense_cloud_alignment_running():
 		return
+	if mode == "aruco":
+		var size_mm := float(payload.get("marker_size_mm", 0.0))
+		var marker_id := int(payload.get("marker_id", -1))
+		if not is_finite(size_mm) or size_mm < 20.0 or size_mm > 1000.0 or marker_id < 0 or marker_id > 99:
+			return
+		realsense_calibration_marker_size_m = size_mm / 1000.0
+		realsense_calibration_marker_id = marker_id
 	_web_alignment_request_id = request_id
 	_request_native_realsense_calibration(mode)
 	_publish_web_camera_alignment_status(true)

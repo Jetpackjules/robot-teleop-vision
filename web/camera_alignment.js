@@ -7,9 +7,10 @@ export class CameraAlignmentControl {
     this.sending = false;
     this.status = root.querySelector('#camera-alignment-status');
     this.backup = root.querySelector('#camera-alignment-backup');
-    this.buttons = [root.querySelector('#camera-align-auto'), root.querySelector('#camera-align-refine')];
+    this.buttons = [root.querySelector('#camera-align-auto'), root.querySelector('#camera-align-refine'), root.querySelector('#camera-align-aruco')];
     this.buttons[0].addEventListener('click', () => this.start('markerless'));
     this.buttons[1].addEventListener('click', () => this.start('refine'));
+    this.buttons[2].addEventListener('click', () => this.start('aruco'));
     this.poll();
   }
   render(value) {
@@ -28,12 +29,19 @@ export class CameraAlignmentControl {
     if (!this.closed) this.timer = setTimeout(() => this.poll(), 2000);
   }
   async start(mode) {
+    const payload = {mode};
+    if (mode === 'aruco') {
+      const size = this.root.querySelector('#camera-aruco-size'), id = this.root.querySelector('#camera-aruco-id');
+      if (!size.reportValidity() || !id.reportValidity()) return;
+      payload.marker_size_mm = Number(size.value);
+      payload.marker_id = Number(id.value);
+    }
     if (this.sending || !await this.confirm('Put the arm in Hold and keep all cameras and objects still. The preview will pause while Godot aligns the cameras. Camera and arm calibration will be backed up first. Continue?')) return;
     this.sending = true;
     this.render({message:'Backing up calibration and requesting Godot alignment…'});
     try {
       const response = await this.request('/api/v1/camera-alignment', {
-        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode})
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
       });
       if (!response.ok) {
         const text = await response.text();

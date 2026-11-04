@@ -64,3 +64,12 @@ def test_acknowledgement_and_timeout_never_replay_commands(alignment):
     alignment.pending['sent']-=7
     assert 'did not acknowledge' in alignment.status()['message']
     assert len(sent)==2
+
+
+def test_aruco_mm_is_forwarded_exactly_and_invalid_sizes_do_not_start(alignment):
+    for size in [None, True, '150', 0, 19, 1001, float('nan')]:
+        with pytest.raises(ValueError):alignment.start('aruco','idle',{},lambda _:pytest.fail('must not send'),size)
+    sent=[]
+    alignment.start('aruco','idle',{},sent.append,123.4,7)
+    packet=json.loads(sent[0])
+    assert packet['mode']=='aruco' and packet['marker_size_mm']==123.4 and packet['marker_id']==7
