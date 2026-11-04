@@ -49,3 +49,14 @@ def test_arm_mask_buffer_persists_with_finite_bounds():
     for value in [True, '25', float('nan'), float('inf')]:
         with pytest.raises(ValueError):
             handler.validate_site_settings({'robot_overlay_body_buffer_mm': value})
+
+
+@pytest.mark.parametrize('key,maximum', [('robot_overlay_claw_opacity', 1), ('robot_overlay_claw_buffer_mm', 50)])
+def test_claw_settings_persist_with_independent_bounds(key, maximum):
+    handler = LanRemoteHandler.__new__(LanRemoteHandler)
+    handler.server = SimpleNamespace(robot_operator=load_robot_operator('disabled'))
+    for value, expected in [(0, 0), (maximum / 2, maximum / 2), (maximum * 2, maximum), (-1, 0)]:
+        assert handler.validate_site_settings({key: value})[key] == expected
+    for value in [True, '25', float('nan'), float('inf')]:
+        with pytest.raises(ValueError):
+            handler.validate_site_settings({key: value})

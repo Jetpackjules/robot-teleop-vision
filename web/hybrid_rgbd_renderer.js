@@ -152,6 +152,8 @@ const state = {
     mesh_preview_enabled: false,
     robot_overlay_enabled: true,
     robot_overlay_scope: "full",
+    robot_overlay_claw_opacity: 1,
+    robot_overlay_claw_buffer_mm: 0,
     robot_overlay_body_opacity: 1,
     robot_overlay_body_buffer_mm: 0,
     robot_overlay_style: "alignment",
@@ -1112,7 +1114,7 @@ function drawCameraGuides(viewProjection) {
 
 function robotLinkVisible(name) {
   const claw = (state.robotRenderer.endEffectorLinks || []).includes(name);
-  return claw || (state.settings.robot_overlay_scope !== "claw" && state.settings.robot_overlay_body_opacity > 0);
+  return (claw && state.settings.robot_overlay_claw_opacity > 0) || (!claw && state.settings.robot_overlay_scope !== "claw" && state.settings.robot_overlay_body_opacity > 0);
 }
 
 function raycastRobotOverlay(ray,limit=Infinity) {
@@ -1162,7 +1164,7 @@ function drawRobotOverlay(viewProjection) {
     for (const [name, primitives] of Object.entries(state.robotMeshes)) {
       if (!robotLinkVisible(name)) continue;
       const claw = (state.robotRenderer.endEffectorLinks || []).includes(name);
-      const opacity = claw ? 1 : state.settings.robot_overlay_body_opacity;
+      const opacity = claw ? state.settings.robot_overlay_claw_opacity : state.settings.robot_overlay_body_opacity;
       if (pass === 'opaque' && opacity < 1 || pass === 'ghost' && opacity >= 1) continue;
       const globalMatrix = transformDictionaryMatrix(state.robotTransforms[name]);
       if (!globalMatrix) continue;
@@ -1211,7 +1213,7 @@ function drawRobotOverlay(viewProjection) {
     gl.disable(gl.CULL_FACE);
     gl.depthMask(true);
     drawLinks(false, 'opaque');
-    if (state.settings.robot_overlay_body_opacity > 0 && state.settings.robot_overlay_body_opacity < 1) {
+    if ([state.settings.robot_overlay_body_opacity, state.settings.robot_overlay_claw_opacity].some(opacity => opacity > 0 && opacity < 1)) {
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.depthMask(false);
@@ -1242,9 +1244,9 @@ function robotMaskCapsules() {
     const start = transformDictionaryMatrix(state.robotTransforms[names[index]]);
     const end = transformDictionaryMatrix(state.robotTransforms[names[index + 1]]);
     if (!start || !end) return null;
-    // Capsules belong to their starting link; never expand the claw capsule.
+    // Each link uses its independently controlled visual mask buffer.
     const claw = (state.robotRenderer.endEffectorLinks || []).includes(names[index]);
-    const radius = radii[index] + (claw ? 0 : state.settings.robot_overlay_body_buffer_mm / 1000);
+    const radius = radii[index] + (claw ? state.settings.robot_overlay_claw_buffer_mm : state.settings.robot_overlay_body_buffer_mm) / 1000;
     starts.set([start[12], start[13], start[14], radius], index * 4);
     ends.set([end[12], end[13], end[14], radius], index * 4);
   }
@@ -3651,6 +3653,10 @@ export function setGodotHybridViewSettings(settings = {}) {
       ? overlayStyle : state.settings.robot_overlay_style,
     robot_overlay_scope: ["full", "claw"].includes(settings.robot_overlay_scope)
       ? settings.robot_overlay_scope : state.settings.robot_overlay_scope,
+    robot_overlay_claw_opacity: Number.isFinite(settings.robot_overlay_claw_opacity)
+      ? clamp(settings.robot_overlay_claw_opacity, 0, 1) : state.settings.robot_overlay_claw_opacity,
+    robot_overlay_claw_buffer_mm: Number.isFinite(settings.robot_overlay_claw_buffer_mm)
+      ? clamp(settings.robot_overlay_claw_buffer_mm, 0, 50) : state.settings.robot_overlay_claw_buffer_mm,
     robot_overlay_body_buffer_mm: Number.isFinite(settings.robot_overlay_body_buffer_mm)
       ? clamp(settings.robot_overlay_body_buffer_mm, 0, 50) : state.settings.robot_overlay_body_buffer_mm,
     robot_overlay_body_opacity: Number.isFinite(settings.robot_overlay_body_opacity)

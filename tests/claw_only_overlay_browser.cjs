@@ -68,7 +68,20 @@ const server = createTestServer();
       window.setGodotHybridViewSettings({robot_overlay_body_opacity:0});
       if(render('full')!==claw)throw Error('Zero body opacity must keep only the solid claw');
       if(!p.robotMaskCapsules())throw Error('Invisible body lost its full-arm point mask');
-      window.setGodotHybridViewSettings({robot_overlay_body_opacity:1});
+      window.setGodotHybridViewSettings({robot_overlay_body_opacity:1,robot_overlay_claw_opacity:.4});
+      alphas.length=0;
+      if(render('full')!==all)throw Error('Transparent claw lost primitives');
+      if(!alphas.some(a=>Math.abs(a-.4)<1e-5)||!alphas.some(a=>a===1))throw Error('Claw transparency changed body opacity');
+      if(!gl.getParameter(gl.DEPTH_WRITEMASK)||gl.isEnabled(gl.BLEND))throw Error('Claw transparency leaked GL state');
+      window.setGodotHybridViewSettings({robot_overlay_claw_opacity:0});
+      if(render('claw')!==0)throw Error('Zero claw opacity still draws a claw');
+      window.setGodotHybridViewSettings({robot_overlay_claw_opacity:1,robot_overlay_claw_buffer_mm:25});
+      const clawBuffered=p.robotMaskCapsules();
+      for(let i=0;i<state.robotRenderer.maskChain.radii.length;i++){
+        const isClaw=state.robotRenderer.endEffectorLinks.includes(state.robotRenderer.maskChain.names[i]);
+        if(Math.abs(clawBuffered.starts[4*i+3]-fullMask.starts[4*i+3]-(isClaw?.025:0))>1e-6)throw Error('Claw buffer changed body mask');
+      }
+      window.setGodotHybridViewSettings({robot_overlay_claw_buffer_mm:0,robot_overlay_body_opacity:1,robot_overlay_scope:'full'});
       window.setGodotHybridViewSettings({robot_overlay_scope:'invalid'});
       if(state.settings.robot_overlay_scope!=='full')throw Error('Invalid scope replaced a valid mode');
       if(JSON.stringify(state.robotTransforms)!==initial)throw Error('Rendering scope changed calibrated transforms');
