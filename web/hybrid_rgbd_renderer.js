@@ -1211,8 +1211,8 @@ function drawRobotOverlay(viewProjection) {
 }
 
 function robotMaskCapsules() {
-  // Keep the real arm and claw visible while testing end-effector alignment.
-  if (state.settings.robot_overlay_scope === "claw") return null;
+  // Visibility scope affects model drawing only. Occlusion always uses the
+  // calibrated full-arm chain, including links hidden by claw-only mode.
   // Keep camera geometry visible until every replacement model is available.
   // A failed asset download must not leave a masked hole in the real arm.
   if (Object.keys(state.robotRenderer.modelUrls || {}).some(name => !state.robotMeshes[name]?.length)) return null;

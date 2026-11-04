@@ -282,7 +282,7 @@ class So101WebModule {
   }
 
   syncOverlayScopeControls() {
-    element("so101-overlay-occlusion-enabled").disabled = element("so101-overlay-scope").value === "claw";
+    element("so101-overlay-occlusion-enabled").disabled = false;
   }
 
   manualPayload() {
