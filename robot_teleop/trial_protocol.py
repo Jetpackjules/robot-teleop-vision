@@ -7,7 +7,7 @@ TASKS = {
     'single_block': {'instruction': 'Free exploration: practise the view and arm controls', 'success_metric': 'practice'},
     'count_blocks': {'instruction': 'Put as many blocks in the cup as possible', 'success_metric': 'block_count'},
     'custom': {'instruction': 'Balance test: move the objects into the cup', 'success_metric': 'pass_fail'},
-    'tray_transfer_v1': {'instruction': 'Move the fruit between the two trays. Count each placement with a full release; there and back counts as two.',
+    'tray_transfer_v1': {'instruction': 'Move as many objects as possible to the other tray. Fully release each one.',
                          'success_metric': 'block_count', 'time_limit_seconds': 60},
 }
 LEGACY_TASKS = {'single_block', 'count_blocks', 'custom'}

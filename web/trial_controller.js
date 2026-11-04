@@ -10,7 +10,7 @@ const PRACTICE_HINTS = {
 const TASKS = {single_block: {instruction: DEFAULT_TASK, seconds: 75, success_metric: 'practice'},
   count_blocks: {instruction: 'Put as many blocks in the cup as possible', seconds: 75, success_metric: 'block_count'},
   custom: {instruction: 'Balance test: move the objects into the cup', seconds: 75, success_metric: 'pass_fail'},
-  [TRANSFER_TASK]: {instruction: 'Move the fruit between the two trays. Count each placement with a full release; there and back counts as two.', seconds: 60, success_metric: 'block_count'}};
+  [TRANSFER_TASK]: {instruction: 'Move as many objects as possible to the other tray. Fully release each one.', seconds: 60, success_metric: 'block_count'}};
 const PROTOCOL_KEY = 'robotTeleopTrialProtocol.v1';
 const defaultMetric = id => ['count_blocks', TRANSFER_TASK].includes(id) ? 'block_count' : 'pass_fail';
 function configuredTasks() {

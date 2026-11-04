@@ -38,7 +38,7 @@ let logs='';server.stderr.on('data',d=>logs+=d);
  await page.locator('#trial-action').click();await page.waitForFunction(()=>window.testTrials.state.prepared&&!window.testTrials.setupPending);
  for(let i=0;i<6;i++){
   await page.waitForFunction(index=>window.testTrials.state.index===index&&!document.getElementById('trial-action').disabled,i);
-  assert.match(await page.locator('#trial-task').textContent(),/^Task 1: Move the fruit/);
+  assert.match(await page.locator('#trial-task').textContent(),/^Task 1: Move as many objects/);
   await page.locator('#trial-action').click();
   if(i!==1){await page.waitForFunction(()=>window.testTrials.recording.status?.state==='recording'&&window.testTrials.recording.status.frames>=3);await page.locator('#trial-action').click();}
   await page.waitForFunction(()=>document.getElementById('trial-result-dialog').open);
