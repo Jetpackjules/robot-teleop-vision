@@ -471,6 +471,12 @@
           <label>Point detail<select id="point-preview-enabled"><option value="0">Full detail</option><option value="-2">Balanced mesh (compressed)</option><option value="-1">All native points (squares)</option><option value="40000">40k points per camera</option><option value="20000">20k points per camera</option></select></label>
           <p id="point-preview-help" class="helper-text">All native points uses the same coloured squares as 20k/40k, with every valid sample in the workspace crop. Balanced mesh uses fewer depth samples and compressed RGB. Quality and Low latency can be combined with any point detail. Preview only; capture and recording stay unchanged.</p>
           <p id="point-counts" class="helper-text">Waiting for point counts…</p>
+          <fieldset id="squares-fusion-controls">
+            <legend>Cross-camera squares fusion · experimental</legend>
+            <label class="toggle-row"><span>Fuse RGB and filter conflicting depths</span><input id="squares-fusion-enabled" type="checkbox"></label>
+            <p class="helper-text">Shares valid colour across matching surfaces and rejects depth contradictions. Uses fresh visible cameras only. Off keeps the original fast squares renderer. Preview only; calibration and recordings stay unchanged.</p>
+            <p id="squares-fusion-status" class="helper-text" role="status">Off.</p>
+          </fieldset>
           <fieldset id="point-cleanup-controls">
             <legend>Point cleanup</legend>
             <label class="toggle-row"><span>Enable point cleanup</span><input id="point-cleanup-enabled" type="checkbox"></label>

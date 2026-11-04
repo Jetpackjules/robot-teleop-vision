@@ -60,3 +60,13 @@ def test_claw_settings_persist_with_independent_bounds(key, maximum):
     for value in [True, '25', float('nan'), float('inf')]:
         with pytest.raises(ValueError):
             handler.validate_site_settings({key: value})
+
+
+def test_squares_fusion_is_an_optional_persistent_boolean():
+    handler=LanRemoteHandler.__new__(LanRemoteHandler)
+    handler.server=SimpleNamespace(robot_operator=load_robot_operator('disabled'))
+    assert 'squares_fusion_enabled' not in handler.validate_site_settings({})
+    for enabled in [False,True]:
+        assert handler.validate_site_settings({'squares_fusion_enabled':enabled})['squares_fusion_enabled'] is enabled
+    for bad in [1,'true',None]:
+        with pytest.raises(ValueError):handler.validate_site_settings({'squares_fusion_enabled':bad})

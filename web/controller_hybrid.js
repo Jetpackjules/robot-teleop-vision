@@ -10,6 +10,13 @@
 
     const robotModule = await robotModuleReady;
     const cameraAlignmentControl = new CameraAlignmentControl(document.getElementById("camera-alignment-controls"));
+    const fusionStatusTimer=setInterval(()=>{
+      const target=document.getElementById('squares-fusion-status');
+      if(!target)return;
+      const fusion=window.getGodotHybridRendererStatus?.()?.pointPreview?.fusion;
+      target.textContent=fusion?.active?`GPU fusion active · ${fusion.cameras} cameras`:fusion?.message||'Off.';
+    },1000);
+    window.addEventListener('pagehide',()=>clearInterval(fusionStatusTimer));
     window.addEventListener("pagehide", () => cameraAlignmentControl.close());
     const recordingRoot = document.getElementById('episode-recording');
     const episodeRecording = recordingRoot ? new EpisodeRecordingControl(recordingRoot,
@@ -26,6 +33,7 @@
     const pointPreviewToggle = document.getElementById('point-preview-enabled');
     const pointPreviewActive=()=>pointPreviewToggle.value==='-1'||Number(pointPreviewToggle.value)>0;
     const selectedPointBudget=()=>pointPreviewToggle.value==='-1'?0:Number(pointPreviewToggle.value)===40000?40000:20000;
+    const squaresFusionEnabled=document.getElementById('squares-fusion-enabled');
     const cleanupEnabled=document.getElementById('point-cleanup-enabled');
     const cleanupSupport=document.getElementById('point-cleanup-support');
     const cleanupRadius=document.getElementById('point-cleanup-radius');
@@ -47,13 +55,15 @@
     const applyPointOptions=()=>{
       blendControls.hidden=displayModeSelect.value!=='blendpcr'||pointPreviewActive();
       document.getElementById('point-cleanup-controls').hidden=!pointPreviewActive() || displayModeSelect.value==='rgb_camera';
+      document.getElementById('squares-fusion-controls').hidden=!pointPreviewActive() || displayModeSelect.value==='rgb_camera';
       updateCleanupControls();
       document.getElementById('blend-depth-value').textContent=Number(blendDepth.value).toFixed(1)+'\u00d7';
       document.getElementById('blend-support-value').textContent=blendSupport.value;
       document.getElementById('blend-edge-value').textContent=blendEdge.value+' mm';
       workspaceStreamControl.update({...cleanupSettings(),rgbd_client_id:window.robotTeleopPageId,point_preview_enabled:pointPreviewActive(),point_preview_budget:selectedPointBudget(),display_mode:displayModeSelect.value});
-      window.setGodotHybridViewSettings?.({...cleanupSettings(),point_preview_enabled:pointPreviewActive(),mesh_preview_enabled:pointPreviewToggle.value==='-2',point_preview_budget:selectedPointBudget(),blendpcr_depth_tolerance:Number(blendDepth.value),blendpcr_support:Number(blendSupport.value),blendpcr_max_edge:Number(blendEdge.value)/1000});
+      window.setGodotHybridViewSettings?.({squares_fusion_enabled:squaresFusionEnabled.checked,...cleanupSettings(),point_preview_enabled:pointPreviewActive(),mesh_preview_enabled:pointPreviewToggle.value==='-2',point_preview_budget:selectedPointBudget(),blendpcr_depth_tolerance:Number(blendDepth.value),blendpcr_support:Number(blendSupport.value),blendpcr_max_edge:Number(blendEdge.value)/1000});
     };
+    squaresFusionEnabled.addEventListener('change',()=>{applyPointOptions();sendViewSettings();});
     applyPointOptions();
     const rgbCameraControl = document.getElementById("rgb-camera-control");
     const rgbCameraSelect = document.getElementById("rgb-camera-select");
@@ -243,6 +253,7 @@
         rgbd_client_id:window.robotTeleopPageId,
         point_preview_enabled:pointPreviewActive(),point_preview_budget:selectedPointBudget(),
         point_preview_detail:Number(pointPreviewToggle.value),
+        squares_fusion_enabled:squaresFusionEnabled.checked,
         ...cleanupSettings(),
       workspace_stream_crop_enabled:!document.body.classList.contains('workspace-editing'),
         // Mouse navigation and click-to-focus are always available. Head
@@ -308,7 +319,7 @@
       // the optional tracking/WebRTC transport.
       delete remotePayload.rgbd_client_id;
       // Cleanup belongs only to this preview until the explicit host Save.
-      for(const key of ['point_cleanup_enabled','point_cleanup_support','point_cleanup_radius_mm']) delete remotePayload[key];
+      for(const key of ['squares_fusion_enabled','point_cleanup_enabled','point_cleanup_support','point_cleanup_radius_mm']) delete remotePayload[key];
       return window.sendGodotViewSettings && window.sendGodotViewSettings(remotePayload);
     }
 
@@ -328,6 +339,7 @@
     function restoreViewSettings(savedInput = null, {preferLastTable = false} = {}) {
       const localSaved = localSavedViewSettings();
       const saved = savedInput && Object.keys(savedInput).length ? { ...localSaved, ...savedInput } : localSaved;
+      squaresFusionEnabled.checked=saved.squares_fusion_enabled===true;
       cleanupEnabled.checked=saved.point_cleanup_enabled===true;
       cleanupSupport.value=Number.isInteger(saved.point_cleanup_support)&&saved.point_cleanup_support>0?Math.min(16,saved.point_cleanup_support):3;
       cleanupRadius.value=Math.max(1,Math.min(100,Number(saved.point_cleanup_radius_mm)||15));

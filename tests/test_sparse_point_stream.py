@@ -60,7 +60,7 @@ class SparsePointStreamTests(unittest.TestCase):
         y,x=np.divmod(indices,depth.shape[1])
         interior=(x>0)&(x<depth.shape[1]-1)&(y>0)&(y<depth.shape[0]-1)
         np.testing.assert_array_equal(colors[interior],rgb[y[interior],x[interior]])
-        self.assertNotIn('color_projection',camera)
+        self.assertIn('color_projection',camera)
 
     def test_empty_and_invalid(self):
         with self.assertRaises(ValueError):sparse_point_packet(b'bad',20000)

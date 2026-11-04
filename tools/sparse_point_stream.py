@@ -78,7 +78,7 @@ def _encode_camera(camera, color_bytes, depth_bytes, budget, cropper=None, volum
         previous = cache.get(identity)
     if previous is not None and previous[0] == key:
         camera.update(previous[2])
-        camera.pop('color_projection',None)
+        # Retain calibrated RGB coverage for optional GPU squares fusion.
         return previous[1]
     encoded = _encode_camera_uncached(camera,color_bytes,depth_bytes,budget,cropper,volumes)
     updates = {k:camera[k] for k in ('depth_encoding','color_encoding','color_space','color_length','depth_length','color_width','color_height','preview_budget','preview_count','preview_source_points','depth_exact','preview_cleanup_enabled','preview_cleanup_kind','preview_cleanup_support','preview_cleanup_radius_mm','preview_cleanup_input_points','preview_cleanup_removed')}
@@ -115,7 +115,7 @@ def _encode_camera_uncached(camera, color_bytes, depth_bytes, budget, cropper=No
                   color_width=camera["width"], color_height=camera["height"],
                   preview_budget=budget, preview_count=count, preview_source_points=total,
                   depth_exact=True)
-    camera.pop("color_projection", None)
+    # Retain calibrated RGB coverage for optional GPU squares fusion.
     return encoded
 
 

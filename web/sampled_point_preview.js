@@ -1,3 +1,4 @@
+import {SquaresCameraFusion,SQUARES_FUSION_SHADER,bindSquareSamples} from './squares_camera_fusion.js';
 import {CLAW_MASK_SHADER,bindClawMeshMask} from './claw_mesh_mask.js';
 import {sampleDepthPoints} from './point_preview_sampling.js?v=20261027_compact_gpu';
 import {compileGpuProgram} from './hybrid_camera_quality.js?v=20261027_compact_gpu';
@@ -18,6 +19,9 @@ uniform int u_mask_enabled;uniform vec4 u_mask_a[6];uniform vec4 u_mask_b[6];
 out vec3 v_color;flat out int v_valid;
 ${CLAW_MASK_SHADER}
 ${COLOR_PROJECTION_SHADER}
+#ifdef SQUARES_FUSION
+${SQUARES_FUSION_SHADER}
+#endif
 ${MODELED_WORKSPACE_SHADER}
 void main(){
   v_valid=0;v_color=vec3(.55);gl_Position=vec4(2,2,2,1);gl_PointSize=1.;
@@ -36,6 +40,10 @@ void main(){
   }
   vec4 clip=u_view_projection*vec4(world,1);if(clip.w<=0.)return;
   vec4 color=u_compact==1?vec4(a_color,1):camera_sample_color(u_color,local,pixel);
+#ifdef SQUARES_FUSION
+  if(u_compact==1)color.a=camera_has_color(local)?1.:0.;
+  if(!fuse_square_surface(world,local,color))return;
+#endif
   v_color=u_gray==1?vec3(.6):color.a>0.?color.rgb:vec3(.55);
   gl_Position=clip;gl_PointSize=clamp(u_point_scale/clip.w,1.,u_max_point_size);v_valid=1;
 }`;
@@ -67,7 +75,7 @@ function compactPacket(sample,budget){
 export class SampledPointPreview {
   constructor(gl) {
     this.gl=gl;this.entries=new Map();this.vao=gl.createVertexArray();
-    this.program=compileGpuProgram(gl,VERTEX,FRAGMENT);this.u={};
+    this.program=compileGpuProgram(gl,VERTEX,FRAGMENT);this.u={};this.fusion=null;this.fusedProgram=null;
     this.emptyDepth=dummyTexture(gl,gl.R16UI,gl.RED_INTEGER,gl.UNSIGNED_SHORT,new Uint16Array(1));
     this.emptyColor=dummyTexture(gl,gl.RGBA8,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([0,0,0,255]));
     for(const name of ['u_compact','u_depth','u_color','u_size','u_intrinsics','u_model','u_view_projection',
@@ -78,20 +86,10 @@ export class SampledPointPreview {
   dropCamera(camera) {const entry=this.entries.get(camera);if(entry){this.gl.deleteBuffer(entry.buffer);this.entries.delete(camera);}}
   render(cameras,view,mask,settings) {
     const cleanup={input:0,removed:0,matches:true};
-    const gl=this.gl,u=this.u,counts={},sourceCounts={};let selectionMs=0,gpuUploadBytes=0,compactCameras=0;const budget=settings.point_preview_budget===0?0:settings.point_preview_budget===40000?40000:20000;
-    gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.bindVertexArray(this.vao);gl.useProgram(this.program);bindClawMeshMask(gl,this.program);
-    gl.viewport(0,0,view.width,view.height);gl.enable(gl.DEPTH_TEST);gl.depthMask(true);gl.depthFunc(gl.LEQUAL);
-    gl.disable(gl.BLEND);gl.disable(gl.CULL_FACE);
-    gl.uniform1i(u.u_depth,0);gl.uniform1i(u.u_color,1);gl.uniform1i(u.u_gray,settings.depth_only_enabled===true?1:0);
-    gl.uniformMatrix4fv(u.u_view_projection,false,view.viewProjection);
-    // Match Three.js PointsMaterial's 0.005 size and viewport attenuation.
-    gl.uniform1f(u.u_point_scale,.005*view.height*.5);gl.uniform1f(u.u_max_point_size,this.maxPointSize);
-    gl.uniform1i(u.u_mask_enabled,mask?1:0);
-    if(mask){gl.uniform4fv(u['u_mask_a[0]'],mask.starts);gl.uniform4fv(u['u_mask_b[0]'],mask.ends);}
-    bindModeledWorkspace(gl,this.program,settings);
-    try {
-      for(const camera of cameras) {
-        if(view.now-camera.lastUpdateMs>=1000)continue;
+    const gl=this.gl,counts={},sourceCounts={};let selectionMs=0,gpuUploadBytes=0,compactCameras=0;const budget=settings.point_preview_budget===0?0:settings.point_preview_budget===40000?40000:20000;
+    const visible=cameras.filter(camera=>view.now-camera.lastUpdateMs<1000);
+    gl.bindVertexArray(this.vao);
+    for(const camera of visible){
         let entry=this.entries.get(camera);
         if(!entry){entry={buffer:gl.createBuffer()};this.entries.set(camera,entry);}
         if(entry.depth!==camera.depth||entry.revision!==camera.uploadRevision||entry.budget!==budget) {
@@ -103,7 +101,33 @@ export class SampledPointPreview {
           gl.bindBuffer(gl.ARRAY_BUFFER,entry.buffer);gl.bufferData(gl.ARRAY_BUFFER,bytes,gl.STREAM_DRAW);gpuUploadBytes+=bytes.byteLength;
           entry.depth=camera.depth;entry.revision=camera.uploadRevision;entry.budget=budget;
           selectionMs+=performance.now()-started;
-        }else gl.bindBuffer(gl.ARRAY_BUFFER,entry.buffer);
+        }
+    }
+    let fusionStatus={active:false,message:'Off.'};
+    if(settings.squares_fusion_enabled===true){
+      try{
+        this.fusion??=new SquaresCameraFusion(gl);
+        fusionStatus=this.fusion.update(visible,this.entries,this.emptyDepth,this.emptyColor);
+        if(fusionStatus.active&&!this.fusedProgram){
+          this.fusedProgram=compileGpuProgram(gl,VERTEX.replace('#version 300 es','#version 300 es\n#define SQUARES_FUSION'),FRAGMENT);
+          this.fusedU={};for(const name of Object.keys(this.u))this.fusedU[name]=gl.getUniformLocation(this.fusedProgram,name);
+        }
+      }catch(error){fusionStatus={active:false,message:'Fusion unavailable: '+error.message};}
+    }
+    const program=fusionStatus.active?this.fusedProgram:this.program,u=fusionStatus.active?this.fusedU:this.u;
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.bindVertexArray(this.vao);gl.useProgram(program);bindClawMeshMask(gl,program);
+    gl.viewport(0,0,view.width,view.height);gl.enable(gl.DEPTH_TEST);gl.depthMask(true);gl.depthFunc(gl.LEQUAL);
+    gl.disable(gl.BLEND);gl.disable(gl.CULL_FACE);
+    gl.uniform1i(u.u_depth,0);gl.uniform1i(u.u_color,1);gl.uniform1i(u.u_gray,settings.depth_only_enabled===true?1:0);
+    gl.uniformMatrix4fv(u.u_view_projection,false,view.viewProjection);
+    const pointScale=Number.isFinite(settings.square_point_scale)?Math.max(.25,Math.min(4,settings.square_point_scale)):1;
+    gl.uniform1f(u.u_point_scale,.005*view.height*.5*pointScale);gl.uniform1f(u.u_max_point_size,this.maxPointSize);
+    gl.uniform1i(u.u_mask_enabled,mask?1:0);
+    if(mask){gl.uniform4fv(u['u_mask_a[0]'],mask.starts);gl.uniform4fv(u['u_mask_b[0]'],mask.ends);}
+    bindModeledWorkspace(gl,program,settings);
+    try {
+      for(const camera of visible) {
+        const entry=this.entries.get(camera);
         const meta=camera.metadata;
         cleanup.input+=Number(meta.preview_cleanup_input_points??entry.count);
         cleanup.removed+=Number(meta.preview_cleanup_removed||0);
@@ -112,24 +136,20 @@ export class SampledPointPreview {
           && meta.preview_cleanup_support===settings.point_cleanup_support
           && meta.preview_cleanup_radius_mm===settings.point_cleanup_radius_mm;
         const id=String(camera.metadata.id);counts[id]=entry.count;sourceCounts[id]=entry.valid;
-        gl.enableVertexAttribArray(0);gl.vertexAttribIPointer(0,1,gl.UNSIGNED_INT,0,0);gl.vertexAttribDivisor(0,0);
+        bindSquareSamples(gl,entry,camera);
         gl.uniform1i(u.u_compact,entry.compact?1:0);
-        if(entry.compact){
-          compactCameras++;
-          gl.enableVertexAttribArray(1);gl.vertexAttribIPointer(1,1,gl.UNSIGNED_SHORT,0,entry.count*4);gl.vertexAttribDivisor(1,0);
-          gl.enableVertexAttribArray(2);gl.vertexAttribPointer(2,3,gl.UNSIGNED_BYTE,true,0,entry.count*6);gl.vertexAttribDivisor(2,0);
-        }else{gl.disableVertexAttribArray(1);gl.disableVertexAttribArray(2);}
-
+        if(entry.compact)compactCameras++;
+        if(fusionStatus.active)this.fusion.bind(program,camera,view.now);
         gl.uniform2i(u.u_size,camera.width,camera.height);gl.uniform4fv(u.u_intrinsics,camera.intrinsicsArray);
-        gl.uniformMatrix4fv(u.u_model,false,camera.modelMatrix);bindColorProjection(gl,this.program,camera);
+        gl.uniformMatrix4fv(u.u_model,false,camera.modelMatrix);bindColorProjection(gl,program,camera);
         gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,entry.compact?this.emptyDepth:camera.depthTexture);
         gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,entry.compact?this.emptyColor:camera.colorTexture);
         gl.drawArrays(gl.POINTS,0,entry.count);
       }
       for(const [camera,entry]of this.entries)if(!cameras.includes(camera)){gl.deleteBuffer(entry.buffer);this.entries.delete(camera);}
     }finally{gl.bindVertexArray(null);}
-    return {budget,counts,sourceCounts,cleanup,total:Object.values(counts).reduce((a,b)=>a+b,0),selectionMs,gpuUploadBytes,compactCameras};
+    return {budget,counts,sourceCounts,cleanup,total:Object.values(counts).reduce((a,b)=>a+b,0),selectionMs,gpuUploadBytes,compactCameras,fusion:fusionStatus};
   }
   dispose(){const gl=this.gl;for(const entry of this.entries.values())gl.deleteBuffer(entry.buffer);
-    this.entries.clear();gl.deleteTexture(this.emptyDepth);gl.deleteTexture(this.emptyColor);gl.deleteVertexArray(this.vao);gl.deleteProgram(this.program);}
+    this.entries.clear();this.fusion?.dispose();if(this.fusedProgram)gl.deleteProgram(this.fusedProgram);gl.deleteTexture(this.emptyDepth);gl.deleteTexture(this.emptyColor);gl.deleteVertexArray(this.vao);gl.deleteProgram(this.program);}
 }

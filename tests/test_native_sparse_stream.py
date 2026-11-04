@@ -58,6 +58,7 @@ class NativeSparseTests(unittest.TestCase):
             depths=np.frombuffer(raw,dtype='<u2',count=count,offset=count*4)
             colors=np.frombuffer(raw,dtype=np.uint8,offset=count*6).reshape(count,3)
             expected=np.flatnonzero(snapshot['depth'])
+            self.assertEqual(camera['color_projection'],snapshot['projection'])
             self.assertEqual(camera['preview_budget'],0)
             self.assertEqual(count,camera['preview_source_points'])
             self.assertGreater(count,40000)

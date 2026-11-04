@@ -129,6 +129,7 @@ CORE_PERSISTENT_VIEW_SETTINGS = frozenset(
         "display_mode",
         "stream_preset",
         "point_preview_detail",
+        "squares_fusion_enabled",
         "point_cleanup_enabled",
         "point_cleanup_radius_mm",
         "point_cleanup_support",
@@ -4711,6 +4712,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 raise ValueError(f"{key} must be finite")
             packet[key] = max(minimum, min(maximum, float(value)))
         boolean_settings = {
+            "squares_fusion_enabled",
             "point_cleanup_enabled",
             "inspect_enabled",
             "dolly_enabled",

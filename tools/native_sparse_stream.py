@@ -157,7 +157,7 @@ def encode_native_camera(snapshot, camera, settings, cropper, robot=None, viewer
         metadata['preview_predictor']=predictor
     packed=compress_depth(raw)
     metadata.pop('_viewer',None)
-    metadata.pop('color_projection',None)
+    # Retain colour projection: the GPU derives an explicit validity flag.
     metadata.update(sequence=snapshot['frame'],capture_unix_ms=snapshot['stamp'],
                     geometry_capture_unix_ms=snapshot['stamp'],color_encoding='sparse_rgb8',
                     depth_encoding=ENCODING,color_space='aligned_depth',color_length=0,
