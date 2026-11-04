@@ -23,6 +23,7 @@
 #if defined(REALSENSE_DIRECT_ENABLED) && defined(REALSENSE_NATIVE_CALIBRATION_ENABLED)
 #include <librealsense2/rs.hpp>
 #include "charuco_pose.h"
+#include "charuco_depth_anchor.h"
 #if __has_include(<opencv2/objdetect/aruco_detector.hpp>)
 #include <opencv2/objdetect/aruco_detector.hpp>
 #define REALSENSE_MODERN_ARUCO
@@ -2515,6 +2516,7 @@ Dictionary RealSensePairCalibrator::get_result() const {
     std::lock_guard<std::mutex> lock(state_mutex);
     Dictionary payload;
     payload["ready"] = result.ready;
+    payload["depth_plane_anchored"] = result.depth_plane_anchored;
     payload["ok"] = result.ok;
     payload["method"] = String(result.method.c_str());
     payload["status"] = String(result.status.c_str());
@@ -2548,6 +2550,9 @@ Dictionary RealSensePairCalibrator::get_result() const {
     details["refine_translation_m"] = result.refine_translation_m;
     details["refine_rotation_deg"] = result.refine_rotation_deg;
     details["marker_reprojection_px"] = result.marker_reprojection_px;
+    details["depth_plane_anchored"] = result.depth_plane_anchored;
+    details["reference_depth_plane_rms_m"] = result.reference_depth_plane_rms_m;
+    details["target_depth_plane_rms_m"] = result.target_depth_plane_rms_m;
     details["marker_reference_frames"] = result.marker_reference_frames;
     details["marker_target_frames"] = result.marker_target_frames;
     if (result.has_marker_reference_transform) {
@@ -2652,6 +2657,24 @@ void RealSensePairCalibrator::run(Options p_options) {
         set_status("Averaging ArUco poses in depth-camera coordinates");
         cv::Matx44d marker_to_reference = average_transforms(reference.marker_to_depth);
         cv::Matx44d marker_to_target = average_transforms(target.marker_to_depth);
+        if (p_options.mode == "charuco") {
+            teleop_charuco::DepthAnchorStats ref_stats,target_stats;
+            cv::Matx44d ref_pose,target_pose;
+            const double width=p_options.charuco_squares_x*p_options.charuco_square_m;
+            const double height=p_options.charuco_squares_y*p_options.charuco_square_m;
+            const auto anchor=[&](const Capture &capture,const cv::Matx44d &pose,cv::Matx44d &out,teleop_charuco::DepthAnchorStats &stats){
+                const auto &k=capture.depth_intrinsics;
+                return teleop_charuco::anchor_depth_plane(capture.raw_depth_m,cv::Vec4d(k.fx,k.fy,k.ppx,k.ppy),capture.depth_to_color,pose,width,height,out,stats);
+            };
+            if(!anchor(reference,marker_to_reference,ref_pose,ref_stats)||!anchor(target,marker_to_target,target_pose,target_stats)){
+                output.status="ChArUco depth plane is unreliable. Clear the board, keep it flat, and try again; previous alignment retained.";
+                finish(output);return;
+            }
+            marker_to_reference=ref_pose;marker_to_target=target_pose;
+            output.depth_plane_anchored=true;
+            output.reference_depth_plane_rms_m=ref_stats.rms_m;
+            output.target_depth_plane_rms_m=target_stats.rms_m;
+        }
         initial = marker_to_reference * marker_to_target.inv();
         const cv::Matx44d marker_to_reference_godot = cv_to_godot(marker_to_reference);
         output.has_marker_reference_transform = true;

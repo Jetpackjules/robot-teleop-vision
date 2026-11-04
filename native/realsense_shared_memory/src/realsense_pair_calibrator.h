@@ -84,6 +84,8 @@ private:
         double refine_translation_m = 0.0;
         double refine_rotation_deg = 0.0;
         double marker_reprojection_px = 0.0;
+        bool depth_plane_anchored = false;
+        double reference_depth_plane_rms_m = 0, target_depth_plane_rms_m = 0;
         int marker_reference_frames = 0;
         int marker_target_frames = 0;
         bool has_marker_reference_transform = false;

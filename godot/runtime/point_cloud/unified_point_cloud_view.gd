@@ -2927,11 +2927,11 @@ func _update_native_realsense_calibration() -> void:
 	if bool(_native_realsense_calibrator.is_running()):
 		calibration_status = "Camera rig %d/%d aligned | %s -> %s | %s" % [_native_realsense_rig.transforms.size(), _native_realsense_rig.cameras.size(), _realsense_serial(_native_realsense_calibration_target_id), _realsense_serial(_native_realsense_calibration_reference_id), str(_native_realsense_calibrator.get_status())]
 		return
-	var result: Dictionary = _native_realsense_calibrator.get_result()
+	var result: Dictionary = BoardWorldLevel.native_result(_native_realsense_calibrator.get_result())
 	result["reference_camera"] = _native_realsense_calibration_reference_id
 	result["target_camera"] = _native_realsense_calibration_target_id
 	_native_realsense_calibrator = null
-	if _native_realsense_calibration_mode in ["aruco", "charuco"] and bool(result.get("ok",false)):
+	if _native_realsense_calibration_mode in ["aruco", "charuco"] and bool(result.get("ok",false)) and not bool(result.get("depth_plane_anchored",false)):
 		result = BoardWorldLevel.correct_pose_result(result,
 			_camera_depth_pose_correction(_native_realsense_calibration_reference_id),
 			_camera_depth_pose_correction(_native_realsense_calibration_target_id))

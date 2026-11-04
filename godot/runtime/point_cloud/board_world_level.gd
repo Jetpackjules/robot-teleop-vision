@@ -2,6 +2,12 @@ extends RefCounted
 ## One common rigid transform: camera-to-camera and robot registration stay fixed.
 const Rig = preload("res://godot/runtime/point_cloud/realsense_rig_calibration.gd")
 
+static func native_result(result: Dictionary) -> Dictionary:
+	var normalized := result.duplicate(true)
+	if result.get("details") is Dictionary:
+		normalized.merge(result.details,false)
+	return normalized
+
 static func solve(transforms: Dictionary, results: Dictionary) -> Dictionary:
 	if transforms.size() < 2 or results.is_empty():
 		return {"ok":false,"message":"No measured board pose is available."}
@@ -12,7 +18,7 @@ static func solve(transforms: Dictionary, results: Dictionary) -> Dictionary:
 	var points: Array[Vector3] = []
 	var normals: Array[Vector3] = []
 	for target in results:
-		var result: Dictionary = results[target]
+		var result: Dictionary = native_result(results[target])
 		var reference := str(result.get("reference_camera", ""))
 		if not transforms.has(reference):
 			return {"ok":false,"message":"Board reference camera is missing."}

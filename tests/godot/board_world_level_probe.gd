@@ -10,6 +10,7 @@ func _initialize():
 	var result := {"reference_camera":"a","reference_marker_to_depth_godot_R":pose.R,"reference_marker_to_depth_godot_T":pose.T}
 	var solution := Level.solve(cameras,{"b":result,"c":result})
 	assert(solution.ok)
+	assert(Level.solve(cameras,{"b":{"details":result}}).ok)
 	var correction: Transform3D = solution.transform
 	assert((correction.basis*normal).distance_to(Vector3.UP)<0.00001)
 	assert(absf((correction*board.origin).y)<0.00001)
