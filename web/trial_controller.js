@@ -1,6 +1,7 @@
 const CONDITIONS = Object.freeze({fixed_rgb: 'Fixed cameras', mouse_3d: 'Mouse 3D', head_3d: 'Head tracking'});
 const DEFAULT_ORDER = Object.keys(CONDITIONS);
 const DEFAULT_TASK = 'Free exploration: practise the view and arm controls';
+const TRANSFER_TASK = 'tray_transfer_v1';
 const PRACTICE_HINTS = {
   fixed_rgb: 'Try switching cameras while moving the arm. Use the camera arrows or left/right arrow keys.',
   mouse_3d: 'Try orbiting, panning and zooming to inspect objects from different angles while moving the arm.',
@@ -8,9 +9,10 @@ const PRACTICE_HINTS = {
 };
 const TASKS = {single_block: {instruction: DEFAULT_TASK, seconds: 75, success_metric: 'practice'},
   count_blocks: {instruction: 'Put as many blocks in the cup as possible', seconds: 75, success_metric: 'block_count'},
-  custom: {instruction: 'Balance test: move the objects into the cup', seconds: 75, success_metric: 'pass_fail'}};
+  custom: {instruction: 'Balance test: move the objects into the cup', seconds: 75, success_metric: 'pass_fail'},
+  [TRANSFER_TASK]: {instruction: 'Move the fruit between the two trays. Count each placement with a full release; there and back counts as two.', seconds: 60, success_metric: 'block_count'}};
 const PROTOCOL_KEY = 'robotTeleopTrialProtocol.v1';
-const defaultMetric = id => id === 'count_blocks' ? 'block_count' : 'pass_fail';
+const defaultMetric = id => ['count_blocks', TRANSFER_TASK].includes(id) ? 'block_count' : 'pass_fail';
 function configuredTasks() {
   const tasks = structuredClone(TASKS);
   try {
@@ -19,7 +21,8 @@ function configuredTasks() {
       const value = saved?.[id];
       if (value && typeof value.instruction === 'string' && value.instruction.trim() && value.instruction.length <= 500
           && Number.isInteger(value.seconds) && value.seconds >= 30 && value.seconds <= 7200
-          && (id === 'single_block' ? value.success_metric === 'practice' : ['pass_fail', 'block_count'].includes(value.success_metric))) tasks[id] = {...value};
+          && (id === 'single_block' ? value.success_metric === 'practice' : id === TRANSFER_TASK ? value.success_metric === 'block_count'
+            : ['pass_fail', 'block_count'].includes(value.success_metric))) tasks[id] = {...value};
     }
   } catch { /* Browser storage is optional. */ }
   return tasks;
@@ -42,7 +45,8 @@ export function namedSession(base, date = new Date()) {
 }
 
 export function makeTrialPlan(state, random = Math.random) {
-  let activities = state.activitySelection === 'all' ? ['single_block', 'count_blocks', 'custom'] : [state.activitySelection];
+  let activities = state.activitySelection === 'all' ? ['single_block', TRANSFER_TASK, 'count_blocks', 'custom']
+    : state.activitySelection === 'practice_tray' ? ['single_block', TRANSFER_TASK] : [state.activitySelection];
   activities = activities.filter(id => state.tasks[id]?.instruction?.trim());
   const practice = activities.includes('single_block');
   activities = activities.filter(id => id !== 'single_block');
@@ -105,6 +109,8 @@ export class TrialController {
       this.state.tasks.single_block = {...TASKS.single_block};
       this.state.protocolVersion = 2;
     }
+    this.state.tasks[TRANSFER_TASK] ??= {...TASKS[TRANSFER_TASK]};
+    this.state.protocolVersion = 3;
     this.state.practiceSeconds ??= 60;
     byId('trial-practice-duration').value = String(this.state.practiceSeconds);
     if (!this.state.plan?.length) this.state.plan = makeTrialPlan(this.state);
@@ -119,6 +125,8 @@ export class TrialController {
       byId(`trial-task${number}-instruction`).value = this.state.tasks[id].instruction;
       byId(`trial-task${number}-metric`).value = this.state.tasks[id].success_metric || defaultMetric(id);
     }
+    byId('trial-transfer-instruction').value = this.state.tasks[TRANSFER_TASK].instruction;
+    byId('trial-transfer-duration').value = String(this.state.tasks[TRANSFER_TASK].seconds);
     if (!RENDERERS.has(this.state.renderer)) this.state.renderer = this.display.value === 'rgb_camera' ? 'independent_mesh' : this.display.value;
     byId('guided-trials').checked = this.state.guided;
     byId('trial-order').value = this.state.randomize !== false ? 'random' : this.state.order.join(',');
@@ -190,6 +198,11 @@ export class TrialController {
       });
     }
     byId('trial-save-block-count').addEventListener('click', () => this.saveResult());
+    for (const field of ['instruction', 'duration']) byId(`trial-transfer-${field}`).addEventListener('change', event => {
+      if (!event.target.reportValidity()) return;
+      this.state.tasks[TRANSFER_TASK][field === 'duration' ? 'seconds' : 'instruction'] = field === 'duration' ? event.target.valueAsNumber : event.target.value.trim();
+      this.protocolMessage = 'Changed in this browser. Save task settings on host to keep them.'; this.newSession();
+    });
     byId('trial-result-form').addEventListener('submit', event => {event.preventDefault();this.saveResult();});
     byId('trial-result-close').addEventListener('click', () => byId('trial-result-dialog').close());
     byId('trial-save-protocol').addEventListener('click', () => this.saveProtocol());
@@ -198,7 +211,7 @@ export class TrialController {
         this.duration.value = String(this.state.timeTargetSeconds);
         return;
       }
-      for (const task of Object.values(this.state.tasks)) task.seconds = this.duration.valueAsNumber;
+      for (const [id, task] of Object.entries(this.state.tasks)) if (id !== TRANSFER_TASK) task.seconds = this.duration.valueAsNumber;
       this.protocolMessage = 'Changed in this browser. Save task settings on host to keep them.';
       this.newSession();
     });
@@ -255,7 +268,7 @@ export class TrialController {
     try {
       const state = JSON.parse(sessionStorage.getItem(STORAGE_KEY));
       if (state?.version === 3 && typeof state.id === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(state.id)
-          && Array.isArray(state.plan) && state.plan.length > 0 && state.plan.length <= 18
+          && Array.isArray(state.plan) && state.plan.length > 0 && state.plan.length <= 30
           && state.plan.every(p => Object.hasOwn(CONDITIONS, p.condition) && Object.hasOwn(TASKS, p.task_id)
             && typeof p.task === 'string' && p.task.trim() && p.task.length <= 500
             && Number.isInteger(p.time_limit_seconds) && p.time_limit_seconds >= 30 && p.time_limit_seconds <= 7200)
@@ -280,7 +293,7 @@ export class TrialController {
         this.state.practiceSeconds = value.practice_time_limit_seconds || 60;
         byId('trial-practice-duration').value = String(this.state.practiceSeconds);
         for (const [id, task] of Object.entries(value.tasks))
-          this.state.tasks[id] = {...task, seconds: value.time_limit_seconds};
+          this.state.tasks[id] = {...task, seconds: task.time_limit_seconds ?? value.time_limit_seconds};
         if (!this.restoredPlan) this.state.plan = makeTrialPlan(this.state);
         this.protocolMessage = this.restoredPlan ? 'Host settings loaded. New session uses these settings; the restored plan is unchanged.' : 'Task settings loaded from host.';
         this.syncTask(); this.persist();
@@ -289,22 +302,25 @@ export class TrialController {
     if (this.state.guided && !this.active) await this.apply();
   }
   async saveProtocol() {
-    if (this.active || this.protocolSaving || !this.duration.reportValidity() || !byId('trial-practice-duration').reportValidity()) return;
+    if (this.active || this.protocolSaving || !this.duration.reportValidity() || !byId('trial-practice-duration').reportValidity()
+        || !byId('trial-transfer-duration').reportValidity() || !byId('trial-transfer-instruction').reportValidity()) return;
     const tasks = {};
     for (const [id, number] of [['single_block', 1], ['count_blocks', 2], ['custom', 3]]) {
       const input = byId(`trial-task${number}-instruction`);
       if (!input.reportValidity() || !input.value.trim()) return;
       tasks[id] = {instruction: input.value.trim(), success_metric: byId(`trial-task${number}-metric`).value};
     }
+    tasks[TRANSFER_TASK] = {instruction: byId('trial-transfer-instruction').value.trim(), success_metric: 'block_count',
+      time_limit_seconds: byId('trial-transfer-duration').valueAsNumber};
     this.protocolSaving = true; this.render();
     try {
       const response = await fetch('/api/v1/trial-protocol', {method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({version: 2, time_limit_seconds: this.duration.valueAsNumber,
+        body: JSON.stringify({version: 3, time_limit_seconds: this.duration.valueAsNumber,
           practice_time_limit_seconds: byId('trial-practice-duration').valueAsNumber, tasks})});
       const value = await response.json();
       if (!response.ok) throw new Error(value.error || 'Task settings could not be saved.');
       this.state.practiceSeconds = value.practice_time_limit_seconds;
-      for (const [id, task] of Object.entries(value.tasks)) this.state.tasks[id] = {...task, seconds: value.time_limit_seconds};
+      for (const [id, task] of Object.entries(value.tasks)) this.state.tasks[id] = {...task, seconds: task.time_limit_seconds ?? value.time_limit_seconds};
       this.persist(); this.protocolMessage = 'Saved on host. New sessions use these settings after browser or host restarts.';
     } catch (error) { this.protocolMessage = error.message; }
     finally { this.protocolSaving = false; this.render(); }
@@ -526,7 +542,7 @@ export class TrialController {
     byId('trial-condition').textContent = guided ? CONDITIONS[this.condition]
       : this.display.value === 'rgb_camera' ? CONDITIONS.fixed_rgb : this.head.checked ? CONDITIONS.head_3d : CONDITIONS.mouse_3d;
     const task = recorder.task.value.trim() || 'Task not configured';
-    const taskNumber = {single_block:1, count_blocks:2, custom:3}[this.state.plan[this.state.index].task_id];
+    const taskNumber = {single_block:1, [TRANSFER_TASK]:1, count_blocks:2, custom:3}[this.state.plan[this.state.index].task_id];
     const taskTitle = guided && taskNumber ? `Task ${taskNumber}: ${task}` : task;
     byId('trial-task').textContent = taskTitle; byId('trial-task').title = taskTitle;
     if (active) this.lastElapsed = Number(status.elapsed_seconds) || 0;
@@ -583,7 +599,9 @@ export class TrialController {
     if (messageNode.getAttribute('role') !== messageRole) messageNode.setAttribute('role', messageRole);
     const result = byId('trial-block-result'); result.hidden = !counting;
     byId('trial-block-count').required = counting;
-    byId('trial-block-score').textContent = counting && saved.block_count != null ? `${saved.block_count} blocks in cup` : '';
+    const transfer = this.state.plan[this.state.index].task_id === TRANSFER_TASK;
+    byId('trial-count-label').textContent = transfer ? 'Successful placements (full release)' : 'Count in cup';
+    byId('trial-block-score').textContent = counting && saved.block_count != null ? `${saved.block_count} ${transfer ? 'placements' : 'blocks in cup'}` : '';
     byId('trial-save-block-count').disabled = recorder.busy || !!recorder.offline;
     if (counting && this.countEpisode !== saved.episode) { byId('trial-block-count').value = saved.block_count == null ? '' : String(saved.block_count); this.countEpisode = saved.episode; }
     byId('trial-outcome-control').hidden = counting || this.practice;
@@ -597,6 +615,11 @@ export class TrialController {
     byId('trial-task3-option').disabled = !this.state.tasks.custom.instruction.trim();
     this.duration.disabled = locked;
     byId('trial-practice-duration').disabled = locked;
+    for (const field of ['instruction', 'duration']) {
+      const element = byId(`trial-transfer-${field}`); element.disabled = locked;
+      const value = String(this.state.tasks[TRANSFER_TASK][field === 'duration' ? 'seconds' : 'instruction']);
+      if (element !== document.activeElement && element.value !== value) element.value = value;
+    }
     for (const [id, number] of [['single_block', 1], ['count_blocks', 2], ['custom', 3]]) for (const field of ['instruction', 'metric']) {
       const element = byId(`trial-task${number}-${field}`); element.disabled = locked;
       const value = field === 'instruction' ? this.state.tasks[id].instruction : this.state.tasks[id].success_metric || defaultMetric(id);

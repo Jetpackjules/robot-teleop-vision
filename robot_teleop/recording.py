@@ -380,8 +380,12 @@ class HostEpisodeRecorder:
                 raise RecordingError('Trial condition does not match the display mode.')
             if 'time_limit_seconds' in trial and (type(trial['time_limit_seconds']) is not int or not 1 <= trial['time_limit_seconds'] <= 7200):
                 raise RecordingError('Trial time limit must be between 1 and 7200 seconds.')
-            if trial.get('task_id', 'custom') not in ('single_block', 'count_blocks', 'custom'):
+            if trial.get('task_id', 'custom') not in ('single_block', 'count_blocks', 'custom', 'tray_transfer_v1'):
                 raise RecordingError('Invalid trial task.')
+            if trial.get('task_id') == 'tray_transfer_v1' and (
+                    trial.get('phase') != 'measured' or trial.get('success_metric') != 'block_count'
+                    or trial.get('outcome_rule') != 'manual' or trial.get('result_prompt') is not True):
+                raise RecordingError('Tray transfers require measured trials and a placement count.')
             if trial.get('success_metric', 'pass_fail') not in ('pass_fail', 'block_count', 'practice'):
                 raise RecordingError('Invalid trial success metric.')
             if trial.get('outcome_rule', 'manual') not in ('manual', 'finish_before_limit'):

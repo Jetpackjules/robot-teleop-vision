@@ -764,6 +764,29 @@ def test_count_metric_is_configurable_without_changing_task_identity(tmp_path):
         assert recorder.last_saved['block_count'] == 0
 
 
+@pytest.mark.parametrize('timeout', [False, True])
+def test_tray_transfer_count_done_and_timeout_keep_observations_actions_and_identity(tmp_path, timeout):
+    trial = {'session_id': 'tray-only', 'index': 1, 'total': 6, 'condition': 'fixed_rgb',
+             'display_mode': 'rgb_camera', 'task_id': 'tray_transfer_v1', 'time_limit_seconds': 1,
+             'success_metric': 'block_count', 'outcome_rule': 'manual', 'phase': 'measured', 'result_prompt': True}
+    with recorder_at(tmp_path) as (recorder, _, _):
+        recorder.start('page-a', 'Tray transfers: full release', trial=trial)
+        if not timeout:
+            wait_for(lambda: recorder.samples >= 3)
+            recorder.stop('page-a')
+        wait_for(lambda: recorder.state == 'idle', timeout=4)
+        saved = recorder.last_saved
+        assert saved['status'] == 'complete' and saved['timed_out'] is timeout
+        assert saved['outcome'] == 'unrated'
+        recorder.set_block_count('page-a', 0 if timeout else 7)
+        folder = tmp_path/saved['episode']
+        manifest = json.loads((folder/'episode.json').read_text())
+        assert manifest['trial'] == trial and manifest['result_reviewed']
+        assert manifest['block_count'] == (0 if timeout else 7)
+        with np.load(folder/'episode.npz') as arrays:
+            assert arrays['action'].shape == arrays['obs.state'].shape == (manifest['frames'], 6)
+
+
 def test_result_prompt_review_is_saved_before_next_and_owned_by_recorder(tmp_path):
     trial = {'session_id': 'review', 'index': 1, 'total': 18, 'condition': 'fixed_rgb',
              'display_mode': 'rgb_camera', 'task_id': 'custom', 'time_limit_seconds': 75,

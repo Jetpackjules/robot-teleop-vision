@@ -33,17 +33,19 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
     assert.ok(block.every(p=>p.task_id===id),'both rounds finish before changing activity');
     for(let round=0;round<(practice?1:2);round++)assert.deepEqual(block.slice(round*3,round*3+3).map(p=>p.condition).sort(),views,'every round contains all three views exactly once');
     for(const condition of views)assert.equal(block.filter(p=>p.condition===condition).length,practice?1:2);
-    assert.ok(block.every(p=>p.time_limit_seconds===(practice?60:75)));
-    assert.ok(block.every(p=>p.success_metric===(practice?'practice':id==='count_blocks'?'block_count':'pass_fail')));
+    assert.ok(block.every(p=>p.time_limit_seconds===(practice||id==='tray_transfer_v1'?60:75)));
+    assert.ok(block.every(p=>p.success_metric===(practice?'practice':['count_blocks','tray_transfer_v1'].includes(id)?'block_count':'pass_fail')));
     assert.ok(block.every(p=>p.phase===(practice?'practice':'measured')));
-    assert.ok(block.every(p=>p.outcome_rule===(practice||id==='count_blocks'?'manual':'finish_before_limit')));
+    assert.ok(block.every(p=>p.outcome_rule===(practice||['count_blocks','tray_transfer_v1'].includes(id)?'manual':'finish_before_limit')));
    }
    if(ids.includes('single_block'))assert.equal(seen[0],'single_block','practice always comes first');
    assert.deepEqual(seen.sort(),[...ids].sort());
   };
-  assert.equal(c.state.randomize,true);checkPlan(c.state.plan,['single_block','count_blocks','custom']);assert.equal(c.state.randomActivities,true);assert.equal(node('trial-order').value,'random');
+  assert.equal(c.state.randomize,true);checkPlan(c.state.plan,['single_block','tray_transfer_v1','count_blocks','custom']);assert.equal(c.state.randomActivities,true);assert.equal(node('trial-order').value,'random');
   assert.match(c.state.tasks.custom.instruction,/Balance test/);
-  const withThird=structuredClone(c.state);withThird.tasks.custom.instruction='Named third task';checkPlan(makeTrialPlan(withThird),['single_block','count_blocks','custom']);
+  const withThird=structuredClone(c.state);withThird.tasks.custom.instruction='Named third task';checkPlan(makeTrialPlan(withThird),['single_block','tray_transfer_v1','count_blocks','custom']);
+  checkPlan(makeTrialPlan({...withThird,activitySelection:'tray_transfer_v1'}),['tray_transfer_v1']);
+  checkPlan(makeTrialPlan({...withThird,activitySelection:'practice_tray'}),['single_block','tray_transfer_v1']);
   const one={...withThird,activitySelection:'count_blocks',randomActivities:false};
   const randomValues=[0,0,.99,.99];const shuffled=makeTrialPlan(one,()=>{assert.ok(randomValues.length);return randomValues.shift();});
   checkPlan(shuffled,['count_blocks']);assert.equal(randomValues.length,0);assert.notDeepEqual(shuffled.slice(0,3),shuffled.slice(3),'each round gets its own shuffle');

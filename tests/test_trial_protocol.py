@@ -37,7 +37,8 @@ def test_trial_protocol_survives_server_restart_and_is_separate_from_calibration
         status, body = request(server)
         value = json.loads(body)
         assert status == 200 and value['time_limit_seconds'] == 75
-        assert value['version'] == 2 and value['practice_time_limit_seconds'] == 60
+        assert value['version'] == 3 and value['practice_time_limit_seconds'] == 60
+        assert value['tasks']['tray_transfer_v1']['time_limit_seconds'] == 60
         assert value['tasks']['single_block']['success_metric'] == 'practice'
         assert 'Balance test' in value['tasks']['custom']['instruction']
         value['time_limit_seconds'] = 90
@@ -70,6 +71,7 @@ def test_legacy_protocol_upgrades_future_task1_only_without_rewriting_original(t
     value = load_protocol(tmp_path/'absent.json')
     legacy = {key: value[key] for key in ('version', 'time_limit_seconds', 'tasks')}
     legacy['version'] = 1
+    legacy['tasks'] = {key: task for key, task in legacy['tasks'].items() if key != 'tray_transfer_v1'}
     legacy['tasks']['single_block'] = {'instruction': 'Move the object from one plate to the other', 'success_metric':'pass_fail'}
     legacy['tasks']['custom']['instruction'] = 'Keep this lab-specific balance instruction'
     path = tmp_path/'legacy.json'
@@ -77,9 +79,28 @@ def test_legacy_protocol_upgrades_future_task1_only_without_rewriting_original(t
     path.write_bytes(original)
     migrated = load_protocol(path)
     assert path.read_bytes() == original
-    assert migrated['version'] == 2 and migrated['practice_time_limit_seconds'] == 60
+    assert migrated['version'] == 3 and migrated['practice_time_limit_seconds'] == 60
     assert migrated['tasks']['single_block']['success_metric'] == 'practice'
     assert migrated['tasks']['custom'] == legacy['tasks']['custom']
     assert migrated['tasks']['count_blocks'] == legacy['tasks']['count_blocks']
     with pytest.raises(ValueError):
         validate_protocol({**migrated, 'tasks':{**migrated['tasks'],'single_block':legacy['tasks']['single_block']}})
+
+
+def test_task1_upgrade_and_legacy_save_preserve_other_tasks_and_transfer_settings(tmp_path):
+    path = tmp_path/'protocol.json'
+    current = load_protocol(path)
+    legacy = {**current, 'version': 2, 'tasks': {k:v for k,v in current['tasks'].items() if k != 'tray_transfer_v1'}}
+    path.write_text(json.dumps(legacy))
+    original = path.read_bytes()
+    upgraded = load_protocol(path)
+    assert path.read_bytes() == original
+    assert upgraded['time_limit_seconds'] == legacy['time_limit_seconds']
+    for key in legacy['tasks']: assert upgraded['tasks'][key] == legacy['tasks'][key]
+    upgraded['tasks']['tray_transfer_v1']['time_limit_seconds'] = 90
+    save_protocol(path, upgraded)
+    assert save_protocol(path, legacy)['tasks']['tray_transfer_v1']['time_limit_seconds'] == 90
+    for seconds in (True, 0, 29, 7201, 60.5):
+        invalid = json.loads(json.dumps(upgraded))
+        invalid['tasks']['tray_transfer_v1']['time_limit_seconds'] = seconds
+        with pytest.raises(ValueError):validate_protocol(invalid)

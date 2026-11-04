@@ -341,7 +341,7 @@
     <form id="trial-result-form">
       <h2 id="trial-result-title">Trial complete</h2>
       <p id="trial-result-summary"></p>
-      <div id="trial-block-result" hidden><label>Count in cup<input id="trial-block-count" type="number" min="0" max="9999" step="1" required></label><output id="trial-block-score" aria-live="polite"></output></div>
+      <div id="trial-block-result" hidden><label><span id="trial-count-label">Count in cup</span><input id="trial-block-count" type="number" min="0" max="9999" step="1" required></label><output id="trial-block-score" aria-live="polite"></output></div>
       <div id="trial-outcome-control" hidden><label>Result<select id="trial-outcome"><option value="success">Pass</option><option value="failure">Fail</option></select></label></div>
       <p id="trial-result-error" role="alert" hidden></p>
       <div class="trial-result-actions"><button id="trial-result-close" type="button">Close</button><button id="trial-save-block-count" class="primary" type="button">Save &amp; Next</button></div>
@@ -399,12 +399,15 @@
             <label id="trial-session-edit">Session name<input id="trial-session-input" type="text" maxlength="120" required value="Session" placeholder="e.g., Participant 01" autocomplete="off" title="The date and time are saved with the recording."></label>
             <label class="toggle-row"><span>Guided trials</span><input id="guided-trials" type="checkbox" checked></label>
             <p class="helper-text">One view at a time. The facilitator starts and saves each trial, then clicks Next.</p>
-            <label>Session activities<select id="trial-task-kind"><option value="all" selected>Practice, then Tasks 2 and 3</option><option value="single_block">Task 1 only · Practice</option><option value="count_blocks">Task 2 only · Objects in cup</option><option id="trial-task3-option" value="custom">Task 3 only · Balance test</option></select></label>
-            <label class="toggle-row"><span>Randomize Tasks 2 and 3 order (practice stays first)</span><input id="random-activity-order" type="checkbox" checked></label>
+            <label>Session activities<select id="trial-task-kind"><option value="all" selected>Full study · Practice, then Tasks 1–3</option><option value="practice_tray">Practice, then Task 1 only · Tray transfers</option><option value="tray_transfer_v1">Task 1 only · Tray transfers</option><option value="single_block">Practice only · All three views</option><option value="count_blocks">Task 2 only · Objects in cup</option><option id="trial-task3-option" value="custom">Task 3 only · Balance test</option></select></label>
+            <label class="toggle-row"><span>Randomize measured task order (practice stays first)</span><input id="random-activity-order" type="checkbox" checked></label>
             <details class="advanced-disclosure"><summary>Task instructions and scoring</summary><div class="disclosure-body">
               <p class="helper-text">Pass/fail: Finish before the time limit passes; timeout fails. An early unsuccessful attempt can be marked Failure in recording controls. Count scoring requires a saved count before Next.</p>
-              <label>Task 1 practice instruction<input id="trial-task1-instruction" type="text" required maxlength="500"></label>
-              <label>Task 1 scoring<select id="trial-task1-metric"><option value="practice">Practice · unscored</option></select></label>
+              <label>Practice instruction<input id="trial-task1-instruction" type="text" required maxlength="500"></label>
+              <label>Practice scoring<select id="trial-task1-metric"><option value="practice">Practice · unscored</option></select></label>
+              <label>Task 1 tray transfer instruction<input id="trial-transfer-instruction" type="text" required maxlength="500"></label>
+              <label>Task 1 time limit (seconds)<input id="trial-transfer-duration" type="number" required min="30" max="7200" step="1" value="60"></label>
+              <p class="helper-text">Task 1 counts each fully released placement in the opposite tray. There and back counts as two placements.</p>
               <label>Task 2 instruction<input id="trial-task2-instruction" type="text" required maxlength="500"></label>
               <label>Task 2 scoring<select id="trial-task2-metric"><option value="block_count">Count in cup</option><option value="pass_fail">Pass / fail</option></select></label>
               <label>Task 3 instruction<input id="trial-task3-instruction" type="text" required maxlength="500"></label>
@@ -420,7 +423,7 @@
               <option value="head_3d,mouse_3d,fixed_rgb">Head tracking → Mouse 3D → Fixed cameras</option>
             </select></label>
             <label>Practice per mode (seconds)<input id="trial-practice-duration" type="number" required min="30" max="7200" step="1" value="60"></label>
-            <label>Measured trial time limit (seconds)<input id="trial-duration" type="number" required min="30" max="7200" step="1" value="75" title="Applies to new sessions. Recording stops and the arm holds when the active-time limit is reached."></label>
+            <label>Tasks 2 and 3 time limit (seconds)<input id="trial-duration" type="number" required min="30" max="7200" step="1" value="75" title="Applies to new sessions. Recording stops and the arm holds when the active-time limit is reached."></label>
             <button id="trial-save-protocol" type="button">Save task settings on host</button>
             <p id="trial-protocol-status" class="helper-text" role="status">Loading task settings…</p>
             <p id="trial-plan-help" class="helper-text">Task 1 is unscored practice in each view, always first. Tasks 2 and 3 each have two rounds of all three views (12 measured trials total). Practice recordings carry a practice label. Use the same 3D renderer for both 3D conditions; choose it in View.</p>
@@ -585,6 +588,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20261101_compact_trials"></script>
+  <script type="module" src="./controller_hybrid.js?v=20261104_tray_task1"></script>
 </body>
 </html>
