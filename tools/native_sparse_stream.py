@@ -21,6 +21,7 @@ import numpy as np
 
 from tools.sparse_point_stream import ENCODING, sample_rgb_pixels
 from tools.native_sparse_kernels import depth_mm, pack_points
+from tools.preview_depth_smoothing import smooth_depth
 from tools.point_preview_cleanup import clean_selected_points
 from tools.workspace_stream_crop_native import compress_depth
 from tools.workspace_stream_crop import WorkspaceStreamCropper, crop_volumes, retained_depth
@@ -104,6 +105,19 @@ def encode_native_camera(snapshot, camera, settings, cropper, robot=None, viewer
         values = snapshot['depth']
         valid = np.isfinite(values)&(values>0)&(values<=snapshot['maximum'])
         depth = np.where(valid,np.minimum(65535,np.floor(np.where(valid,values,0).astype(np.float64)*1000+.5)),0).astype(np.uint16)
+    # Work on an owned preview depth map before crop/selection. Averaging only
+    # already-cropped peaks would bias the tabletop upward. No sensor, arm,
+    # calibration, source snapshot or recording buffer is modified.
+    smoothing='off'
+    smoothing_ms=0.0
+    if str(camera.get('id','')).removeprefix('realsense:')=='262522074294' and settings.get('top_camera_depth_smoothing_enabled',True) is True:
+        smooth_started=time.perf_counter()
+        filtered=smooth_depth(depth)
+        if filtered is not None:
+            depth=filtered;smoothing='edge_aware_median_3x3'
+        else:
+            smoothing='filter_unavailable'
+        smoothing_ms=(time.perf_counter()-smooth_started)*1000
     metadata = dict(camera,width=snapshot['width'],height=snapshot['height'],
                     intrinsics=snapshot['intrinsics'],transform=snapshot['transform'],
                     color_space='original_rgb',color_projection=snapshot['projection'])
@@ -162,7 +176,8 @@ def encode_native_camera(snapshot, camera, settings, cropper, robot=None, viewer
                     geometry_capture_unix_ms=snapshot['stamp'],color_encoding='sparse_rgb8',
                     depth_encoding=ENCODING,color_space='aligned_depth',color_length=0,
                     depth_length=len(packed),preview_budget=budget,preview_count=count,
-                    preview_source_points=source_count,preview_native=True,depth_exact=True,
+                    preview_source_points=source_count,preview_native=True,depth_exact=smoothing!='edge_aware_median_3x3',
+                    preview_depth_smoothing=smoothing,preview_depth_smoothing_ms=round(smoothing_ms,3),
                     encode_ms=round((time.perf_counter()-started)*1000,3),source_capture_fps=snapshot['fps'])
     if isinstance(snapshot.get('key'),tuple) and len(snapshot['key'])==2:
         metadata.update(preview_epoch=str(snapshot['key'][0]),preview_publication=str(snapshot['key'][1]))
