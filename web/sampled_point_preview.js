@@ -1,4 +1,4 @@
-import {SquaresCameraFusion,SQUARES_FUSION_SHADER,bindSquareSamples} from './squares_camera_fusion.js?v=20261104_supplement_a';
+import {SquaresCameraFusion,SQUARES_FUSION_SHADER,bindSquareSamples} from './squares_camera_fusion.js?v=20261104_supplement_edges';
 import {CLAW_MASK_SHADER,bindClawMeshMask} from './claw_mesh_mask.js';
 import {sampleDepthPoints} from './point_preview_sampling.js?v=20261027_compact_gpu';
 import {compileGpuProgram} from './hybrid_camera_quality.js?v=20261027_compact_gpu';

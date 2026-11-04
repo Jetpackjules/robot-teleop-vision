@@ -106,13 +106,24 @@ bool square_reference_patch(int camera,vec3 world,out vec3 anchor,out vec3 norma
   // A small physical search catches noise on either side of a surface, including
   // edge pixels. Bounded 25 samples per reference, only for A's points.
   int step=int(clamp(floor(.008*k.x/z+.5),1.,12.));
-  float best=.028*.028;vec3 selected=vec3(0);ivec2 selected_pixel=center;bool found=false;
+  float best=.018*.018;vec3 selected=vec3(0);ivec2 selected_pixel=center;bool found=false;
   for(int y=-2;y<=2;y++)for(int x=-2;x<=2;x++){
     ivec2 pixel=center+ivec2(x,y)*step;float d=square_depth_at(camera,pixel);if(d<=0.)continue;
     vec3 p=square_local_point(camera,pixel,d);float error=dot(p-local,p-local);
     if(error<best){best=error;selected=p;selected_pixel=pixel;found=true;}
   }
-  if(!found || !square_patch_normal(camera,selected_pixel,selected,true,normal))return false;
+  if(!found)return false;
+  // Edges need not have a complete central-difference stencil. Require local
+  // measured support without joining opposite sides of a depth discontinuity.
+  int support=0;
+  for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++){
+    ivec2 pixel=selected_pixel+ivec2(x,y);float d=square_depth_at(camera,pixel);
+    if(d<=0.)continue;
+    vec3 delta=square_local_point(camera,pixel,d)-selected;
+    if(dot(delta,delta)<=.006*.006)support++;
+  }
+  if(support<4)return false;
+  normal=vec3(0);square_patch_normal(camera,selected_pixel,selected,true,normal);
   mat4 inverse=u_square_world_to_camera[camera];
   anchor=transpose(mat3(inverse))*(selected-inverse[3].xyz);return true;
 }
@@ -122,14 +133,15 @@ bool square_keep_supplement(vec3 world,vec3 local){
   if(u_square_capture_delta[b]>.05 || u_square_capture_delta[c]>.05)return true;
   vec3 bp,bn,cp,cn;
   if(!square_reference_patch(b,world,bp,bn) || !square_reference_patch(c,world,cp,cn))return true;
-  // Both trusted views must corroborate the same nearby, smooth plane.
-  if(abs(dot(bn,cn))<.88 || abs(dot(bp-cp,bn))>.006 || abs(dot(bp-cp,cn))>.006)return true;
-  float bd=abs(dot(world-bp,bn)),cd=abs(dot(world-cp,cn));
-  if(max(bd,cd)>.025 || max(bd,cd)<=.0035)return true;
+  // Parallel but separated reference planes are genuine disagreement, not
+  // coverage of one edge. Do not let that ambiguity erase A's measurement.
+  if(abs(dot(bn,cn))>.88 && max(abs(dot(bp-cp,bn)),abs(dot(bp-cp,cn)))>.006)return true;
+  // B/C own their covered edges even when they see different cube faces.
+  // A remains a colour donor, but does not draw a second nearby surface layer.
+  // Keep distinct new faces when all three local normals establish one.
   vec4 k=u_square_intrinsics[u_square_source];
   ivec2 pixel=ivec2(floor(vec2(local.x,-local.y)/(-local.z)*k.xy+k.zw+.5));vec3 own_normal;
-  // A genuinely new face (e.g. cube top versus side faces) is useful coverage.
-  if(square_patch_normal(u_square_source,pixel,local,false,own_normal) &&
+  if(length(bn)>.5 && length(cn)>.5 && square_patch_normal(u_square_source,pixel,local,false,own_normal) &&
       max(abs(dot(own_normal,bn)),abs(dot(own_normal,cn)))<.65)return true;
   return false;
 }
