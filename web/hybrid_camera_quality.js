@@ -1,3 +1,4 @@
+import {CLAW_MASK_SHADER,bindClawMeshMask} from './claw_mesh_mask.js';
 // GPU camera buffers and local surface confidence for the browser renderer.
 // Adapted from this project's Godot/RealSense BlendPCR port.
 // SPDX-License-Identifier: EUPL-1.2
@@ -127,6 +128,7 @@ void main() {
 // Shared by Unified mesh, shared-color points/mesh and BlendPCR. Arrays allow
 // every camera in the rig to participate, including rigs with more than four.
 export const RIG_SAMPLING_SHADER = `
+${CLAW_MASK_SHADER}
 #ifndef RIG_CAMERA_CAPACITY
 #define RIG_CAMERA_CAPACITY 32
 #endif
@@ -176,6 +178,7 @@ vec3 rig_point(ivec2 pixel,float z,vec4 k) {
   return vec3((float(pixel.x)-k.z)*z/k.x,-(float(pixel.y)-k.w)*z/k.y,-z);
 }
 bool rig_masked(vec3 world) {
+  if(claw_mesh_masked(world))return true;
   for(int i=0;i<6;i++) {
     vec3 segment=u_mask_capsule_b[i].xyz-u_mask_capsule_a[i].xyz;
     float length_sq=dot(segment,segment);
@@ -437,6 +440,7 @@ export class GpuCameraRig {
 
   bind(program) {
     const gl = this.gl;
+    bindClawMeshMask(gl,program);
     let locations = this.bindings.get(program);
     if (!locations) {
       locations = {};

@@ -1,3 +1,4 @@
+import {CLAW_MASK_SHADER,bindClawMeshMask,updateClawMeshMask} from './claw_mesh_mask.js';
 import {cameraDepthSamples} from './point_preview_sampling.js?v=20261027_sparse_delta';
 import {NativePointAssembler} from './native_point_channel.js?v=20261027_native_rtc';
 import {IndependentCameraSocket} from './independent_camera_socket.js?v=20261028_camera_lanes';
@@ -243,7 +244,9 @@ layout(location=0) in uvec2 a_source_tile;
 layout(location=1) in uint a_source_vertex;
 ${MODELED_WORKSPACE_SHADER}
 
+${CLAW_MASK_SHADER}
 bool robot_masked(vec3 world) {
+  if(claw_mesh_masked(world))return true;
   for(int index=0;index<6;index++) {
     vec3 segment=u_mask_capsule_b[index].xyz-u_mask_capsule_a[index].xyz;
     float length_squared=dot(segment,segment);
@@ -392,23 +395,8 @@ void main() {
     gl_Position=vec4(2.0,2.0,2.0,1.0);gl_PointSize=0.0;v_color=vec3(0);v_valid=0.0;return;
   }
   v_local_position = local_position;
-  if (u_robot_mask_enabled == 1 && u_render_mode != 1) {
-    for (int index = 0; index < 6; index++) {
-      vec3 segment = u_mask_capsule_b[index].xyz - u_mask_capsule_a[index].xyz;
-      float segment_length_squared = dot(segment, segment);
-      float along = segment_length_squared > 0.000001
-        ? clamp(dot(world_position - u_mask_capsule_a[index].xyz, segment) / segment_length_squared, 0.0, 1.0)
-        : 0.0;
-      vec3 closest = u_mask_capsule_a[index].xyz + segment * along;
-      float radius = u_mask_capsule_a[index].w;
-      if (dot(world_position - closest, world_position - closest) <= radius * radius) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-        gl_PointSize = 0.0;
-        v_color = vec3(0.0);
-        v_valid = 0.0;
-        return;
-      }
-    }
+  if (u_robot_mask_enabled == 1 && u_render_mode != 1 && robot_masked(world_position)) {
+    gl_Position=vec4(2,2,2,1);gl_PointSize=0.;v_color=vec3(0);v_valid=0.;return;
   }
   gl_Position = u_view_projection * vec4(world_position, 1.0);
   v_world_position = world_position;
@@ -1240,17 +1228,23 @@ function robotMaskCapsules() {
   if (!radii.length || names.length < radii.length + 1) return null;
   const starts = new Float32Array(24);
   const ends = new Float32Array(24);
+  const clawSignature=updateClawMeshMask(state.gl,
+    ['gripper_link','moving_jaw_so101_v1_link'].map(name=>{
+      const matrix=transformDictionaryMatrix(state.robotTransforms[name]);
+      return matrix?inverseRigidTransform(matrix):null;
+    }),state.settings.robot_overlay_claw_buffer_mm/1000);
+
   for (let index = 0; index < radii.length; index += 1) {
     const start = transformDictionaryMatrix(state.robotTransforms[names[index]]);
     const end = transformDictionaryMatrix(state.robotTransforms[names[index + 1]]);
     if (!start || !end) return null;
     // Each link uses its independently controlled visual mask buffer.
     const claw = (state.robotRenderer.endEffectorLinks || []).includes(names[index]);
-    const radius = radii[index] + (claw ? state.settings.robot_overlay_claw_buffer_mm : state.settings.robot_overlay_body_buffer_mm) / 1000;
+    const radius = claw&&clawSignature ? 0 : radii[index] + (claw ? state.settings.robot_overlay_claw_buffer_mm : state.settings.robot_overlay_body_buffer_mm) / 1000;
     starts.set([start[12], start[13], start[14], radius], index * 4);
     ends.set([end[12], end[13], end[14], radius], index * 4);
   }
-  return { starts, ends };
+  return { starts, ends, clawSignature };
 }
 
 function findUniforms(gl, program) {
@@ -2569,6 +2563,7 @@ function renderImpl() {
   gl.enable(gl.DEPTH_TEST);
   gl.depthFunc(gl.LEQUAL);
   gl.disable(gl.BLEND);
+  updateClawMeshMask(gl,null,0,false);
   const maskCapsules = state.settings.robot_overlay_enabled && state.settings.robot_overlay_mask_scanned_robot
     ? robotMaskCapsules() : null;
   const pointPreview = state.settings.point_preview_enabled===true&&!state.pointPreviewUnavailable;
@@ -2649,7 +2644,7 @@ function renderImpl() {
     }
   }
   try {
-  gl.useProgram(state.program);
+  gl.useProgram(state.program);bindClawMeshMask(gl,state.program);
   if (cached) state.cameraFusion.bind(state.program);
   else gl.uniform1i(state.uniforms.rigCount, 0);
   gl.uniform1i(state.uniforms.pointColorCacheEnabled,pointColors?1:0);
@@ -3448,7 +3443,7 @@ export async function startGodotHybridRenderer(options = {}) {
   state.robotProgram = createProgram(gl, ROBOT_VERTEX_SHADER, ROBOT_FRAGMENT_SHADER);
   state.robotUniforms = findRobotUniforms(gl, state.robotProgram);
   state.robotVao = gl.createVertexArray();
-  gl.useProgram(state.program);
+  gl.useProgram(state.program);bindClawMeshMask(gl,state.program);
   gl.uniform1i(state.uniforms.depth, 0);
   gl.uniform1i(state.uniforms.color, 1);
   gl.uniform1i(state.uniforms.fusionDepth, 2);

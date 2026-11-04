@@ -40,7 +40,7 @@ export class NativePointColors {
   update(rig,cameras,mask,viewport){
     const gl=this.gl,width=Math.max(...cameras.map(c=>c.width)),height=Math.max(...cameras.map(c=>c.height));
     const signature=`${width}:${height}:${cameras.length}`;
-    const key=`${rig.version}:${mask?`${mask.starts}:${mask.ends}`:''}`;
+    const key=`${rig.version}:${mask?`${mask.starts}:${mask.ends}:${mask.clawSignature}`:''}`;
     if(signature===this.signature&&key===this.key&&rig===this.rig)return;
     try{
       if(signature!==this.signature){

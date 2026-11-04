@@ -16,7 +16,7 @@ function createTestServer() {
     } else if(path==='/so101-renderer.json') {
       const source=readFileSync(resolve(root,'robot_modules/so101/web/module.js'),'utf8').split('const MODULE_STYLE')[0];
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify(vm.runInNewContext(source+'\nRENDERER')));
-    } else if(/^\/robot-modules\/so101\/assets\/[a-z0-9_]+\.glb$/.test(path)) {
+    } else if(/^\/robot-modules\/so101\/assets\/[a-z0-9_-]+\.(glb|json|bin)$/.test(path)) {
       res.setHeader('Content-Type','model/gltf-binary');res.end(readFileSync(resolve(root,'robot_modules/so101/assets',path.split('/').pop())));
     } else if(path==='/api/v1/robot-module') {
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify({id:'disabled',label:'Vision only',entrypoints:{}}));

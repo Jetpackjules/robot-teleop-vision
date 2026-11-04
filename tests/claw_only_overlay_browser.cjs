@@ -17,6 +17,8 @@ const server = createTestServer();
       state.robotUniforms = p.findRobotUniforms(gl,state.robotProgram);
       state.robotVao = gl.createVertexArray();
       await p.loadRobotMeshes(gl,state.robotLoadToken);
+      const maskModule=await import('/claw_mesh_mask.js');
+      if(!await maskModule.loadClawMeshMask(gl))throw Error('Claw mask assets unavailable');
       const names=Object.keys(state.robotMeshes);
       if(names.length!==7)throw Error('All seven real model links must load');
       for(const name of names)state.robotTransforms[name]={basis_x:[1,0,0],basis_y:[0,1,0],basis_z:[0,0,1],origin:[0,0,0]};
@@ -79,7 +81,7 @@ const server = createTestServer();
       const clawBuffered=p.robotMaskCapsules();
       for(let i=0;i<state.robotRenderer.maskChain.radii.length;i++){
         const isClaw=state.robotRenderer.endEffectorLinks.includes(state.robotRenderer.maskChain.names[i]);
-        if(Math.abs(clawBuffered.starts[4*i+3]-fullMask.starts[4*i+3]-(isClaw?.025:0))>1e-6)throw Error('Claw buffer changed body mask');
+        if(Math.abs(clawBuffered.starts[4*i+3]-fullMask.starts[4*i+3]-0)>1e-6)throw Error('Claw buffer changed body mask');
       }
       window.setGodotHybridViewSettings({robot_overlay_claw_buffer_mm:0,robot_overlay_body_opacity:1,robot_overlay_scope:'full'});
       window.setGodotHybridViewSettings({robot_overlay_scope:'invalid'});

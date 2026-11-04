@@ -1,3 +1,4 @@
+import {CLAW_MASK_SHADER,bindClawMeshMask} from './claw_mesh_mask.js';
 // Cache the existing capsule test at each measured native depth sample.
 // Every triangle still rejects if any of its three exact corners is masked.
 import {FULLSCREEN_VERTEX_SHADER,compileGpuProgram,gpuTexture} from './hybrid_camera_quality.js?v=20261021_original_rgb';
@@ -6,11 +7,13 @@ precision highp float;precision highp int;precision highp usampler2D;
 uniform usampler2D u_depth;uniform vec4 u_intrinsics;uniform mat4 u_model;
 uniform vec4 u_mask_capsule_a[6];uniform vec4 u_mask_capsule_b[6];
 layout(location=0) out highp uint out_mask;
+${CLAW_MASK_SHADER}
 void main(){
   ivec2 p=ivec2(gl_FragCoord.xy);float z=float(texelFetch(u_depth,p,0).r)*0.001;
   out_mask=0u;if(z<=0.0)return;
   vec3 world=(u_model*vec4((float(p.x)-u_intrinsics.z)*z/u_intrinsics.x,
     -(float(p.y)-u_intrinsics.w)*z/u_intrinsics.y,-z,1)).xyz;
+  if(claw_mesh_masked(world)){out_mask=1u;return;}
   for(int i=0;i<6;i++){
     vec3 segment=u_mask_capsule_b[i].xyz-u_mask_capsule_a[i].xyz;
     float length_sq=dot(segment,segment);
@@ -28,7 +31,7 @@ export class NativeRobotMask {
   }
   update(cameras,mask,viewport){
     const gl=this.gl,w=Math.max(...cameras.map(c=>c.width)),h=Math.max(...cameras.map(c=>c.height));
-    const signature=`${w}:${h}:${cameras.length}`,maskKey=`${mask.starts}:${mask.ends}`;
+    const signature=`${w}:${h}:${cameras.length}`,maskKey=`${mask.starts}:${mask.ends}:${mask.clawSignature}`;
     try{
       if(signature!==this.signature){
         this.dispose();this.texture=gpuTexture(gl,gl.TEXTURE_2D_ARRAY,3,gl.R8UI,w,h,cameras.length);
@@ -39,7 +42,7 @@ export class NativeRobotMask {
         if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw Error('Native robot mask framebuffer unavailable');
         this.signature=signature;
       }
-      const u=this.u;gl.useProgram(this.program);gl.bindVertexArray(this.vao);gl.bindFramebuffer(gl.FRAMEBUFFER,this.framebuffer);
+      const u=this.u;gl.useProgram(this.program);bindClawMeshMask(gl,this.program);gl.bindVertexArray(this.vao);gl.bindFramebuffer(gl.FRAMEBUFFER,this.framebuffer);
       gl.disable(gl.DEPTH_TEST);gl.disable(gl.BLEND);gl.disable(gl.CULL_FACE);gl.disable(gl.SCISSOR_TEST);
       gl.uniform1i(u.u_depth,0);gl.uniform4fv(u['u_mask_capsule_a[0]'],mask.starts);gl.uniform4fv(u['u_mask_capsule_b[0]'],mask.ends);
       cameras.forEach((c,i)=>{

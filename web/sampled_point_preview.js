@@ -1,3 +1,4 @@
+import {CLAW_MASK_SHADER,bindClawMeshMask} from './claw_mesh_mask.js';
 import {sampleDepthPoints} from './point_preview_sampling.js?v=20261027_compact_gpu';
 import {compileGpuProgram} from './hybrid_camera_quality.js?v=20261027_compact_gpu';
 import {COLOR_PROJECTION_SHADER,bindColorProjection} from './hybrid_color_projection.js?v=20261021_original_rgb';
@@ -15,6 +16,7 @@ uniform mat4 u_model;uniform mat4 u_view_projection;
 uniform float u_point_scale;uniform float u_max_point_size;uniform int u_gray;
 uniform int u_mask_enabled;uniform vec4 u_mask_a[6];uniform vec4 u_mask_b[6];
 out vec3 v_color;flat out int v_valid;
+${CLAW_MASK_SHADER}
 ${COLOR_PROJECTION_SHADER}
 ${MODELED_WORKSPACE_SHADER}
 void main(){
@@ -25,6 +27,7 @@ void main(){
     -(float(pixel.y)-u_intrinsics.w)*z/u_intrinsics.y,-z);
   vec3 world=(u_model*vec4(local,1)).xyz;
   if(modeled_workspace_outside(world))return;
+  if(u_mask_enabled==1&&claw_mesh_masked(world))return;
   if(u_mask_enabled==1)for(int i=0;i<6;i++){
     vec3 segment=u_mask_b[i].xyz-u_mask_a[i].xyz;float squared=dot(segment,segment);
     float along=squared>.000001?clamp(dot(world-u_mask_a[i].xyz,segment)/squared,0.,1.):0.;
@@ -76,7 +79,7 @@ export class SampledPointPreview {
   render(cameras,view,mask,settings) {
     const cleanup={input:0,removed:0,matches:true};
     const gl=this.gl,u=this.u,counts={},sourceCounts={};let selectionMs=0,gpuUploadBytes=0,compactCameras=0;const budget=settings.point_preview_budget===0?0:settings.point_preview_budget===40000?40000:20000;
-    gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.bindVertexArray(this.vao);gl.useProgram(this.program);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.bindVertexArray(this.vao);gl.useProgram(this.program);bindClawMeshMask(gl,this.program);
     gl.viewport(0,0,view.width,view.height);gl.enable(gl.DEPTH_TEST);gl.depthMask(true);gl.depthFunc(gl.LEQUAL);
     gl.disable(gl.BLEND);gl.disable(gl.CULL_FACE);
     gl.uniform1i(u.u_depth,0);gl.uniform1i(u.u_color,1);gl.uniform1i(u.u_gray,settings.depth_only_enabled===true?1:0);

@@ -1,3 +1,4 @@
+import {CLAW_MASK_SHADER,bindClawMeshMask} from './claw_mesh_mask.js';
 // Browser/RealSense adaptation of BlendPCR's dominance and spatial blending.
 // Original approach: Andre Muehlenbrock, CGVR, University of Bremen, 2024.
 // Adapted from godot/runtime/point_cloud/blendpcr in this repository.
@@ -57,7 +58,9 @@ vec3 source_world(ivec2 pixel) {
   return (u_model*vec4((float(pixel.x)-u_intrinsics.z)*z/u_intrinsics.x,
     -(float(pixel.y)-u_intrinsics.w)*z/u_intrinsics.y,-z,1.0)).xyz;
 }
+${CLAW_MASK_SHADER}
 bool robot_masked(vec3 world) {
+  if(claw_mesh_masked(world))return true;
   for(int index=0;index<6;index++) {
     vec3 segment=u_mask_capsule_b[index].xyz-u_mask_capsule_a[index].xyz;
     float length_squared=dot(segment,segment);
@@ -442,7 +445,7 @@ export class BrowserBlendPCR {
 
   use(name,rig,view) {
     const gl=this.gl,{program,uniforms:u}=this.programs[name];
-    gl.useProgram(program);
+    gl.useProgram(program);bindClawMeshMask(gl,program);
     if(name==="dominance"||name==="composite") {
       rig.bind(program);
       gl.activeTexture(gl.TEXTURE8);gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.metadata);
@@ -490,7 +493,7 @@ export class BrowserBlendPCR {
     gl.vertexAttribI4ui(0,0,0,0,0);
     gl.vertexAttribI4ui(1,0,0,0,0);
     try {
-      const key=`${rig.version}:${view.viewProjection}:${maskCapsules?.starts}:${maskCapsules?.ends}:${settings.white_background_enabled}:${settings.depth_only_enabled===true}:${crop?.key}:${this.useWorkspaceCulling!==false}:${this.useViewCulling!==false}`;
+      const key=`${rig.version}:${view.viewProjection}:${maskCapsules?.starts}:${maskCapsules?.ends}:${maskCapsules?.clawSignature}:${settings.white_background_enabled}:${settings.depth_only_enabled===true}:${crop?.key}:${this.useWorkspaceCulling!==false}:${this.useViewCulling!==false}`;
       if(this.cacheKey!==key) {
         // One dense native mesh pass per camera; no second color rasterization.
         const indexed=this.indexedMetadata;
@@ -509,7 +512,7 @@ export class BrowserBlendPCR {
         if(rig.maskTexture){gl.activeTexture(gl.TEXTURE3);gl.bindTexture(gl.TEXTURE_2D_ARRAY,rig.maskTexture);gl.uniform1i(u.u_rig_mask,3);}
         if(maskCapsules){gl.uniform4fv(u.u_mask_capsule_a,maskCapsules.starts);gl.uniform4fv(u.u_mask_capsule_b,maskCapsules.ends);}
         gl.viewport(0,0,this.width,this.height);gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);
-        const rasterKey=`${view.viewProjection}:${maskCapsules?.starts}:${maskCapsules?.ends}:${settings.mesh_depth_delta}:${settings.mesh_max_edge}:${contextCrop?.key}:${this.useWorkspaceCulling!==false}:${this.useViewCulling!==false}`;
+        const rasterKey=`${view.viewProjection}:${maskCapsules?.starts}:${maskCapsules?.ends}:${maskCapsules?.clawSignature}:${settings.mesh_depth_delta}:${settings.mesh_max_edge}:${contextCrop?.key}:${this.useWorkspaceCulling!==false}:${this.useViewCulling!==false}`;
         cameras.forEach((camera,index)=> {
           const fresh=rig_data_fresh(camera,view.now);
           const layerKey=`${rasterKey}:${camera.metadata.id}:${camera.uploadRevision??camera.lastUpdateMs}:${camera.width}:${camera.height}:${camera.modelMatrix}:${camera.intrinsicsArray}:${fresh}`;
