@@ -2138,7 +2138,7 @@ function clearPendingCameraUploads() {
 }
 
 function applyCameraUploads(decoded) {
-  const started=performance.now(),updated=decoded.filter(camera=>!camera.previewSamples?.depths||state.settings.point_preview_enabled).map(uploadCamera);
+  const started=performance.now(),updated=decoded.filter(camera=>{if((state.settings.preview_excluded_cameras||[]).includes(String(camera.metadata.id))){camera.bitmap?.close();return false;}return !camera.previewSamples?.depths||state.settings.point_preview_enabled;}).map(uploadCamera);
   const elapsed=performance.now()-started;
   state.stats.uploadMs=state.stats.uploadMs>0?state.stats.uploadMs*.8+elapsed*.2:elapsed;
   for(const camera of updated) {
@@ -3121,7 +3121,7 @@ function startRgbdWebSocket(options) {
     &&new URLSearchParams(window.location.search).get('independent_cameras')!=='0';
   const url=rgbdSocketUrl(options);
   const lanes=new URLSearchParams(window.location.search).get('camera_lanes')==='1'?'1':'2';
-  const socket = independent?new IndependentCameraSocket(`${url}&camera_lanes=${lanes}`):new WebSocket(url);
+  const socket = independent?new IndependentCameraSocket(`${url}&camera_lanes=${lanes}`,{excludedIds:state.settings.preview_excluded_cameras||[]}):new WebSocket(url);
   state.socket = socket;
   socket.binaryType = "arraybuffer";
   state.stats.connected = false;
@@ -3645,6 +3645,13 @@ export function setGodotHybridViewSettings(settings = {}) {
   if(Object.hasOwn(settings,'point_preview_enabled')&&settings.point_preview_enabled!==state.settings.point_preview_enabled)
     state.pointPreviewUnavailable='';
   if(settings.display_mode==='rgb_camera'&&state.workspaceEditor?.active)state.workspaceEditor.finish(!state.workspaceEditor.geometry?.planar);
+  if (Array.isArray(settings.preview_excluded_cameras)) {
+    const excluded = settings.preview_excluded_cameras;
+    for (const camera of state.cameras) if (excluded.includes(String(camera.metadata.id))) {deleteCameraTextures(camera);state.sampledPointPreview?.dropCamera?.(camera);}
+    state.cameras = state.cameras.filter(camera => !excluded.includes(String(camera.metadata.id)));
+    state.socket?.setExcluded?.(excluded);
+    state.cameraFusion?.clear();state.blendPCR?.clearTargets();
+  }
   const overlayStyle = settings.robot_overlay_style;
   state.settings = {
     ...state.settings,

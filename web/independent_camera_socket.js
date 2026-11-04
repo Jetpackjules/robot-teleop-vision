@@ -1,8 +1,9 @@
 // Independent reliable camera streams; selected points stay byte-exact.
 export class IndependentCameraSocket {
-  constructor(url,{Socket=WebSocket,fetcher=(...args)=>fetch(...args)}={}) {
+  constructor(url,{Socket=WebSocket,fetcher=(...args)=>fetch(...args),excludedIds=[]}={}) {
     this.url=url;this.Socket=Socket;this.fetcher=fetcher;this.readyState=0;this.binaryType='arraybuffer';
     this.children=new Map();this.timers=new Set();this.closed=false;this.opened=false;
+    this.excluded=new Set(excludedIds);this.ids=[];
     this.lanes=1;this.latest=new Map();this.decoder=new TextDecoder();
     this.initialize();
   }
@@ -20,7 +21,19 @@ export class IndependentCameraSocket {
       const requested=Number(new URL(this.url).searchParams.get('camera_lanes')),supported=Number(data.independent_native_preview_lanes||1);
       if(requested===2&&supported===2)this.lanes=2;
     }catch(_error){this.fallbackReason=String(_error.message);/* Older hosts retain the original single connection. */}
-    if(!this.closed)for(const id of ids)for(let lane=0;lane<this.lanes;lane++)this.connect(id,lane);
+    this.ids=ids;this.setExcluded([...this.excluded]);
+  }
+  setExcluded(ids){
+    this.excluded=new Set(ids);
+    for(const [key,socket] of this.children){
+      const id=key.split('/')[0];
+      if(!this.excluded.has(id))continue;
+      this.children.delete(key);this.latest.delete(id);
+      socket.onopen=socket.onmessage=socket.onclose=socket.onerror=null;socket.close(1000,'camera excluded from preview');
+    }
+    if(!this.closed)for(const id of this.ids)if(!this.excluded.has(id))for(let lane=0;lane<this.lanes;lane++){
+      if(!this.children.has(id+'/'+lane))this.connect(id,lane);
+    }
   }
   acceptCapture(id,buffer){
     try{
@@ -44,7 +57,7 @@ export class IndependentCameraSocket {
     }catch(_error){return false;}
   }
   connect(id,lane=0){
-    if(this.closed)return;
+    if(this.closed||this.excluded.has(id))return;
     const key=id+'/'+lane,url=new URL(this.url);if(id)url.searchParams.set('camera_id',id);
     url.searchParams.delete('camera_lanes');url.searchParams.delete('camera_lane');
     if(this.lanes>1){url.searchParams.set('camera_lanes',String(this.lanes));url.searchParams.set('camera_lane',String(lane));}

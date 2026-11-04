@@ -72,6 +72,7 @@ export class SampledPointPreview {
       this.u[name]=gl.getUniformLocation(this.program,name);
     this.maxPointSize=Math.min(32,gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]);
   }
+  dropCamera(camera) {const entry=this.entries.get(camera);if(entry){this.gl.deleteBuffer(entry.buffer);this.entries.delete(camera);}}
   render(cameras,view,mask,settings) {
     const cleanup={input:0,removed:0,matches:true};
     const gl=this.gl,u=this.u,counts={},sourceCounts={};let selectionMs=0,gpuUploadBytes=0,compactCameras=0;const budget=settings.point_preview_budget===0?0:settings.point_preview_budget===40000?40000:20000;

@@ -1,3 +1,4 @@
+    import { PreviewCameraControls } from "./preview_camera_controls.js";
     import { CameraAlignmentControl } from "./camera_alignment.js";
     import { robotModuleReady } from "./robot_module_host.js";
     import { EpisodeRecordingControl } from './episode_recording.js?v=20261101_result_prompt';
@@ -1450,6 +1451,8 @@
     savedTableDefaults = JSON.stringify(tableDefaults(installationSettings));
     restoreViewSettings(installationSettings);
     tableDefaultsReady = true;
+    const previewCameraControls = new PreviewCameraControls(document.getElementById('preview-camera-controls'), () => window.setGodotHybridViewSettings?.({preview_excluded_cameras:previewCameraControls.excluded}));
+    window.addEventListener('pagehide',()=>previewCameraControls.close());
     if (pendingBoardTableLevel) { applyBoardTableLevel(pendingBoardTableLevel); pendingBoardTableLevel = null; }
     tableDefaultsTimer = setTimeout(saveTableDefaults, 300);
     robotModule.bind?.({ sendViewSettings, updateStatus });

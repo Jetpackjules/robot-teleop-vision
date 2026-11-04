@@ -21,5 +21,9 @@ const assert=require('node:assert/strict'),fs=require('node:fs');
  function deliver(lane,sequence,data){lanes[lane].onmessage({data:JSON.stringify({type:'rgbd-sequence',sequence})});lanes[lane].onmessage({data});}
  const first=packet(5,2),newer=packet(5,6);deliver(0,1,first);deliver(1,1,newer);deliver(0,2,packet(5,4));assert.deepEqual(seen,[first,newer]);assert.equal(lanes[0].sent.at(-1).sequence,2,'late capture is acknowledged without rewinding the scene');
  const restarted=packet(6,2);deliver(1,2,restarted);deliver(0,3,packet(5,8));deliver(1,3,packet(6,4,'wrong-camera'));assert.deepEqual(seen,[first,newer,restarted]);assert.equal(lanes[0].sent.at(-1).sequence,3);striped.close();
+ const selectSockets=[];class SelectSocket extends Socket{constructor(url){super(url);selectSockets.push(this);}}
+ const selected=new IndependentCameraSocket('wss://example.test/rgbd-stream?camera_lanes=2',{Socket:SelectSocket,excludedIds:['top'],fetcher:async()=>({ok:true,json:async()=>({independent_native_preview:true,independent_native_preview_lanes:2,cameras:[{id:'top'},{id:'side'}]})})});
+ await new Promise(r=>setTimeout(r,0));assert.equal(selectSockets.length,2);assert(selectSockets.every(s=>new URL(s.url).searchParams.get('camera_id')==='side'));
+ selected.setExcluded([]);assert.equal(selectSockets.length,4);const top=selectSockets.slice(2);selected.setExcluded(['top']);assert(top.every(s=>s.closed));assert(selectSockets.slice(0,2).every(s=>!s.closed));selected.setExcluded([]);assert.equal(selectSockets.length,6);selected.close();
  console.log('Independent camera lifecycle, byte identity, ACK routing, isolated reconnect and supersession checks passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});
