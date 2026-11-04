@@ -81,3 +81,32 @@ def test_charuco_specs_are_validated_and_forwarded(alignment):
         with pytest.raises(ValueError):alignment.start('charuco','idle',{},lambda _:pytest.fail('must not send'),board={**board,**changes})
     sent=[];alignment.start('charuco','idle',{},sent.append,board=board)
     assert json.loads(sent[0])['charuco_board']==board
+
+
+def test_board_tabletop_flag_is_explicit_and_validated(alignment):
+    sent=[]
+    with pytest.raises(ValueError):alignment.start('aruco','idle',{},sent.append,127,49,board_is_tabletop='yes')
+    alignment.start('aruco','idle',{},sent.append,127,49,board_is_tabletop=False)
+    assert json.loads(sent[0])['board_is_tabletop'] is False
+
+
+def test_board_level_updates_shared_table_once_and_preserves_other_settings(tmp_path):
+    import threading
+    from tools.lan_remote_view_server import LanRemoteServer
+    server=LanRemoteServer.__new__(LanRemoteServer)
+    server.site_settings_lock=threading.Lock()
+    server.site_settings_path=tmp_path/'settings.json'
+    server.save_site_settings({'modeled_workspace_center':[.2,.7,.3],'robot_overlay_claw_opacity':.5})
+    status={'online':True,'world_level':{'source':'calibration_board_charuco','token':123,'table_y':0}}
+    server.sync_board_table_level(status)
+    saved=server.load_site_settings()
+    assert saved['modeled_workspace_center']==[.2,0,.3]
+    assert saved['robot_overlay_claw_opacity']==.5
+    server.save_site_settings({'modeled_workspace_center':[.2,.1,.3],'robot_overlay_claw_opacity':.5})
+    server.sync_board_table_level(status)
+    assert server.load_site_settings()['modeled_workspace_center']==[.2,.1,.3]
+    server.sync_board_table_level({'online':False,'world_level':{'source':'calibration_board_aruco','token':124}})
+    assert server.load_site_settings()['modeled_workspace_center']==[.2,.1,.3]
+    status['world_level']['token']=125
+    server.sync_board_table_level(status)
+    assert server.load_site_settings()['modeled_workspace_center']==[.2,0,.3]

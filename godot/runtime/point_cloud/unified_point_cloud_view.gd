@@ -1,6 +1,7 @@
 @tool
 extends Node3D
 
+const BoardWorldLevel = preload("res://godot/runtime/point_cloud/board_world_level.gd")
 const RigCalibration = preload("res://godot/runtime/point_cloud/realsense_rig_calibration.gd")
 const JointRefinement = preload("res://godot/runtime/point_cloud/realsense_joint_refinement.gd")
 const MeshFusion = preload("res://godot/runtime/point_cloud/realsense_mesh_fusion.gd")
@@ -278,7 +279,7 @@ const DORMANT_OAKD_PROPERTIES := [
 @export var auto_level_from_robot_base: bool = false:
 	set(value):
 		auto_level_from_robot_base = value
-		if not value and is_inside_tree():
+		if not value and is_inside_tree() and not _world_level_source.begins_with("calibration_board_"):
 			_clear_world_level(true)
 ## Re-applies world leveling from the current saved robot registration without recalibrating either camera.
 @export_tool_button("Level World From Robot") var level_world_from_robot_action: Callable = level_world_from_robot_base
@@ -868,6 +869,9 @@ var _realsense_camera_order: Array[String] = []
 var _realsense_labels: Dictionary = {}
 var _last_realsense_scan_msec: int = -1000000
 var _realsense_scan_helper: Object = null
+var _world_level_source := ""
+var _board_world_level_token := 0.0
+var _web_level_from_board := true
 var _world_level_path: String = ""
 var _last_world_level_registration_token: float = 0.0
 
@@ -914,7 +918,7 @@ func _ready() -> void:
 	# Scene files can retain an editor-preview transform. Begin from the true
 	# unlevelled state, then apply only an explicitly saved world-level file.
 	_clear_world_level(false)
-	if auto_level_from_robot_base:
+	if auto_level_from_robot_base or _has_saved_board_world_level():
 		_load_world_level()
 	else:
 		_clear_world_level(true)
@@ -974,6 +978,7 @@ func apply_remote_camera_alignment(payload: Dictionary) -> void:
 		return
 	if mode not in ["markerless", "refine", "aruco", "charuco"] or _realsense_cloud_alignment_running():
 		return
+	_web_level_from_board = bool(payload.get("board_is_tabletop", true))
 	if mode == "charuco":
 		var board = payload.get("charuco_board")
 		if not board is Dictionary:
@@ -1004,6 +1009,8 @@ func _publish_web_camera_alignment_status(force: bool = false) -> void:
 		"busy": _realsense_cloud_alignment_running(),
 		"message": calibration_status if not calibration_status.is_empty() else "Camera alignment is ready.",
 		"cameras": _enabled_realsense_serials().size(),
+		"active_depth_corrections": _active_depth_correction_labels(),
+		"world_level": {"token":_board_world_level_token,"table_y":0.0,"source":_world_level_source} if _world_level_source.begins_with("calibration_board_") else {},
 	})
 
 func _process(_delta: float) -> void:
@@ -1114,10 +1121,12 @@ func _clear_robot_position_calibration() -> void:
 	var module := _active_robot_module()
 	if module != null and module.has_method("clear_calibration"):
 		module.call("clear_calibration")
-		_clear_world_level(true)
+		if not _world_level_source.begins_with("calibration_board_"):
+			_clear_world_level(true)
 		_update_robot_position_calibration_status()
 		return
-	_clear_world_level(true)
+	if not _world_level_source.begins_with("calibration_board_"):
+		_clear_world_level(true)
 	robot_position_calibration_status = "The selected robot has no clear-calibration action."
 
 func _save_robot_position_checkpoint() -> void:
@@ -1208,7 +1217,7 @@ func level_world_from_robot_base(persist: bool = true) -> bool:
 	return true
 
 func _maybe_auto_level_from_robot_registration() -> void:
-	if not auto_level_from_robot_base or not is_inside_tree():
+	if not auto_level_from_robot_base or not is_inside_tree() or _world_level_source.begins_with("calibration_board_"):
 		return
 	var overlay := get_node_or_null(ROBOT_OVERLAY_NODE)
 	if overlay == null or not overlay.has_method("get_registration_status"):
@@ -1223,12 +1232,66 @@ func _maybe_auto_level_from_robot_registration() -> void:
 		return
 	level_world_from_robot_base(true)
 
+func _saved_camera_depth_corrections() -> Dictionary:
+	var path := "user://camera_depth_pose_corrections.json"
+	if not FileAccess.file_exists(path):
+		return {}
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string(path))
+	if not parsed is Dictionary or str(parsed.get("project_root", "")) != ProjectSettings.globalize_path("res://"):
+		return {}
+	return parsed.get("cameras", {}) if parsed.get("cameras") is Dictionary else {}
+
+func _camera_depth_pose_correction(camera_id: String) -> Transform3D:
+	var entries := _saved_camera_depth_corrections()
+	var entry = entries.get(camera_id, {})
+	if entry is Dictionary and entry.get("enabled", false):
+		var transform = RigCalibration.transform_from_payload(entry)
+		if transform is Transform3D:
+			return transform
+	return Transform3D.IDENTITY
+
+func _active_depth_correction_labels() -> Array[String]:
+	var labels: Array[String] = []
+	var entries := _saved_camera_depth_corrections()
+	for camera_id in entries:
+		if not _camera_depth_pose_correction(camera_id).is_equal_approx(Transform3D.IDENTITY):
+			labels.append(_camera_label(camera_id))
+	return labels
+
+func _has_saved_board_world_level() -> bool:
+	var path := ProjectSettings.globalize_path(WORLD_LEVEL_PATH)
+	if not FileAccess.file_exists(path):
+		return false
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string(path))
+	return parsed is Dictionary and str(parsed.get("source", "")).begins_with("calibration_board_")
+
+func _apply_board_world_level(solution: Dictionary, mode: String) -> bool:
+	var anchor := _world_level_anchor(false)
+	if anchor == null or not solution.get("ok", false):
+		return false
+	var correction: Transform3D = solution.transform
+	var payload := _world_level_transform_to_dictionary(correction)
+	var token := Time.get_unix_time_from_system() * 1000.0
+	payload.merge({"type":"unified_world_level","source":"calibration_board_"+mode,
+		"correction_degrees":solution.correction_degrees,"saved_unix_ms":token,"table_y":0.0,
+		"board_origin":[solution.board_origin.x,solution.board_origin.y,solution.board_origin.z],
+		"board_normal":[solution.board_normal.x,solution.board_normal.y,solution.board_normal.z]})
+	if RigCalibration.write_atomic(ProjectSettings.globalize_path(WORLD_LEVEL_PATH),payload) != OK:
+		return false
+	anchor.transform = correction
+	_world_level_source = "calibration_board_" + mode
+	_board_world_level_token = token
+	world_level_status = "World leveled from %s board; tabletop is Y=0 m." % mode
+	return true
+
 func _save_world_level(value: Transform3D, correction_degrees: float) -> bool:
 	if _world_level_path.is_empty():
 		_world_level_path = ProjectSettings.globalize_path(WORLD_LEVEL_PATH)
 	var payload := _world_level_transform_to_dictionary(value)
 	payload["type"] = "unified_world_level"
 	payload["source"] = "robot_base_up"
+	_world_level_source = "robot_base_up"
+	_board_world_level_token = 0.0
 	payload["correction_degrees"] = correction_degrees
 	payload["registration_saved_unix_ms"] = _last_world_level_registration_token
 	payload["saved_unix_ms"] = Time.get_unix_time_from_system() * 1000.0
@@ -1259,14 +1322,18 @@ func _load_world_level() -> bool:
 	if anchor == null:
 		return false
 	anchor.transform = Transform3D(loaded.basis.orthonormalized(), loaded.origin)
+	_world_level_source = str(parsed.get("source", "robot_base_up"))
+	_board_world_level_token = float(parsed.get("saved_unix_ms", 0.0)) if _world_level_source.begins_with("calibration_board_") else 0.0
 	var registration_token := float((parsed as Dictionary).get("registration_saved_unix_ms", 0.0))
 	_last_world_level_registration_token = registration_token if registration_token > 0.0 else -1.0
-	world_level_status = "Saved robot world level loaded | correction %.2f deg" % float(
+	world_level_status = "Saved world level loaded | correction %.2f deg" % float(
 		(parsed as Dictionary).get("correction_degrees", 0.0)
 	)
 	return true
 
 func _clear_world_level(remove_saved: bool) -> void:
+	_world_level_source = ""
+	_board_world_level_token = 0.0
 	var anchor := _world_level_anchor(false)
 	if anchor != null:
 		anchor.transform = Transform3D.IDENTITY
@@ -2864,6 +2931,10 @@ func _update_native_realsense_calibration() -> void:
 	result["reference_camera"] = _native_realsense_calibration_reference_id
 	result["target_camera"] = _native_realsense_calibration_target_id
 	_native_realsense_calibrator = null
+	if _native_realsense_calibration_mode in ["aruco", "charuco"] and bool(result.get("ok",false)):
+		result = BoardWorldLevel.correct_pose_result(result,
+			_camera_depth_pose_correction(_native_realsense_calibration_reference_id),
+			_camera_depth_pose_correction(_native_realsense_calibration_target_id))
 	_native_realsense_rig.accept(result)
 	_start_next_native_realsense_pair()
 
@@ -2880,14 +2951,30 @@ func _finish_native_realsense_rig() -> void:
 		calibration_status = _joint_realsense_refinement.status
 		_release_native_realsense_rig()
 		return
+	var board_level: Dictionary = {}
+	if rig.complete() and mode in ["aruco", "charuco"] and _web_level_from_board:
+		board_level = BoardWorldLevel.solve(rig.transforms,rig.results)
+		if not board_level.get("ok",false):
+			calibration_status = "Camera calibration not saved: " + str(board_level.get("message", "Invalid board plane."))
+			_release_native_realsense_rig()
+			return
 	if rig.complete():
 		var status := "All %d cameras calibrated and saved (%s)." % [rig.cameras.size(), mode]
 		if not _write_camera_alignment_set(rig.transforms, rig.reference_id, "native_rig_" + mode, status):
 			calibration_status = "Camera calibration could not save the rig. Previous alignment preserved."
+		elif not board_level.is_empty() and not _apply_board_world_level(board_level,mode):
+			# Roll back the rig if the paired world placement could not be saved.
+			if _native_realsense_registry_before.is_empty():
+				DirAccess.remove_absolute(_camera_alignment_registry_path)
+			else:
+				var previous = JSON.parse_string(_native_realsense_registry_before.get_string_from_utf8())
+				if previous is Dictionary:
+					RigCalibration.write_atomic(_camera_alignment_registry_path,previous)
+			calibration_status = "Could not save board world level; previous camera alignment retained."
 		else:
 			_alignment_transforms.merge(rig.transforms, true)
 			_camera_alignment_registry_token = ""
-			calibration_status = status
+			calibration_status = status + (" Board plane is now the horizontal tabletop (Y=0 m)." if not board_level.is_empty() else "")
 			if mode in ["aruco", "charuco"]:
 				if _realsense_alignment_ground_truth_path.is_empty():
 					_realsense_alignment_ground_truth_path = ProjectSettings.globalize_path(REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH)

@@ -547,6 +547,8 @@
         <section class="advanced-section" id="camera-alignment-controls">
           <h3>Camera alignment</h3>
           <p class="helper-text">Uses Godot’s existing calibration to align the physical cameras. Put the arm in Hold and keep the scene still. The preview pauses during calibration. Each run backs up camera and arm calibration first.</p>
+          <label class="toggle-row"><span>Use ArUco / ChArUco board as the tabletop</span><input id="camera-board-tabletop" type="checkbox" checked></label>
+          <p class="helper-text">Lay the board flat on the same surface as the arm base. Successful marker or board calibration levels the scene and sets the tabletop to Y=0. Turn this off for an upright board.</p>
           <div class="button-row">
             <button id="camera-align-auto" type="button" disabled>Auto Align Cameras</button>
             <button id="camera-align-refine" type="button" disabled>Refine Current Alignment</button>
@@ -567,6 +569,7 @@
             <button id="camera-align-charuco" type="button" disabled>Align Cameras with ChArUco</button>
           </details>
           <div id="camera-alignment-status" class="helper-text" role="status" aria-live="polite">Checking Godot camera alignment…</div>
+          <p id="camera-depth-correction-status" class="helper-text"></p>
           <p id="camera-alignment-backup" class="helper-text"></p>
         </section>
         <section class="advanced-section">

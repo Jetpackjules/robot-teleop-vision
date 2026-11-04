@@ -147,6 +147,17 @@
       updateModeledControls();
     }
 
+    let pendingBoardTableLevel = null;
+    function applyBoardTableLevel(level) {
+      if (!tableDefaultsReady) { pendingBoardTableLevel = level; return; }
+      const current = modeledViewSettings();
+      const center = Array.isArray(level.table_center) ? level.table_center.slice() : current.modeled_workspace_center.slice();
+      if (!Array.isArray(level.table_center)) center[1] = 0;
+      restoreModeledSettings({...current, modeled_workspace_center:center});
+      sendViewSettings();
+    }
+    window.addEventListener('camera-board-world-level', event => applyBoardTableLevel(event.detail));
+
     function updateModeledControls() {
       const settings = modeledViewSettings(),valid = modeledWorkspace({...settings,modeled_workspace_enabled:true});
       document.getElementById('modeled-workspace-options').hidden = !settings.modeled_workspace_enabled;
@@ -1439,6 +1450,7 @@
     savedTableDefaults = JSON.stringify(tableDefaults(installationSettings));
     restoreViewSettings(installationSettings);
     tableDefaultsReady = true;
+    if (pendingBoardTableLevel) { applyBoardTableLevel(pendingBoardTableLevel); pendingBoardTableLevel = null; }
     tableDefaultsTimer = setTimeout(saveTableDefaults, 300);
     robotModule.bind?.({ sendViewSettings, updateStatus });
     robotModule.start?.({ sendViewSettings, updateStatus });

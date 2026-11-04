@@ -5,6 +5,7 @@ export class CameraAlignmentControl {
     this.confirm = confirm;
     this.closed = false;
     this.sending = false;
+    this.worldLevelToken = null;
     this.status = root.querySelector('#camera-alignment-status');
     this.backup = root.querySelector('#camera-alignment-backup');
     this.buttons = [root.querySelector('#camera-align-auto'), root.querySelector('#camera-align-refine'), root.querySelector('#camera-align-aruco'), root.querySelector('#camera-align-charuco')];
@@ -15,6 +16,16 @@ export class CameraAlignmentControl {
     this.poll();
   }
   render(value) {
+    const level = value.world_level;
+    if (level?.token > 0) {
+      if (this.worldLevelToken !== level.token) {
+        window.dispatchEvent(new CustomEvent('camera-board-world-level', {detail: level}));
+      }
+      this.worldLevelToken = level.token;
+    } else if (this.worldLevelToken === null) this.worldLevelToken = 0;
+    const correction = this.root.querySelector('#camera-depth-correction-status');
+    if (correction) correction.textContent = value.active_depth_corrections?.length
+      ? `Saved depth alignment correction active: ${value.active_depth_corrections.join(', ')}.` : '';
     this.status.textContent = value.message || 'Camera alignment is ready.';
     this.backup.textContent = value.backup ? `Backup saved on host: ${value.backup}` : '';
     for (const button of this.buttons) button.disabled = this.sending || !value.online || value.busy;
@@ -31,6 +42,7 @@ export class CameraAlignmentControl {
   }
   async start(mode) {
     const payload = {mode};
+    if (mode === 'aruco' || mode === 'charuco') payload.board_is_tabletop = this.root.querySelector('#camera-board-tabletop').checked;
     if (mode === 'charuco') {
       payload.board = {};
       for (const [key,id] of Object.entries({squares_x:'x',squares_y:'y',square_mm:'square',marker_mm:'marker',dictionary:'dictionary'})) {

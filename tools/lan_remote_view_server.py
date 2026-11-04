@@ -1984,11 +1984,44 @@ class LanRemoteServer(ThreadingHTTPServer):
                 if not key.startswith(("workspace_crop_", "workspace_surface_", "workspace_boundary_"))} if isinstance(value, dict) else {}
 
     def save_site_settings(self, value: dict) -> None:
-        encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
         with self.site_settings_lock:
+            try:
+                previous = json.loads(self.site_settings_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                previous = {}
+            if isinstance(previous, dict) and "_board_world_level_token" in previous:
+                value = {**value, "_board_world_level_token": previous["_board_world_level_token"]}
+            encoded = json.dumps(value, indent=2, sort_keys=True) + "\n"
             self.site_settings_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.site_settings_path.with_suffix(".tmp")
             temporary.write_text(encoded, encoding="utf-8")
+            temporary.replace(self.site_settings_path)
+
+    def sync_board_table_level(self, status: dict) -> None:
+        level = status.get("world_level", {})
+        if not status.get("online") or not isinstance(level, dict) or not str(level.get("source", "")).startswith("calibration_board_"):
+            return
+        token = level.get("token", 0)
+        if type(token) not in (int, float) or not math.isfinite(token) or token <= 0:
+            return
+        with self.site_settings_lock:
+            try:
+                saved = json.loads(self.site_settings_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                saved = {}
+            if not isinstance(saved, dict):
+                return
+            if saved.get("_board_world_level_token") == token:
+                level["table_center"] = saved.get("modeled_workspace_center", [0,0,0])
+                return
+            center = saved.get("modeled_workspace_center", [0, 0, 0])
+            if not isinstance(center, list) or len(center) != 3 or any(type(v) not in (int,float) or not math.isfinite(v) for v in center):
+                return
+            saved.update(modeled_workspace_center=[center[0],0.0,center[2]], _board_world_level_token=token)
+            level["table_center"] = saved["modeled_workspace_center"]
+            self.site_settings_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.site_settings_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(saved, indent=2)+"\n", encoding="utf-8")
             temporary.replace(self.site_settings_path)
 
     def _run_async_loop(self) -> None:
@@ -2414,7 +2447,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/v1/camera-alignment":
             with self.server.camera_alignment.lock:
-                self.serve_json(self.server.camera_alignment.status())
+                status = self.server.camera_alignment.status()
+                self.server.sync_board_table_level(status)
+                self.serve_json(status)
             return
         if parsed.path == "/api/v1/cameras":
             self.serve_camera_list()
@@ -2680,11 +2715,11 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             if not 0 < length <= 1024 or self.headers.get('Content-Type', '').split(';', 1)[0] != 'application/json':
                 raise ValueError('Camera alignment requires a small JSON request.')
             data = json.loads(self.rfile.read(length))
-            if not isinstance(data, dict) or ('mode' not in data or set(data) - {'mode', 'marker_size_mm', 'marker_id', 'board'}):
+            if not isinstance(data, dict) or ('mode' not in data or set(data) - {'mode', 'marker_size_mm', 'marker_id', 'board', 'board_is_tabletop'}):
                 raise ValueError('Invalid camera alignment request.')
             with self.server.camera_alignment.lock:
                 result = self.server.camera_alignment.start(data['mode'], self.server.episode_recorder.state,
-                    self.server.latest_robot_status(), self.server.forward_tracking, data.get('marker_size_mm'), data.get('marker_id', 49), data.get('board'))
+                    self.server.latest_robot_status(), self.server.forward_tracking, data.get('marker_size_mm'), data.get('marker_id', 49), data.get('board'), data.get('board_is_tabletop', True))
             self.serve_json(result)
         except (OSError, ValueError, TypeError) as exc:
             self.send_error(400, str(exc)[:180])
