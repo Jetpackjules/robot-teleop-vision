@@ -57,6 +57,7 @@ from robot_teleop.modules import public_robot_module
 from robot_teleop.operator import RobotCommandError, load_robot_operator
 from robot_teleop.recording import CaptureRgbSource, HostEpisodeRecorder, RecordingError, camera_id
 from robot_teleop.trial_protocol import load_protocol, save_protocol
+from robot_teleop.camera_alignment import CameraAlignment
 from robot_teleop.state import godot_app_userdata_root
 from robot_teleop.robot_joint_animation import MeasuredJointHistory
 from tools.godot_desktop_stream import DesktopStreamConfig, GodotDesktopStream
@@ -1837,6 +1838,7 @@ class LanRemoteServer(ThreadingHTTPServer):
         self.stream_host = stream_host
         self.stream_port = stream_port
         self.capture_port = capture_port if capture_port is not None else stream_port
+        self.camera_alignment = CameraAlignment(root.parent, godot_app_userdata_root() / "Robot Teleop Vision")
         self.password = password
         self.godot_desktop_stream = GodotDesktopStream(godot_desktop_config) if godot_desktop_config else None
         self.robot_module = robot_module or os.environ.get("ROBOT_TELEOP_MODULE", "disabled")
@@ -2410,6 +2412,10 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path == "/camera-rgb":
             self.serve_camera_rgb(parsed.query)
             return
+        if parsed.path == "/api/v1/camera-alignment":
+            with self.server.camera_alignment.lock:
+                self.serve_json(self.server.camera_alignment.status())
+            return
         if parsed.path == "/api/v1/cameras":
             self.serve_camera_list()
             return
@@ -2650,6 +2656,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path in ("/webrtc-offer", "/frame-stream/webrtc-offer", "/api/v1/webrtc-offer"):
             self.handle_webrtc_offer()
             return
+        if parsed.path == "/api/v1/camera-alignment":
+            self.handle_camera_alignment()
+            return
         if parsed.path == "/api/v1/site-settings":
             self.handle_site_settings_save()
             return
@@ -2660,6 +2669,25 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             self.handle_trial_protocol_save()
             return
         self.send_error(404, "Not found")
+
+    def handle_camera_alignment(self) -> None:
+        origin = urlsplit(self.headers.get('Origin', ''))
+        if origin.scheme not in ('http', 'https') or origin.netloc.lower() != self.headers.get('Host', '').lower():
+            self.send_error(403, 'Camera alignment requires a same-origin page')
+            return
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+            if not 0 < length <= 1024 or self.headers.get('Content-Type', '').split(';', 1)[0] != 'application/json':
+                raise ValueError('Camera alignment requires a small JSON request.')
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict) or set(data) != {'mode'}:
+                raise ValueError('Invalid camera alignment request.')
+            with self.server.camera_alignment.lock:
+                result = self.server.camera_alignment.start(data['mode'], self.server.episode_recorder.state,
+                    self.server.latest_robot_status(), self.server.forward_tracking)
+            self.serve_json(result)
+        except (OSError, ValueError, TypeError) as exc:
+            self.send_error(400, str(exc)[:180])
 
     def handle_trial_protocol_save(self) -> None:
         origin = urlsplit(self.headers.get('Origin', ''))
@@ -2711,7 +2739,10 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
                 with self.server.browser_client_lock:
                     if self.server.browser_client_id != client:
                         raise RecordingError("Reconnect this controller before starting an episode.")
-                    result = recorder.start(client, data.get("task"), data.get("cameras"), data.get("fps", 15), data.get("trial"))
+                    with self.server.camera_alignment.lock:
+                        if self.server.camera_alignment.status().get("busy"):
+                            raise RecordingError("Wait for camera alignment to finish before recording.")
+                        result = recorder.start(client, data.get("task"), data.get("cameras"), data.get("fps", 15), data.get("trial"))
             elif command == 'score':
                 result = recorder.set_block_count(client, data.get('block_count'))
             elif command == 'rate':

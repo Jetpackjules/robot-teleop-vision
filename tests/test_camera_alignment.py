@@ -1,0 +1,66 @@
+import hashlib
+import json
+import time
+from pathlib import Path
+import pytest
+from robot_teleop.camera_alignment import CameraAlignment
+
+@pytest.fixture
+def alignment(tmp_path):
+    root = tmp_path / 'project'
+    user = tmp_path / 'userdata'
+    root.mkdir(); user.mkdir()
+    (user / 'camera_alignment_registry.json').write_text('{"camera": 123}')
+    (user / 'so101_robot_registration.json').write_text('{"arm": 456}')
+    profile = root / 'robot_modules/so101/local/so101_arm_pair.json'
+    profile.parent.mkdir(parents=True); profile.write_text('{"motor": 789}')
+    service = CameraAlignment(root, user)
+    (user / 'camera_alignment_web_status.json').write_text(json.dumps({'project_root': str(root), 'updated': time.time(), 'busy': False, 'message': 'Ready'}))
+    return service
+
+def test_start_backs_up_before_single_command_and_never_changes_originals(alignment):
+    originals = {p: p.read_bytes() for p in alignment.userdata.glob('*.json')}
+    sent = []
+    def send(payload):
+        assert (Path(alignment.last_backup) / 'manifest.json').exists()
+        sent.append(json.loads(payload))
+    result = alignment.start('markerless', 'idle', {'state': 'hold', 'follower_connected': True}, send)
+    assert result['busy']
+    assert len(sent) == 1 and sent[0]['type'] == 'camera_alignment'
+    assert sent[0]['mode'] == 'markerless'
+    manifest = json.loads((Path(result['backup']) / 'manifest.json').read_text())
+    assert any('so101_arm_pair.json' in p for p in manifest)
+    for source, record in manifest.items():
+        assert hashlib.sha256((Path(result['backup']) / record['file']).read_bytes()).hexdigest() == record['sha256']
+    assert all(p.read_bytes() == data for p, data in originals.items())
+    with pytest.raises(ValueError, match='already running'):
+        alignment.start('refine', 'idle', {}, send)
+    assert len(sent) == 1
+
+@pytest.mark.parametrize('mode,state,robot', [('bad','idle',{}), ('refine','recording',{}), ('refine','paused',{}), ('refine','idle',{'armed':True}), ('refine','idle',{'rest_return_active':True}), ('refine','idle',{'follower_connected':True,'state':'active'})])
+def test_rejections_do_not_send_or_create_backup(alignment, mode, state, robot):
+    with pytest.raises(ValueError):alignment.start(mode,state,robot,lambda _:pytest.fail('must not send'))
+    assert alignment.last_backup is None
+
+def test_stale_or_foreign_runtime_cannot_start(alignment):
+    path = alignment.userdata / 'camera_alignment_web_status.json'
+    for value in [{'project_root': str(alignment.root), 'updated': time.time()-10}, {'project_root':'/other/project','updated':time.time()}]:
+        path.write_text(json.dumps(value))
+        with pytest.raises(ValueError, match='offline'):alignment.start('refine','idle',{},lambda _:pytest.fail('must not send'))
+
+def test_backup_failure_blocks_start(alignment, monkeypatch):
+    def fail():raise OSError('disk full')
+    monkeypatch.setattr(alignment,'backup',fail)
+    with pytest.raises(OSError):alignment.start('refine','idle',{},lambda _:pytest.fail('must not send'))
+
+def test_acknowledgement_and_timeout_never_replay_commands(alignment):
+    sent=[]; alignment.start('refine','idle',{},sent.append)
+    packet=json.loads(sent[0])
+    path=alignment.userdata / 'camera_alignment_web_status.json'
+    path.write_text(json.dumps({'project_root':str(alignment.root),'updated':time.time(),'request_id':packet['request_id'],'busy':False,'message':'Previous alignment retained'}))
+    assert alignment.status()['message']=='Previous alignment retained'
+    assert alignment.pending is None
+    alignment.start('refine','idle',{},sent.append)
+    alignment.pending['sent']-=7
+    assert 'did not acknowledge' in alignment.status()['message']
+    assert len(sent)==2

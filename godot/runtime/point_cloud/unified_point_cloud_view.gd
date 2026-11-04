@@ -962,6 +962,37 @@ func _exit_tree() -> void:
 		_send_all_stream_commands(false)
 	_free_debug_panel()
 
+var _web_alignment_request_id := ""
+var _web_alignment_status_msec := 0
+
+func apply_remote_camera_alignment(payload: Dictionary) -> void:
+	var request_id := str(payload.get("request_id", ""))
+	var mode := str(payload.get("mode", ""))
+	var age := Time.get_unix_time_from_system() * 1000.0 - float(payload.get("sent_unix_ms", 0.0))
+	if request_id.is_empty() or request_id == _web_alignment_request_id or age < -1000.0 or age > 5000.0:
+		return
+	if mode not in ["markerless", "refine"] or _realsense_cloud_alignment_running():
+		return
+	_web_alignment_request_id = request_id
+	_request_native_realsense_calibration(mode)
+	_publish_web_camera_alignment_status(true)
+
+func _publish_web_camera_alignment_status(force: bool = false) -> void:
+	if _runtime_stream_owner_blocks_editor():
+		return
+	var now := Time.get_ticks_msec()
+	if not force and now - _web_alignment_status_msec < 1000:
+		return
+	_web_alignment_status_msec = now
+	RigCalibration.write_atomic(ProjectSettings.globalize_path("user://camera_alignment_web_status.json"), {
+		"project_root": ProjectSettings.globalize_path("res://"),
+		"updated": Time.get_unix_time_from_system(),
+		"request_id": _web_alignment_request_id,
+		"busy": _realsense_cloud_alignment_running(),
+		"message": calibration_status if not calibration_status.is_empty() else "Camera alignment is ready.",
+		"cameras": _enabled_realsense_serials().size(),
+	})
+
 func _process(_delta: float) -> void:
 	var started := Time.get_ticks_usec()
 	_sync_shared_capture_configuration()
@@ -976,6 +1007,7 @@ func _process(_delta: float) -> void:
 	_update_realsense_cloud_alignment_process()
 	_update_native_realsense_calibration()
 	_update_joint_realsense_refinement()
+	_publish_web_camera_alignment_status()
 	_update_robot_position_calibration_status()
 	_update_camera_renderers()
 	_update_realsense_direct_status()

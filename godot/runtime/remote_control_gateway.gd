@@ -49,6 +49,9 @@ func _process(_delta: float) -> void:
 		match str(payload.get("type", "tracking")):
 			"view_settings":
 				_apply_view_settings(payload)
+			"camera_alignment":
+				if str(payload.get("project_root", "")) == ProjectSettings.globalize_path("res://"):
+					get_tree().call_group("unified_point_cloud_view", "apply_remote_camera_alignment", payload)
 			"tracking":
 				_record_tracking(payload)
 	_update_tracking_rate()

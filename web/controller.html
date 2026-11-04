@@ -544,6 +544,16 @@
           </div>
           <div id="modeled-workspace-status" class="helper-text" role="status" aria-live="polite"></div>
         </section>
+        <section class="advanced-section" id="camera-alignment-controls">
+          <h3>Camera alignment</h3>
+          <p class="helper-text">Uses Godot’s existing calibration to align the physical cameras. Put the arm in Hold and keep the scene still. The preview pauses during calibration. Each run backs up camera and arm calibration first.</p>
+          <div class="button-row">
+            <button id="camera-align-auto" type="button" disabled>Auto Align Cameras</button>
+            <button id="camera-align-refine" type="button" disabled>Refine Current Alignment</button>
+          </div>
+          <div id="camera-alignment-status" class="helper-text" role="status" aria-live="polite">Checking Godot camera alignment…</div>
+          <p id="camera-alignment-backup" class="helper-text"></p>
+        </section>
         <section class="advanced-section">
           <h3>Site defaults</h3>
           <p class="helper-text">Save the current camera position and settings for every new browser that opens this installation.</p>

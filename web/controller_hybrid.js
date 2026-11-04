@@ -1,3 +1,4 @@
+    import { CameraAlignmentControl } from "./camera_alignment.js";
     import { robotModuleReady } from "./robot_module_host.js";
     import { EpisodeRecordingControl } from './episode_recording.js?v=20261101_result_prompt';
     import { TrialController } from './trial_controller.js?v=20261104_tray_task1';
@@ -7,6 +8,8 @@
     import { resolvePointDetail } from './point_detail_settings.js';
 
     const robotModule = await robotModuleReady;
+    const cameraAlignmentControl = new CameraAlignmentControl(document.getElementById("camera-alignment-controls"));
+    window.addEventListener("pagehide", () => cameraAlignmentControl.close());
     const recordingRoot = document.getElementById('episode-recording');
     const episodeRecording = recordingRoot ? new EpisodeRecordingControl(recordingRoot,
       {client: window.robotTeleopPageId}) : null;
