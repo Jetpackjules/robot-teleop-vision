@@ -474,7 +474,7 @@
           <fieldset id="squares-fusion-controls">
             <legend>Cross-camera squares fusion · experimental</legend>
             <label class="toggle-row"><span>Fuse RGB and filter conflicting depths</span><input id="squares-fusion-enabled" type="checkbox"></label>
-            <p class="helper-text">Shares valid colour across matching surfaces and rejects depth contradictions. Uses fresh visible cameras only. Off keeps the original fast squares renderer. Preview only; calibration and recordings stay unchanged.</p>
+            <p class="helper-text">Shares valid colour across matching surfaces and rejects depth contradictions. Where B/C agree, top camera A fills gaps without adding nearby duplicate layers. Uses fresh visible cameras only. Off keeps the original fast squares renderer. Preview only; calibration and recordings stay unchanged.</p>
             <p id="squares-fusion-status" class="helper-text" role="status">Off.</p>
           </fieldset>
           <fieldset id="point-cleanup-controls">

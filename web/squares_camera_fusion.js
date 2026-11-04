@@ -54,6 +54,7 @@ uniform highp usampler2DArray u_square_depth;
 uniform highp sampler2DArray u_square_color;
 uniform highp usampler2DArray u_square_rgb_visibility;
 uniform highp int u_square_count;uniform highp int u_square_source;
+uniform highp ivec3 u_square_priority; // A supplement, fixed B/C references; -1 when absent.
 uniform highp mat4 u_square_world_to_camera[4];
 uniform highp vec4 u_square_intrinsics[4];
 uniform highp vec2 u_square_size[4];
@@ -75,10 +76,68 @@ bool square_color_visible(int camera,vec3 local){
   float footprint=clamp(2.*p.z/min(focal.x,focal.y),.006,.025);
   return nearest>0. && p.z<=nearest+footprint;
 }
+// Native depth remains untouched. Only A's preview geometry is supplementary.
+vec3 square_local_point(int camera,ivec2 pixel,float depth){
+  vec4 k=u_square_intrinsics[camera];
+  return vec3((float(pixel.x)-k.z)*depth/k.x,-(float(pixel.y)-k.w)*depth/k.y,-depth);
+}
+float square_depth_at(int camera,ivec2 pixel){
+  if(any(lessThan(pixel,ivec2(0)))||any(greaterThanEqual(pixel,ivec2(u_square_size[camera]))))return 0.;
+  return float(texelFetch(u_square_depth,ivec3(pixel,camera),0).r)*.001;
+}
+bool square_patch_normal(int camera,ivec2 pixel,vec3 center,bool reference,out vec3 normal){
+  int step=int(clamp(floor(.003*u_square_intrinsics[camera].x/(-center.z)+.5),1.,4.));
+  ivec2 dx=ivec2(step,0),dy=ivec2(0,step);
+  float l=square_depth_at(camera,pixel-dx),r=square_depth_at(camera,pixel+dx);
+  float t=square_depth_at(camera,pixel-dy),b=square_depth_at(camera,pixel+dy);
+  float spread=reference?max(.008,-center.z*.012):(-center.z*.5);
+  if(min(min(l,r),min(t,b))<=0. || max(max(abs(l+center.z),abs(r+center.z)),max(abs(t+center.z),abs(b+center.z)))>spread)return false;
+  vec3 x=square_local_point(camera,pixel+dx,r)-square_local_point(camera,pixel-dx,l);
+  vec3 y=square_local_point(camera,pixel+dy,b)-square_local_point(camera,pixel-dy,t);
+  vec3 n=cross(x,y);if(length(n)<1e-9)return false;
+  n=normalize(n);if(abs(dot(center-square_local_point(camera,pixel-dx,l),n))>.003)return false;
+  normal=normalize(transpose(mat3(u_square_world_to_camera[camera]))*n);return true;
+}
+bool square_reference_patch(int camera,vec3 world,out vec3 anchor,out vec3 normal){
+  vec3 local=(u_square_world_to_camera[camera]*vec4(world,1)).xyz;
+  float z=-local.z;if(z<=0.)return false;
+  vec4 k=u_square_intrinsics[camera];
+  ivec2 center=ivec2(floor(vec2(local.x,-local.y)/z*k.xy+k.zw+.5));
+  // A small physical search catches noise on either side of a surface, including
+  // edge pixels. Bounded 25 samples per reference, only for A's points.
+  int step=int(clamp(floor(.008*k.x/z+.5),1.,12.));
+  float best=.028*.028;vec3 selected=vec3(0);ivec2 selected_pixel=center;bool found=false;
+  for(int y=-2;y<=2;y++)for(int x=-2;x<=2;x++){
+    ivec2 pixel=center+ivec2(x,y)*step;float d=square_depth_at(camera,pixel);if(d<=0.)continue;
+    vec3 p=square_local_point(camera,pixel,d);float error=dot(p-local,p-local);
+    if(error<best){best=error;selected=p;selected_pixel=pixel;found=true;}
+  }
+  if(!found || !square_patch_normal(camera,selected_pixel,selected,true,normal))return false;
+  mat4 inverse=u_square_world_to_camera[camera];
+  anchor=transpose(mat3(inverse))*(selected-inverse[3].xyz);return true;
+}
+bool square_keep_supplement(vec3 world,vec3 local){
+  if(u_square_source!=u_square_priority.x || any(lessThan(u_square_priority,ivec3(0))))return true;
+  int b=u_square_priority.y,c=u_square_priority.z;
+  if(u_square_capture_delta[b]>.05 || u_square_capture_delta[c]>.05)return true;
+  vec3 bp,bn,cp,cn;
+  if(!square_reference_patch(b,world,bp,bn) || !square_reference_patch(c,world,cp,cn))return true;
+  // Both trusted views must corroborate the same nearby, smooth plane.
+  if(abs(dot(bn,cn))<.88 || abs(dot(bp-cp,bn))>.006 || abs(dot(bp-cp,cn))>.006)return true;
+  float bd=abs(dot(world-bp,bn)),cd=abs(dot(world-cp,cn));
+  if(max(bd,cd)>.025 || max(bd,cd)<=.0035)return true;
+  vec4 k=u_square_intrinsics[u_square_source];
+  ivec2 pixel=ivec2(floor(vec2(local.x,-local.y)/(-local.z)*k.xy+k.zw+.5));vec3 own_normal;
+  // A genuinely new face (e.g. cube top versus side faces) is useful coverage.
+  if(square_patch_normal(u_square_source,pixel,local,false,own_normal) &&
+      max(abs(dot(own_normal,bn)),abs(dot(own_normal,cn)))<.65)return true;
+  return false;
+}
 // False rejects a measured point; colour is borrowed only on the same surface.
 bool fuse_square_surface(vec3 world,vec3 local,inout vec4 color){
   if(u_square_count<2||u_square_source<0)return true;
   int own=u_square_source;
+  if(!square_keep_supplement(world,local))return false;
   if(color.a>0. && !square_color_visible(own,local))color.a=0.;
   float best=-1.;vec3 borrowed=vec3(0);int contradictions=0,agreements=0;
   for(int peer=0;peer<4;peer++){
@@ -182,13 +241,15 @@ export class SquaresCameraFusion {
   }
   bind(program,source,now){
     const gl=this.gl;let u=this.bindings.get(program);
-    if(!u){u={};for(const n of ['u_square_depth','u_square_color','u_square_rgb_visibility','u_square_count','u_square_source','u_square_world_to_camera[0]','u_square_intrinsics[0]','u_square_size[0]','u_square_rgb_rotation[0]','u_square_rgb_translation[0]','u_square_rgb_intrinsics[0]','u_square_rgb_size[0]','u_square_visibility_size[0]','u_square_capture_delta[0]'])u[n]=gl.getUniformLocation(program,n);this.bindings.set(program,u);}
+    if(!u){u={};for(const n of ['u_square_depth','u_square_color','u_square_rgb_visibility','u_square_count','u_square_source','u_square_priority','u_square_world_to_camera[0]','u_square_intrinsics[0]','u_square_size[0]','u_square_rgb_rotation[0]','u_square_rgb_translation[0]','u_square_rgb_intrinsics[0]','u_square_rgb_size[0]','u_square_visibility_size[0]','u_square_capture_delta[0]'])u[n]=gl.getUniformLocation(program,n);this.bindings.set(program,u);}
     // Bind textures even when disabled: active sampler types must never alias.
     for(const [name,key,unit] of [['u_square_depth','depth',10],['u_square_color','color',11],['u_square_rgb_visibility','visibility',12]]){
       gl.uniform1i(u[name],unit);gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(gl.TEXTURE_2D_ARRAY,this[key]||null);
     }
     const own=this.cameras.indexOf(source),active=this.depth&&this.cameras.length>=2&&own>=0;
     gl.uniform1i(u.u_square_count,active?this.cameras.length:0);gl.uniform1i(u.u_square_source,own);
+    const roles=['262522074294','262522075787','262522076048'].map(id=>this.cameras.findIndex(c=>String(c.metadata.id).replace(/^realsense:/,'')===id));
+    gl.uniform3iv(u.u_square_priority,roles);
     if(!active)return;
     const arrays={matrices:[],intrinsics:[],sizes:[],rotations:[],translations:[],rgbIntrinsics:[],rgbSizes:[],visSizes:[],deltas:[]};
     const stamp=c=>Number(c.metadata.geometry_capture_unix_ms||c.metadata.capture_unix_ms||0),ownTime=stamp(source);
