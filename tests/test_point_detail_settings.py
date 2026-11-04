@@ -39,3 +39,13 @@ def test_cleanup_controls_persist_on_host_and_reject_fractional_support():
     assert value['point_cleanup_enabled'] is True
     with pytest.raises(ValueError):
         handler.validate_site_settings({'point_cleanup_support': 2.5})
+
+
+def test_arm_mask_buffer_persists_with_finite_bounds():
+    handler = LanRemoteHandler.__new__(LanRemoteHandler)
+    handler.server = SimpleNamespace(robot_operator=load_robot_operator('disabled'))
+    for value, expected in [(0, 0), (25, 25), (50, 50), (-1, 0), (75, 50)]:
+        assert handler.validate_site_settings({'robot_overlay_body_buffer_mm': value})['robot_overlay_body_buffer_mm'] == expected
+    for value in [True, '25', float('nan'), float('inf')]:
+        with pytest.raises(ValueError):
+            handler.validate_site_settings({'robot_overlay_body_buffer_mm': value})

@@ -39,6 +39,17 @@ const server = createTestServer();
       if(render('claw')!==claw||claw>=all)throw Error('Claw mode must render only the two end-effector links');
       const clawMask=p.robotMaskCapsules();
       if(!clawMask||JSON.stringify([...clawMask.starts,...clawMask.ends])!==JSON.stringify([...fullMask.starts,...fullMask.ends]))throw Error('Claw-only visibility must keep exactly the full-arm occlusion mask');
+      window.setGodotHybridViewSettings({robot_overlay_body_buffer_mm:50});
+      const buffered=p.robotMaskCapsules();
+      for(let i=0;i<state.robotRenderer.maskChain.radii.length;i++){
+        const isClaw=state.robotRenderer.endEffectorLinks.includes(state.robotRenderer.maskChain.names[i]);
+        for(const field of ['starts','ends']){
+          for(let axis=0;axis<3;axis++)if(buffered[field][4*i+axis]!==fullMask[field][4*i+axis])throw Error('Buffer moved a calibrated endpoint');
+          if(Math.abs(buffered[field][4*i+3]-fullMask[field][4*i+3]-(isClaw?0:.05))>1e-6)throw Error('Buffer must expand body only');
+        }
+      }
+      window.setGodotHybridViewSettings({robot_overlay_body_buffer_mm:0});
+      if(JSON.stringify([...p.robotMaskCapsules().starts])!==JSON.stringify([...fullMask.starts]))throw Error('Zero buffer changed existing mask');
       const missing=names.find(name=>!state.robotRenderer.endEffectorLinks.includes(name)),saved=state.robotMeshes[missing];
       delete state.robotMeshes[missing];
       if(p.robotMaskCapsules()!==null)throw Error('An unavailable hidden arm model must still prevent masking');

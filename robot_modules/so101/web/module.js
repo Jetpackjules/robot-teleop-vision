@@ -111,6 +111,8 @@ const VIEW_MARKUP = `
     <select id="so101-overlay-style"><option value="realistic" selected>Realistic materials</option><option value="alignment">Alignment (transparent + outlines)</option><option value="solid">Solid yellow</option></select>
   </label>
   <label class="toggle-row"><span>Overlay occludes scanned arm</span><input id="so101-overlay-occlusion-enabled" type="checkbox" checked></label>
+  <label>Arm occlusion buffer <output id="so101-mask-buffer-value">0 mm</output><input id="so101-mask-buffer" type="range" min="0" max="50" step="1" value="0"></label>
+  <p class="helper-text">Extra clearance around the base and arm to hide wires and scan edges. Claw masking stays unchanged. Save Current Setup as Default to share this setting.</p>
   <label>Rest of arm opacity <output id="so101-body-opacity-value">100%</output><input id="so101-body-opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
   <p class="helper-text">Keeps the claw tip solid. Choose Full arm to show the rest as a ghost.</p>
   <label class="toggle-row"><span>Show commanded target ghost</span><input id="so101-target-ghost-enabled" type="checkbox" checked></label>
@@ -260,6 +262,7 @@ class So101WebModule {
       robot_overlay_enabled: element("so101-overlay-enabled")?.checked !== false,
       robot_overlay_scope: element("so101-overlay-scope")?.value || "full",
       robot_overlay_style: element("so101-overlay-style")?.value || "realistic",
+      robot_overlay_body_buffer_mm: Number(element("so101-mask-buffer")?.value ?? 0),
       robot_overlay_body_opacity: Number(element("so101-body-opacity")?.value ?? 1),
       robot_overlay_mask_scanned_robot: element("so101-overlay-occlusion-enabled")?.checked !== false,
       arm_measured_feedback_enabled: true,
@@ -276,6 +279,7 @@ class So101WebModule {
     element("so101-overlay-enabled").checked = saved.robot_overlay_enabled !== false;
     element("so101-overlay-scope").value = saved.robot_overlay_scope === "claw" ? "claw" : "full";
     element("so101-overlay-style").value = ["realistic", "solid", "alignment"].includes(saved.robot_overlay_style) ? saved.robot_overlay_style : "realistic";
+    element("so101-mask-buffer").value = String(Number.isFinite(saved.robot_overlay_body_buffer_mm) ? Math.max(0,Math.min(50,saved.robot_overlay_body_buffer_mm)) : 0);
     element("so101-body-opacity").value = String(Number.isFinite(saved.robot_overlay_body_opacity) ? Math.max(0,Math.min(1,saved.robot_overlay_body_opacity)) : 1);
     element("so101-overlay-occlusion-enabled").checked = (saved.robot_overlay_mask_scanned_robot ?? saved.robot_overlay_mask_scanned_arm) !== false;
     element("so101-target-ghost-enabled").checked = saved.arm_target_ghost_enabled !== false;
@@ -287,6 +291,8 @@ class So101WebModule {
 
   syncOverlayScopeControls() {
     element("so101-overlay-occlusion-enabled").disabled = false;
+    element("so101-mask-buffer").disabled = !element("so101-overlay-occlusion-enabled").checked;
+    element("so101-mask-buffer-value").textContent = `${Number(element("so101-mask-buffer").value)} mm`;
     element("so101-body-opacity").disabled = element("so101-overlay-scope").value === "claw";
     element("so101-body-opacity-value").textContent = `${Math.round(Number(element("so101-body-opacity").value)*100)}%`;
   }
@@ -751,6 +757,7 @@ class So101WebModule {
     for (const id of ["so101-overlay-enabled", "so101-overlay-occlusion-enabled", "so101-overlay-style", "so101-overlay-scope"]) {
       element(id).addEventListener("change", (event) => { this.syncOverlayScopeControls(); sendViewSettings(); event.currentTarget.blur(); });
     }
+    element("so101-mask-buffer").addEventListener("input", () => { this.syncOverlayScopeControls(); sendViewSettings(); });
     element("so101-body-opacity").addEventListener("input", () => { this.syncOverlayScopeControls(); sendViewSettings(); });
     element("so101-calibrate").addEventListener("click", async () => {
       const calibration = this.calibrationStatus();

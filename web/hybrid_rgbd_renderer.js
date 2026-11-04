@@ -153,6 +153,7 @@ const state = {
     robot_overlay_enabled: true,
     robot_overlay_scope: "full",
     robot_overlay_body_opacity: 1,
+    robot_overlay_body_buffer_mm: 0,
     robot_overlay_style: "alignment",
     robot_overlay_mask_scanned_robot: true,
     white_background_enabled: false,
@@ -1241,8 +1242,11 @@ function robotMaskCapsules() {
     const start = transformDictionaryMatrix(state.robotTransforms[names[index]]);
     const end = transformDictionaryMatrix(state.robotTransforms[names[index + 1]]);
     if (!start || !end) return null;
-    starts.set([start[12], start[13], start[14], radii[index]], index * 4);
-    ends.set([end[12], end[13], end[14], radii[index]], index * 4);
+    // Capsules belong to their starting link; never expand the claw capsule.
+    const claw = (state.robotRenderer.endEffectorLinks || []).includes(names[index]);
+    const radius = radii[index] + (claw ? 0 : state.settings.robot_overlay_body_buffer_mm / 1000);
+    starts.set([start[12], start[13], start[14], radius], index * 4);
+    ends.set([end[12], end[13], end[14], radius], index * 4);
   }
   return { starts, ends };
 }
@@ -3647,6 +3651,8 @@ export function setGodotHybridViewSettings(settings = {}) {
       ? overlayStyle : state.settings.robot_overlay_style,
     robot_overlay_scope: ["full", "claw"].includes(settings.robot_overlay_scope)
       ? settings.robot_overlay_scope : state.settings.robot_overlay_scope,
+    robot_overlay_body_buffer_mm: Number.isFinite(settings.robot_overlay_body_buffer_mm)
+      ? clamp(settings.robot_overlay_body_buffer_mm, 0, 50) : state.settings.robot_overlay_body_buffer_mm,
     robot_overlay_body_opacity: Number.isFinite(settings.robot_overlay_body_opacity)
       ? clamp(settings.robot_overlay_body_opacity, 0, 1) : state.settings.robot_overlay_body_opacity,
   };
