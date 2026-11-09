@@ -874,11 +874,15 @@ def test_practice_records_observations_actions_but_never_pass_fail(tmp_path, con
              'task_id': 'single_block', 'time_limit_seconds': 1 if timeout else 60,
              'phase': 'practice', 'success_metric': 'practice', 'outcome_rule': 'manual', 'result_prompt': False}
     with recorder_at(tmp_path) as (recorder, _, _):
-        recorder.start('page-a', 'Free exploration', trial=trial)
-        wait_for(lambda: recorder.samples >= 3)
+        # Exercise the outcome policy at a supported rate without putting disk
+        # throughput under test. Report recorder errors instead of timing out.
+        recorder.start('page-a', 'Free exploration', fps=10, trial=trial)
+        wait_for(lambda: recorder.samples >= 3 or recorder.state == 'error')
+        assert recorder.state != 'error', recorder.status()
         if not timeout:
             recorder.stop('page-a', outcome='success')  # A stale result selector cannot score practice.
-        wait_for(lambda: recorder.state == 'idle', timeout=4)
+        wait_for(lambda: recorder.state in ('idle', 'error'))
+        assert recorder.state == 'idle', recorder.status()
         saved = recorder.last_saved
         assert saved['status'] == 'complete' and saved['outcome'] == 'unrated'
         assert saved['timed_out'] is timeout and saved['trial'] == trial
