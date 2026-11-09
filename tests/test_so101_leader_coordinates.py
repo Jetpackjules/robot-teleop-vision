@@ -85,6 +85,7 @@ import {readFileSync} from 'node:fs';
 // Avoid constructing the live controller/socket. Invoke the real poller with
 // serial replies and its output transport replaced by in-memory fixtures.
 globalThis.window = {so101ArmController: {}, addEventListener() {}};
+globalThis.document = {hidden: false, hasFocus: () => true};
 const {So101ArmController} = await import('./controller.mjs');
 const inputs = JSON.parse(readFileSync(0, 'utf8'));
 const controller = Object.create(So101ArmController.prototype);
@@ -123,6 +124,7 @@ console.log(JSON.stringify(sent));
 
 LEADER_SERIAL_PROBE = """
 globalThis.window = {so101ArmController: {}, addEventListener() {}, clearTimeout() {}};
+globalThis.document = {hidden: false, hasFocus: () => true};
 let clock = 0;
 globalThis.performance = {now: () => clock};
 globalThis.setTimeout = (callback, delay) => {clock += delay; queueMicrotask(callback); return 0;};
@@ -153,7 +155,7 @@ await controller.pollLeader();
 replies[1] = null;
 await controller.pollLeader();
 const briefDropoutCommands = sent.filter(item => item.type === 'arm_command').length;
-for (let i = 0; i < 4; i++) await controller.pollLeader();
+for (let i = 0; i < 5; i++) await controller.pollLeader();
 const beforeRecovery = sent.filter(item => item.type === 'arm_command').length;
 let enableError = '';
 try {controller.enableArm();} catch (error) {enableError = error.message;}
@@ -165,11 +167,30 @@ console.log(JSON.stringify({briefDropoutCommands, beforeRecovery, enableError,
   enables: sent.filter(item => item.type === 'arm_enable').length}));
 """, {}, production=True)
     assert actual["briefDropoutCommands"] == 2
-    assert actual["beforeRecovery"] == 3
+    assert actual["beforeRecovery"] == 6
     assert actual["holds"] == int(armed)
     assert "fresh readings" in actual["enableError"]
-    assert actual["afterRecovery"] == 4
+    assert actual["afterRecovery"] == 7
     assert actual["enables"] == 0
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+def test_stalled_poll_gets_one_retry_without_sending_stale_motion(tmp_path, recovers):
+    actual = run_node(tmp_path, LEADER_SERIAL_PROBE + """
+controller.latest.armed = true;
+await controller.pollLeader();
+clock += 600;
+replies[1] = null;
+await controller.pollLeader();
+const afterStall = sent.map(packet => packet.type);
+const freshAfterStall = controller.leaderInputFresh();
+""" + ("replies[1] = 1901;" if recovers else "") + """
+await controller.pollLeader();
+console.log(JSON.stringify({afterStall, freshAfterStall, afterRetry: sent.map(packet => packet.type)}));
+""", {}, production=True)
+    assert actual["afterStall"] == ["arm_command"]
+    assert actual["freshAfterStall"] is False
+    assert actual["afterRetry"] == ["arm_command", "arm_command" if recovers else "arm_hold"]
 
 
 def test_disconnect_clears_cached_encoders_and_cancels_inflight_poll(tmp_path):

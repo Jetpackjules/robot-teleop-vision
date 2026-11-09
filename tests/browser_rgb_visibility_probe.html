@@ -1,0 +1,64 @@
+<!doctype html><meta charset="utf-8"><title>RGB visibility regression checks</title>
+<pre id="result">Running original-RGB visibility checks…</pre><canvas id="canvas" width="64" height="48"></canvas>
+<script type="module">
+import {state,uploadCamera,identityMatrix,inverseRigidTransform} from './renderer.js';
+import {GpuCameraRig,compileGpuProgram,FULLSCREEN_VERTEX_SHADER,RIG_SAMPLING_SHADER} from './hybrid_camera_quality.js';
+const passed=[],pixels=[];
+const check=(value,label)=>{if(!value)throw Error(label);passed.push(label);};
+try {
+ const gl=document.getElementById('canvas').getContext('webgl2',{alpha:false,antialias:false});
+ check(!!gl,'WebGL2 available');state.gl=gl;state.cameras=[];
+ const rig=new GpuCameraRig(gl),width=32,height=24;
+ const program=compileGpuProgram(gl,FULLSCREEN_VERTEX_SHADER,`#version 300 es
+ precision highp float;precision highp int;${RIG_SAMPLING_SHADER}
+ uniform int u_source;out vec4 color;
+ void main(){color=vec4(rig_projected_color(vec3(0,0,-1),vec3(0,0,1),vec3(.34),u_source),1);}`);
+ const settings={mesh_depth_delta:.05,mesh_max_edge:.08};
+ const make=(id,z,rgb,blind=false,edge=false)=>{
+  const metadata={id,width,height,color_width:width,color_height:height,color_space:'original_rgb',
+   intrinsics:[24,24,16,12],transform:Array.from(identityMatrix()),
+   color_projection:{model:'pinhole',size:[width,height],intrinsics:[24,24,blind?-1000:edge?.01:16,12],
+    extrinsics:[1,0,0,0,1,0,0,0,1,0,0,0]}};
+  const depth=new Uint16Array(width*height).fill(z),colorPixels=new Uint8Array(width*height*3);
+  for(let p=0;p<width*height;p++)colorPixels.set(rgb,p*3);
+  const camera=uploadCamera({metadata,width,height,depth,colorPixels,modelMatrix:identityMatrix()});
+  if(!state.cameras.includes(camera))state.cameras.push(camera);
+  return camera;
+ };
+ const draw=(z=992,{clear=false,ownDepth=1000,blind=false,black=false,stale=false,transformChanged=false,edge=false}={})=>{
+  if(clear)rig.clear();
+  const a=make('A',ownDepth,black?[0,0,0]:[240,40,20],blind,edge),b=make('B',z,[0,255,0],true);
+  if(transformChanged)a.modelMatrix[12]=.0001;
+  const now=performance.now();a.lastUpdateMs=stale?now-2000:now;b.lastUpdateMs=now;
+  rig.update(state.cameras,inverseRigidTransform,now,settings);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.bindVertexArray(null);gl.viewport(0,0,1,1);
+  gl.disable(gl.DEPTH_TEST);gl.useProgram(program);rig.bind(program);
+  gl.uniform1f(gl.getUniformLocation(program,'u_fusion_depth_tolerance'),.035);
+  gl.uniform1i(gl.getUniformLocation(program,'u_source'),0);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+  pixels.push({z,ownDepth,pixel:Array.from(pixel)});
+  check(gl.getError()===gl.NO_ERROR,'Visibility cache and shader have no WebGL errors');
+  return pixel;
+ };
+ const red=p=>p[0]>230&&p[1]<50&&p[2]<30,gray=p=>p.slice(0,3).every(v=>Math.abs(v-87)<=1);
+ check(red(draw(992,{clear:true})),'8 mm disagreement on overlapping planes retains verified source RGB');
+ for(const z of [995,990,997,991,996])check(red(draw(z)),'Small frame-to-frame depth noise does not create gray');
+ check(red(draw(992,{clear:true})),'Stable color seeds narrow-band temporal evidence');
+ check(red(draw(986)),'One borderline 14 mm observation retains previously visible color');
+ check(gray(draw(986)),'A persistent mismatch is not authorized indefinitely by history');
+ draw(992,{clear:true});
+ check(gray(draw(950)),'A clear foreground occluder rejects background RGB immediately');
+ check(gray(draw(900,{clear:true})),'A 10 cm foreground occluder cannot be mistaken for calibration noise');
+ check(gray(draw(992,{clear:true,ownDepth:950})),'Source-camera self-occlusion cannot be bypassed by fallback');
+ check(gray(draw(992,{clear:true,blind:true})),'True out-of-RGB coverage remains neutral gray');
+ check(red(draw(1000,{clear:true,edge:true})),'Verified source RGB survives a positive weight below the blend threshold at a coverage edge');
+ check(gray(draw(1000,{clear:true,edge:true,ownDepth:950})),'Tiny-weight source fallback still rejects source-camera self-occlusion');
+ check(gray(draw(992,{clear:true,stale:true})),'Stale RGB cannot fill missing color');
+ check(draw(992,{clear:true,black:true}).slice(0,3).every(v=>v===0),'Actual black surfaces remain black');
+ draw(992,{clear:true});
+ check(gray(draw(986,{transformChanged:true})),'A calibration change immediately invalidates old visibility evidence');
+ rig.clear();gl.deleteProgram(program);
+ document.getElementById('result').textContent=JSON.stringify({passed,pixels,failures:0},null,2);
+}catch(error){document.getElementById('result').textContent=JSON.stringify({passed,pixels,error:String(error),failures:1},null,2);}
+</script>

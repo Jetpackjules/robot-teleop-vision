@@ -127,13 +127,13 @@ def local_relay():
 
 def test_newest_tab_takes_over_and_old_reconnect_cannot_steal_input(local_relay):
     server, receiver = local_relay
-    old, _ = open_ws(server.server_port, client_id="old-page")
+    old, _ = open_ws(server.server_port, client_id="old-page", opened_ms=1000)
     new = retry = None
     try:
         assert json.loads(server_frame(old)[1])["state"] == "owner"
         old.sendall(masked_frame(json.dumps(packet()).encode()))
         original = json.loads(receiver.recv(4096))
-        new, response = open_ws(server.server_port, client_id="new-page")
+        new, response = open_ws(server.server_port, client_id="new-page", opened_ms=2000)
         assert b"101" in response
         assert json.loads(server_frame(new)[1])["state"] == "owner"
         assert json.loads(server_frame(old)[1])["state"] == "superseded"
@@ -147,7 +147,7 @@ def test_newest_tab_takes_over_and_old_reconnect_cannot_steal_input(local_relay)
         assert accepted["source"] != original["source"]
         assert accepted["arm"]["active"]
         # A delayed network retry from the old page remains permanently revoked.
-        retry, response = open_ws(server.server_port, client_id="old-page")
+        retry, response = open_ws(server.server_port, client_id="old-page", opened_ms=1000)
         assert b"101" in response
         assert json.loads(server_frame(retry)[1])["state"] == "superseded"
         # Old handler teardown/rejected reconnect must not pause the new owner.
@@ -185,16 +185,16 @@ def test_idle_owner_survives_old_three_second_timeout_and_rejects_stale_input(lo
 
 def test_disconnected_old_identity_stays_revoked_after_new_tab(local_relay):
     server, receiver = local_relay
-    old, _ = open_ws(server.server_port, client_id="lost-page")
+    old, _ = open_ws(server.server_port, client_id="lost-page", opened_ms=1000)
     assert json.loads(server_frame(old)[1])["state"] == "owner"
     old.sendall(masked_frame(json.dumps(packet()).encode()))
     receiver.recv(4096)
     old.close()
     assert not json.loads(receiver.recv(4096))["arm"]["active"]
-    new, _ = open_ws(server.server_port, client_id="latest-page")
+    new, _ = open_ws(server.server_port, client_id="latest-page", opened_ms=2000)
     with new:
         assert json.loads(server_frame(new)[1])["state"] == "owner"
-        late, _ = open_ws(server.server_port, client_id="lost-page")
+        late, _ = open_ws(server.server_port, client_id="lost-page", opened_ms=1000)
         with late:
             assert json.loads(server_frame(late)[1])["state"] == "superseded"
 

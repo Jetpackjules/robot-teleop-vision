@@ -75,8 +75,19 @@ class GenericRobotOperator:
             "fault": "robot service unavailable",
         }
 
+    def recording_spec(self) -> dict[str, Any] | None:
+        """Optional module-owned demonstration state/action schema."""
+        return None
+
+    def recording_sample(self, status: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Return fresh measured state and applied action, without commanding hardware."""
+        return None
+
     def hold_message(self) -> dict[str, Any]:
         return self._system_command("hold")
+
+    def is_hold(self, message: Mapping[str, Any]) -> bool:
+        return message.get("control_space") == "system" and message.get("command") == "hold"
 
     def _system_command(self, command: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return {
@@ -195,6 +206,10 @@ class GenericRobotOperator:
     def structured_view_settings(self, data: Mapping[str, Any]) -> dict[str, Any]:
         """Validate module-owned structured actions; never installation defaults."""
         return {}
+
+    def view_settings_error(self, settings: Mapping[str, Any], status: Mapping[str, Any]) -> str:
+        """Module-owned preflight for explicit settings/actions on its control socket."""
+        return ""
 
     def resolve_auxiliary_device(self, view_id: str, configured: str = "") -> str:
         return str(configured or "")

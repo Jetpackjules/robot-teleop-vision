@@ -1,4 +1,5 @@
 #include "realsense_pair_calibrator.h"
+#include "calibration_image_orientation.h"
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/array.hpp>
@@ -21,6 +22,8 @@
 
 #if defined(REALSENSE_DIRECT_ENABLED) && defined(REALSENSE_NATIVE_CALIBRATION_ENABLED)
 #include <librealsense2/rs.hpp>
+#include "charuco_pose.h"
+#include "charuco_depth_anchor.h"
 #if __has_include(<opencv2/objdetect/aruco_detector.hpp>)
 #include <opencv2/objdetect/aruco_detector.hpp>
 #define REALSENSE_MODERN_ARUCO
@@ -406,15 +409,18 @@ bool capture_camera_once(
             if (p_need_marker && int(r_capture.marker_to_depth.size()) < wanted_marker_frames) {
                 cv::Matx44d marker_to_color;
                 double reprojection = 0.0;
-                if (detect_marker_pose(
-                    bgr,
-                    r_capture.color_intrinsics,
-                    p_options.marker_id,
-                    p_options.marker_size_m,
-                    marker_to_color,
-                    nullptr,
-                    reprojection
-                )) {
+                bool detected = false;
+                if (p_options.mode == "charuco") {
+                    int corners = 0;
+                    const teleop_charuco::Spec board{p_options.charuco_squares_x, p_options.charuco_squares_y,
+                        p_options.charuco_square_m, p_options.marker_size_m, p_options.charuco_dictionary};
+                    detected = teleop_charuco::detect_pose(bgr, camera_matrix(r_capture.color_intrinsics), board,
+                        marker_to_color, reprojection, corners);
+                } else {
+                    detected = detect_marker_pose(bgr, r_capture.color_intrinsics, p_options.marker_id,
+                        p_options.marker_size_m, marker_to_color, nullptr, reprojection);
+                }
+                if (detected) {
                     r_capture.marker_to_depth.push_back(r_capture.depth_to_color.inv() * marker_to_color);
                     r_capture.marker_reprojection.push_back(reprojection);
                     if (reprojection < 2.0) {
@@ -442,7 +448,7 @@ bool capture_camera_once(
         r_capture.aligned_depth_m = median_depth(aligned_depth_frames);
         if (p_need_marker && int(r_capture.marker_to_depth.size()) < 8) {
             std::ostringstream message;
-            message << "camera " << p_serial << " saw ArUco " << p_options.marker_id << " in only "
+            message << "camera " << p_serial << " saw " << (p_options.mode == "charuco" ? "a usable ChArUco board" : "the ArUco marker") << " in only "
                     << r_capture.marker_to_depth.size() << " frames";
             r_error = message.str();
             return false;
@@ -579,6 +585,28 @@ cv::Matx44d average_transforms(const std::vector<cv::Matx44d> &p_transforms) {
         output(row, 3) = translation[row];
     }
     return output;
+}
+
+bool stable_charuco_poses(Capture &capture) {
+    const auto &poses = capture.marker_to_depth;
+    if (poses.size() < 8) return false;
+    size_t medoid = 0;
+    double best = std::numeric_limits<double>::infinity();
+    for (size_t i=0;i<poses.size();++i) {
+        double score=0;
+        for (const auto &pose:poses) {auto delta=transform_delta(poses[i],pose);score+=delta.first/.01+delta.second/2.0;}
+        if(score<best){best=score;medoid=i;}
+    }
+    std::vector<cv::Matx44d> kept;
+    std::vector<double> reprojection;
+    for(size_t i=0;i<poses.size();++i){
+        auto delta=transform_delta(poses[medoid],poses[i]);
+        if(delta.first<=.01&&delta.second<=2.0){kept.push_back(poses[i]);reprojection.push_back(capture.marker_reprojection[i]);}
+    }
+    if(kept.size()<8||kept.size()*4<poses.size()*3)return false;
+    capture.marker_to_depth=std::move(kept);
+    capture.marker_reprojection=std::move(reprojection);
+    return true;
 }
 
 cv::Vec3d deproject(const rs2_intrinsics &p_intrinsics, double p_x, double p_y, double p_depth) {
@@ -1917,10 +1945,11 @@ bool mask_marker(cv::Mat &p_bgr, int p_marker_id, cv::Mat &r_mask) {
     return true;
 }
 
-bool run_lightglue(
+bool run_lightglue_orientation(
     const RealSensePairCalibrator::Options &p_options,
     Capture &p_reference,
     Capture &p_target,
+    int p_rotation_ccw_deg,
     cv::Matx44d &r_target_depth_to_reference_depth,
     int &r_matches,
     int &r_inliers,
@@ -1961,8 +1990,20 @@ bool run_lightglue(
     cv::Mat reference_image = p_reference.color_bgr.clone();
     mask_marker(target_image, p_options.marker_id, p_target.marker_mask);
     mask_marker(reference_image, p_options.marker_id, p_reference.marker_mask);
-    cv::resize(target_image, target_image, cv::Size(input_width, input_height), 0.0, 0.0, cv::INTER_AREA);
-    cv::resize(reference_image, reference_image, cv::Size(input_width, input_height), 0.0, 0.0, cv::INTER_AREA);
+    if (p_rotation_ccw_deg == 90) cv::rotate(target_image, target_image, cv::ROTATE_90_COUNTERCLOCKWISE);
+    else if (p_rotation_ccw_deg == 180) cv::rotate(target_image, target_image, cv::ROTATE_180);
+    else if (p_rotation_ccw_deg == 270) cv::rotate(target_image, target_image, cv::ROTATE_90_CLOCKWISE);
+    const auto target_fit = calibration_image_fit(target_image.cols, target_image.rows, input_width, input_height);
+    const auto reference_fit = calibration_image_fit(reference_image.cols, reference_image.rows, input_width, input_height);
+    auto letterbox = [](const cv::Mat &image, const CalibrationImageFit &fit) {
+        cv::Mat resized;
+        cv::resize(image, resized, cv::Size(fit.width, fit.height), 0.0, 0.0, cv::INTER_AREA);
+        cv::Mat padded = cv::Mat::zeros(input_height, input_width, image.type());
+        resized.copyTo(padded(cv::Rect(fit.left, fit.top, fit.width, fit.height)));
+        return padded;
+    };
+    target_image = letterbox(target_image, target_fit);
+    reference_image = letterbox(reference_image, reference_fit);
     std::vector<float> input(size_t(2 * input_width * input_height));
     const std::array<cv::Mat, 2> images = {target_image, reference_image};
     for (int batch = 0; batch < 2; ++batch) {
@@ -2020,10 +2061,6 @@ bool run_lightglue(
     const int match_count = int(matches_shape[0]);
     std::vector<Match3D> lifted;
     lifted.reserve(match_count);
-    const double target_scale_x = double(p_target.color_width) / input_width;
-    const double target_scale_y = double(p_target.color_height) / input_height;
-    const double reference_scale_x = double(p_reference.color_width) / input_width;
-    const double reference_scale_y = double(p_reference.color_height) / input_height;
     for (int index = 0; index < match_count; ++index) {
         if (scores[index] < 0.05f) {
             continue;
@@ -2033,10 +2070,19 @@ bool run_lightglue(
         if (target_keypoint < 0 || target_keypoint >= 1024 || reference_keypoint < 0 || reference_keypoint >= 1024) {
             continue;
         }
-        const double target_x = keypoints[(0 * 1024 + target_keypoint) * 2 + 0] * target_scale_x;
-        const double target_y = keypoints[(0 * 1024 + target_keypoint) * 2 + 1] * target_scale_y;
-        const double reference_x = keypoints[(1 * 1024 + reference_keypoint) * 2 + 0] * reference_scale_x;
-        const double reference_y = keypoints[(1 * 1024 + reference_keypoint) * 2 + 1] * reference_scale_y;
+        std::array<double, 2> target_unpadded, reference_pixel;
+        if (!target_fit.original_pixel(keypoints[target_keypoint * 2], keypoints[target_keypoint * 2 + 1], target_unpadded)
+            || !reference_fit.original_pixel(keypoints[(1024 + reference_keypoint) * 2], keypoints[(1024 + reference_keypoint) * 2 + 1], reference_pixel)) {
+            continue; // Padding has no corresponding camera ray or depth sample.
+        }
+        const auto target_pixel = calibration_original_pixel(
+            target_unpadded[0], target_unpadded[1],
+            p_target.color_width, p_target.color_height, p_rotation_ccw_deg
+        );
+        const double target_x = target_pixel[0];
+        const double target_y = target_pixel[1];
+        const double reference_x = reference_pixel[0];
+        const double reference_y = reference_pixel[1];
         if (
             !p_target.marker_mask.empty() &&
             p_target.marker_mask.at<uint8_t>(std::clamp(int(std::lround(target_y)), 0, p_target.marker_mask.rows - 1), std::clamp(int(std::lround(target_x)), 0, p_target.marker_mask.cols - 1))
@@ -2084,7 +2130,7 @@ bool run_lightglue(
         const std::filesystem::path debug_root(match_debug_dir);
         write_bgr_ppm(debug_root / "reference.ppm", p_reference.color_bgr);
         write_bgr_ppm(debug_root / "target.ppm", p_target.color_bgr);
-        std::ofstream matches_file(debug_root / "matches.csv");
+        std::ofstream matches_file(debug_root / ("matches_rotation_" + std::to_string(p_rotation_ccw_deg) + ".csv"));
         if (matches_file) {
             matches_file << "target_x,target_y,target_z,reference_x,reference_y,reference_z,score\n";
             matches_file << std::setprecision(12);
@@ -2224,7 +2270,7 @@ bool run_lightglue(
             conversion(2, 2) = -1.0;
             const cv::Matx44d godot = conversion * depth_transform * conversion;
             std::ostringstream diagnostic;
-            diagnostic << "NATIVE_MARKERLESS_CANDIDATE name=" << candidate.name
+            diagnostic << "NATIVE_MARKERLESS_CANDIDATE rotation=" << p_rotation_ccw_deg << " name=" << candidate.name
                        << " reproj=" << candidate.reprojection << " transform=";
             for (int row = 0; row < 3; ++row) {
                 for (int col = 0; col < 4; ++col) {
@@ -2248,7 +2294,10 @@ bool run_lightglue(
         }
     }
     if (!std::isfinite(selected.reprojection) || selected.reprojection > 12.0) {
-        r_error = "LightGlue RGB-D pose has excessive symmetric reprojection error";
+        std::ostringstream message;
+        message << "LightGlue RGB-D pose has excessive symmetric reprojection error: "
+                << selected.reprojection << "px (limit 12px), solver=" << selected.name;
+        r_error = message.str();
         return false;
     }
     r_solver = selected.name;
@@ -2256,6 +2305,60 @@ bool run_lightglue(
     r_target_depth_to_reference_depth =
         p_reference.depth_to_color.inv() * selected.transform * p_target.depth_to_color;
     return true;
+}
+
+bool run_lightglue(
+    const RealSensePairCalibrator::Options &p_options,
+    Capture &p_reference,
+    Capture &p_target,
+    cv::Matx44d &r_transform,
+    int &r_matches,
+    int &r_inliers,
+    double &r_median,
+    std::string &r_solver,
+    double &r_reprojection_px,
+    int &r_rotation_ccw_deg,
+    std::string &r_attempts,
+    std::string &r_error
+) {
+    // SuperPoint is sensitive to image orientation. A side camera can see the
+    // whole textured workspace yet fail with the original image orientation.
+    // Keep the fast, unchanged path for pairs that already pass. Only retry
+    // image orientations after rejection; all original 3D checks still apply.
+    for (int rotation : {0, 270, 90, 180}) {
+        cv::Matx44d transform;
+        int matches = 0, inliers = 0;
+        double median = 0.0, reprojection = 0.0;
+        std::string solver, error;
+        const bool accepted = run_lightglue_orientation(
+            p_options, p_reference, p_target, rotation, transform, matches,
+            inliers, median, solver, reprojection, error
+        );
+        std::ostringstream summary;
+        summary << "rotation=" << rotation << " matches=" << matches
+                << " inliers=" << inliers << " median=" << median << "m"
+                << (accepted ? " accepted" : " rejected: " + error);
+        if (!r_attempts.empty()) r_attempts += " | ";
+        r_attempts += summary.str();
+        if (const char *debug = std::getenv("REALSENSE_CALIBRATION_MATCH_DEBUG_DIR"); debug && debug[0]) {
+            UtilityFunctions::print(String(("NATIVE_MARKERLESS_ORIENTATION " + summary.str()).c_str()));
+        }
+        if (accepted || inliers > r_inliers || (inliers == r_inliers && matches >= r_matches)) {
+            r_matches = matches;
+            r_inliers = inliers;
+            r_median = median;
+            r_rotation_ccw_deg = rotation;
+            r_error = error;
+        }
+        if (accepted) {
+            r_transform = transform;
+            r_solver = solver;
+            r_reprojection_px = reprojection;
+            return true;
+        }
+    }
+    r_error = "No image orientation passed: " + r_attempts;
+    return false;
 }
 
 #endif
@@ -2346,6 +2449,10 @@ bool RealSensePairCalibrator::start(const Dictionary &p_options) {
     options.profile = utf8(String(p_options.get("profile", "highres30")));
     options.model_path = utf8(String(p_options.get("model_path", "")));
     options.onnx_backend = utf8(String(p_options.get("onnx_backend", "onnx_cuda")));
+    options.charuco_squares_x = int(p_options.get("charuco_squares_x", 0));
+    options.charuco_squares_y = int(p_options.get("charuco_squares_y", 0));
+    options.charuco_dictionary = int(p_options.get("charuco_dictionary", 0));
+    options.charuco_square_m = double(p_options.get("charuco_square_m", 0.0));
     options.marker_id = int(p_options.get("marker_id", 49));
     options.marker_size_m = double(p_options.get("marker_size_m", 0.15));
     options.capture_frames = std::clamp(int(p_options.get("capture_frames", 10)), 4, 96);
@@ -2377,10 +2484,17 @@ bool RealSensePairCalibrator::start(const Dictionary &p_options) {
         set_status("Native calibration needs two different RealSense serials");
         return false;
     }
-    if (options.mode != "aruco" && options.mode != "markerless" && options.mode != "refine") {
+    if (options.mode != "aruco" && options.mode != "charuco" && options.mode != "markerless" && options.mode != "refine") {
         set_status("Native calibration mode must be aruco, markerless, or refine");
         return false;
     }
+#if defined(REALSENSE_DIRECT_ENABLED) && defined(REALSENSE_NATIVE_CALIBRATION_ENABLED)
+    if (options.mode == "charuco") {
+        const teleop_charuco::Spec board{options.charuco_squares_x,options.charuco_squares_y,
+            options.charuco_square_m,options.marker_size_m,options.charuco_dictionary};
+        if (!teleop_charuco::valid(board)) {set_status("Invalid ChArUco board specifications");return false;}
+    }
+#endif
     if (options.mode == "refine" && !options.has_initial_transform) {
         set_status("Native refine mode needs an initial transform");
         return false;
@@ -2413,6 +2527,7 @@ Dictionary RealSensePairCalibrator::get_result() const {
     std::lock_guard<std::mutex> lock(state_mutex);
     Dictionary payload;
     payload["ready"] = result.ready;
+    payload["depth_plane_anchored"] = result.depth_plane_anchored;
     payload["ok"] = result.ok;
     payload["method"] = String(result.method.c_str());
     payload["status"] = String(result.status.c_str());
@@ -2438,12 +2553,17 @@ Dictionary RealSensePairCalibrator::get_result() const {
     details["inliers"] = result.inliers;
     details["match_median_m"] = result.match_median_m;
     details["markerless_solver"] = String(result.markerless_solver.c_str());
+    details["markerless_rotation_ccw_deg"] = result.markerless_rotation_ccw_deg;
+    details["markerless_attempts"] = String(result.markerless_attempts.c_str());
     details["markerless_reprojection_px"] = result.markerless_reprojection_px;
     details["icp_fitness"] = result.icp_fitness;
     details["icp_rmse_m"] = result.icp_rmse_m;
     details["refine_translation_m"] = result.refine_translation_m;
     details["refine_rotation_deg"] = result.refine_rotation_deg;
     details["marker_reprojection_px"] = result.marker_reprojection_px;
+    details["depth_plane_anchored"] = result.depth_plane_anchored;
+    details["reference_depth_plane_rms_m"] = result.reference_depth_plane_rms_m;
+    details["target_depth_plane_rms_m"] = result.target_depth_plane_rms_m;
     details["marker_reference_frames"] = result.marker_reference_frames;
     details["marker_target_frames"] = result.marker_target_frames;
     if (result.has_marker_reference_transform) {
@@ -2519,7 +2639,7 @@ void RealSensePairCalibrator::run(Options p_options) {
     Capture reference;
     Capture target;
     std::string error;
-    const bool need_marker = p_options.mode == "aruco";
+    const bool need_marker = p_options.mode == "aruco" || p_options.mode == "charuco";
     set_status("Capturing reference RealSense " + p_options.reference_serial);
     if (!capture_camera(p_options, p_options.reference_serial, need_marker, cancel_requested, reference, error)) {
         output.status = error;
@@ -2538,11 +2658,34 @@ void RealSensePairCalibrator::run(Options p_options) {
         return;
     }
 
+    if (p_options.mode == "charuco" && (!stable_charuco_poses(reference) || !stable_charuco_poses(target))) {
+        output.status = "ChArUco poses are unstable across frames; keep the board rigid and still. Previous alignment retained.";
+        finish(output);
+        return;
+    }
     cv::Matx44d initial = cv::Matx44d::eye();
     if (need_marker) {
         set_status("Averaging ArUco poses in depth-camera coordinates");
         cv::Matx44d marker_to_reference = average_transforms(reference.marker_to_depth);
         cv::Matx44d marker_to_target = average_transforms(target.marker_to_depth);
+        if (p_options.mode == "charuco") {
+            teleop_charuco::DepthAnchorStats ref_stats,target_stats;
+            cv::Matx44d ref_pose,target_pose;
+            const double width=p_options.charuco_squares_x*p_options.charuco_square_m;
+            const double height=p_options.charuco_squares_y*p_options.charuco_square_m;
+            const auto anchor=[&](const Capture &capture,const cv::Matx44d &pose,cv::Matx44d &out,teleop_charuco::DepthAnchorStats &stats){
+                const auto &k=capture.depth_intrinsics;
+                return teleop_charuco::anchor_depth_plane(capture.raw_depth_m,cv::Vec4d(k.fx,k.fy,k.ppx,k.ppy),capture.depth_to_color,pose,width,height,out,stats);
+            };
+            if(!anchor(reference,marker_to_reference,ref_pose,ref_stats)||!anchor(target,marker_to_target,target_pose,target_stats)){
+                output.status="ChArUco depth plane is unreliable. Clear the board, keep it flat, and try again; previous alignment retained.";
+                finish(output);return;
+            }
+            marker_to_reference=ref_pose;marker_to_target=target_pose;
+            output.depth_plane_anchored=true;
+            output.reference_depth_plane_rms_m=ref_stats.rms_m;
+            output.target_depth_plane_rms_m=target_stats.rms_m;
+        }
         initial = marker_to_reference * marker_to_target.inv();
         const cv::Matx44d marker_to_reference_godot = cv_to_godot(marker_to_reference);
         output.has_marker_reference_transform = true;
@@ -2579,6 +2722,8 @@ void RealSensePairCalibrator::run(Options p_options) {
             output.match_median_m,
             output.markerless_solver,
             output.markerless_reprojection_px,
+            output.markerless_rotation_ccw_deg,
+            output.markerless_attempts,
             error
         )) {
             output.status = "Native markerless alignment failed: " + error;
@@ -2634,7 +2779,7 @@ void RealSensePairCalibrator::run(Options p_options) {
     output.refined_overlap_score = refined_score.score;
     cv::Matx44d selected_transform = initial;
     double selected_overlap_score = initial_score.score;
-    if (refined_score.score > initial_score.score + 0.001) {
+    if (p_options.mode != "charuco" && refined_score.score > initial_score.score + 0.001) {
         selected_transform = icp.transform;
         selected_overlap_score = refined_score.score;
         output.refinement_selected = true;
@@ -2739,7 +2884,7 @@ void RealSensePairCalibrator::run(Options p_options) {
     output.ok = true;
     std::ostringstream message;
     const char *label = need_marker
-        ? "Native ArUco"
+        ? (p_options.mode == "charuco" ? "Native ChArUco" : "Native ArUco")
         : (p_options.mode == "markerless" ? "Native markerless" : "Native guarded refine");
     message << label << " alignment accepted"
             << " | fit=" << icp.fitness << " rmse=" << icp.rmse
@@ -2762,6 +2907,7 @@ void RealSensePairCalibrator::run(Options p_options) {
     if (p_options.mode == "markerless") {
         message << " matches=" << output.inliers << "/" << output.matches
                 << " solver=" << output.markerless_solver
+                << " image_rotation=" << output.markerless_rotation_ccw_deg << "deg"
                 << " reproj=" << output.markerless_reprojection_px << "px";
     }
     output.status = message.str();

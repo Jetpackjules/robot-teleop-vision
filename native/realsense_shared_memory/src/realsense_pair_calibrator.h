@@ -22,6 +22,8 @@ public:
         std::string profile = "highres30";
         std::string model_path;
         std::string onnx_backend = "onnx_cuda";
+        int charuco_squares_x = 0, charuco_squares_y = 0, charuco_dictionary = 0;
+        double charuco_square_m = 0.0;
         int marker_id = 49;
         double marker_size_m = 0.15;
         int capture_frames = 10;
@@ -74,12 +76,16 @@ private:
         int inliers = 0;
         double match_median_m = 0.0;
         std::string markerless_solver;
+        int markerless_rotation_ccw_deg = 0;
+        std::string markerless_attempts;
         double markerless_reprojection_px = 0.0;
         double icp_fitness = 0.0;
         double icp_rmse_m = 0.0;
         double refine_translation_m = 0.0;
         double refine_rotation_deg = 0.0;
         double marker_reprojection_px = 0.0;
+        bool depth_plane_anchored = false;
+        double reference_depth_plane_rms_m = 0, target_depth_plane_rms_m = 0;
         int marker_reference_frames = 0;
         int marker_target_frames = 0;
         bool has_marker_reference_transform = false;

@@ -2,12 +2,15 @@
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
 
 @pytest.mark.parametrize("sanitize", [False, True])
 def test_pixel_pack_preserves_every_value(tmp_path, sanitize):
+    if sanitize and sys.platform == "win32":
+        pytest.skip("CI runs the sanitizer variant on Linux and the regular check on Windows")
     compiler = shutil.which("g++") or shutil.which("clang++")
     if compiler is None:
         pytest.skip("C++ compiler required; exercised with the lab native build")

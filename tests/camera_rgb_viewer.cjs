@@ -2,13 +2,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(require('node:path').join(__dirname,'../web/camera_rgb_viewer.js'),'utf8').replace(/^export /gm,'');
-const requests=[],painted=[],closed=[];
+const requests=[],painted=[],closed=[],cleared=[];
 const context=vm.createContext({performance,AbortController,URLSearchParams,setTimeout,clearTimeout,
   Blob,TextDecoder,ArrayBuffer,Uint8Array,DataView,location:{protocol:'https:',host:'viewer.example'},
   document:{hidden:false,addEventListener(){},removeEventListener(){}},fetch:(_,options)=>new Promise(resolve=>requests.push({resolve,options})),
   createImageBitmap:async blob=>({width:1280,height:720,id:blob.id,close(){closed.push(this.id);}})});
 vm.runInContext(source+'\nthis.Viewer=CameraRgbViewer;',context);
-const canvas={width:0,height:0,getContext:()=>({drawImage:b=>painted.push(b.id),clearRect(){}})};
+const canvas={width:0,height:0,getContext:()=>({drawImage:b=>painted.push(b.id),clearRect(){cleared.push(true);}})};
 const viewer=new context.Viewer(canvas);viewer.running=true;viewer.generation=1;
 const response=id=>({ok:true,headers:{get:name=>({'Content-Type':'image/jpeg','X-Camera-Id':'1234',
   'X-Frame-Sequence':String(id),'X-Capture-Unix-Ms':String(Date.now())}[name]||null)},blob:async()=>({size:100,id})});
@@ -32,8 +32,8 @@ const response=id=>({ok:true,headers:{get:name=>({'Content-Type':'image/jpeg','X
   context.createImageBitmap=blob=>new Promise(resolve=>decodes.push({blob,resolve}));
   const stream=new context.Viewer(canvas);stream.start();
   assert.match(sockets[0].url,/^wss:\/\/viewer.example\/camera-rgb-stream\?/,'persistent connection uses the authenticated same origin');
-  const packet=(sequence,epoch='ownerA')=>{
-    const metadata=Buffer.from(JSON.stringify({'x-camera-id':'1234','x-frame-sequence':String(sequence),
+  const packet=(sequence,epoch='ownerA',camera='1234')=>{
+    const metadata=Buffer.from(JSON.stringify({'x-camera-id':camera,'x-frame-sequence':String(sequence),
       'x-capture-unix-ms':String((epoch==='ownerB'?20000:10000)+sequence),'x-capture-epoch':epoch}));
     const bytes=new Uint8Array(4+metadata.length+1);new DataView(bytes.buffer).setUint32(0,metadata.length,true);
     bytes.set(metadata,4);bytes[bytes.length-1]=255;return {data:bytes.buffer};
@@ -59,13 +59,22 @@ const response=id=>({ok:true,headers:{get:name=>({'Content-Type':'image/jpeg','X
   assert.equal(new URL(sockets.at(-1).url).searchParams.get('camera'),'1234','selected camera is sent to the stream endpoint');
   sockets.at(-1).onmessage(packet(4,'ownerB'));
   const obsolete=decodes.at(-1);
+  const clearsBeforeSwitch=cleared.length;
   sharedOptions.camera='5678';selected.setCamera('5678');
+  assert.equal(cleared.length,clearsBeforeSwitch,'camera handoff must not clear the displayed image to black');
   obsolete.resolve({width:960,height:540,id:4,close(){}});await settle();
   assert.equal(painted.at(-1),1,'an old camera decode cannot repaint after selecting another camera');
   assert.equal(new URL(sockets.at(-1).url).searchParams.get('camera'),'5678','camera selection reconnects to the new sensor');
   const decodeCount=decodes.length;
   sockets.at(-1).onmessage(packet(5,'ownerB'));await settle();
   assert.equal(decodes.length,decodeCount,'mismatched camera frames are rejected before decoding');
+  sockets.at(-1).onmessage(packet(6,'ownerB','5678'));
+  decodes.at(-1).resolve({width:640,height:480,id:6,close(){closed.push(6);}});await settle();
+  assert.equal(painted.at(-1),6,'the new sensor replaces the retained image only after decode completes');
+  assert.equal(cleared.length,clearsBeforeSwitch,'no blank is introduced before the replacement frame');
+  selected.stop();
+  selected.start();
+  assert.equal(cleared.length,clearsBeforeSwitch+1,'returning from another view does not present an old camera image as live');
   selected.stop();
   let now=100,timerId=0;
   const timers=new Map(),quietSockets=[];
@@ -87,5 +96,5 @@ const response=id=>({ok:true,headers:{get:name=>({'Content-Type':'image/jpeg','X
   tick(600);
   assert.equal(quietSockets.length,countAfterVisible,'visibility recovery cancels the already scheduled retry');
   quiet.stop();assert.equal(timers.size,0,'mode exit cancels watchdog and reconnect timers');
-  console.log('Original RGB viewer: ordering, native size, FPS, cancellation and disposal passed');
+  console.log('Original RGB viewer: gap-free handoff, ordering, native size, FPS, cancellation and disposal passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -70,7 +70,7 @@ def load_rest_pose(profile: ArmPairProfile, path: Path | None = None) -> dict:
 
 
 def save_rest_pose(profile: ArmPairProfile, raw: list[int], *, apply: bool = False,
-                   path: Path | None = None) -> dict:
+                   path: Path | None = None, height_metric=None) -> dict:
     if profile.follower_calibration.coordinate_system != "lerobot_urdf":
         raise ValueError("Repair the follower coordinate convention before saving a new encoder rest pose")
     payload = {
@@ -89,9 +89,10 @@ def save_rest_pose(profile: ArmPairProfile, raw: list[int], *, apply: bool = Fal
         from .so101_kinematics import rest_mesh_minimum_height
     else:
         from so101_kinematics import rest_mesh_minimum_height
-    height = rest_mesh_minimum_height(payload["normalized_positions"])
+    height = (height_metric or rest_mesh_minimum_height)(payload["normalized_positions"])
     if height < -0.002:
-        raise ValueError(f"Rest mesh is below the modeled base plane ({height * 1000:.1f} mm)")
+        subject = "Rest claw" if height_metric is not None else "Rest mesh"
+        raise ValueError(f"{subject} is below the modeled base underside ({height * 1000:.1f} mm)")
     path = path if path is not None else rest_pose_path(profile)
     result = {"path": str(path), "height_m": height, "saved": False, "backup": None}
     if not apply:

@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <exception>
 #include <limits>
 #include <future>
@@ -46,6 +47,12 @@ extern "C" {
 #endif
 
 using namespace godot;
+
+static bool native_snapshot_encoding_enabled() {
+    // Reversible A/B switch; the default uses the exact native-byte path.
+    const char *value = std::getenv("ROBOT_TELEOP_NATIVE_SNAPSHOT_ENCODING");
+    return !value || std::strcmp(value, "0") != 0;
+}
 
 static bool continuous_depth_triangle(float a, float b, float c, const Vector4 &k, int stride, double relative_limit) {
     const double z = std::max({double(a),double(b),double(c)});
@@ -114,6 +121,41 @@ static int rgbd_color_channels(Image::Format p_format) {
 		default:
 			return 0;
 	}
+}
+
+static PackedByteArray encode_native_bgr_jpeg_fast(const NativeColorSnapshot &p_source, int p_quality) {
+	PackedByteArray result;
+#ifdef JCS_EXTENSIONS
+	if (!p_source.valid()) return result;
+	jpeg_compress_struct encoder{};
+	RgbdJpegError error{};
+	encoder.err = jpeg_std_error(&error.base);
+	error.base.error_exit = rgbd_jpeg_error_exit;
+	unsigned char *output = nullptr;
+	unsigned long output_size = 0;
+	if (setjmp(error.recovery)) {
+		jpeg_destroy_compress(&encoder); std::free(output); return result;
+	}
+	jpeg_create_compress(&encoder);
+	jpeg_mem_dest(&encoder, &output, &output_size);
+	encoder.image_width = p_source.width;
+	encoder.image_height = p_source.height;
+	encoder.input_components = p_source.bytes_per_pixel;
+	encoder.in_color_space = p_source.bytes_per_pixel == 3 ? JCS_EXT_BGR : JCS_EXT_BGRA;
+	jpeg_set_defaults(&encoder);
+	jpeg_set_quality(&encoder, std::clamp(p_quality, 1, 100), TRUE);
+	encoder.dct_method = JDCT_FASTEST;
+	jpeg_start_compress(&encoder, TRUE);
+	while (encoder.next_scanline < encoder.image_height) {
+		JSAMPROW row = const_cast<JSAMPROW>(p_source.pixels->data() + size_t(encoder.next_scanline) * p_source.pitch);
+		jpeg_write_scanlines(&encoder, &row, 1);
+	}
+	jpeg_finish_compress(&encoder);
+	result.resize(int64_t(output_size));
+	std::memcpy(result.ptrw(), output, output_size);
+	jpeg_destroy_compress(&encoder); std::free(output);
+#endif
+	return result;
 }
 
 static PackedByteArray encode_resampled_rgb_jpeg_fast(
@@ -767,6 +809,15 @@ void RealSenseSharedMemoryPointCloud::_process(double p_delta) {
             if (snapshot_writer_open) snapshot_writer.publish(current_frame_sequence, current_stride, current_intrinsics,
                 depth_image, color_image, get_direct_realsense_capture_fps(),
                 std::chrono::duration<double, std::milli>(std::chrono::system_clock::now().time_since_epoch()).count());
+            // Raw depth + original RGB from the same acquisition, before JPEG
+            // or depth compression. Only sparse viewers subscribe to this feed.
+            if (!native_snapshot_writer_open && (!std::getenv("ROBOT_TELEOP_NATIVE_SPARSE_PUBLISH") || std::strcmp(std::getenv("ROBOT_TELEOP_NATIVE_SPARSE_PUBLISH"),"0")!=0)) native_snapshot_writer_open = native_snapshot_writer.open(publish_shared_memory_name + "_native");
+            if (native_snapshot_writer_open && direct_realsense.is_valid()) {
+                native_snapshot_writer.publish_native(current_frame_sequence,current_stride,current_intrinsics / real_t(std::max(1,current_stride)),
+                    depth_image,direct_realsense->get_raw_color_snapshot(),get_raw_color_projection(),get_global_transform(),
+                    get_direct_realsense_capture_fps(),std::chrono::duration<double,std::milli>(std::chrono::system_clock::now().time_since_epoch()).count(),
+                    max_depth,color_match_enabled,color_gain,color_bias);
+            }
         }
         return;
     }
@@ -885,6 +936,8 @@ void RealSenseSharedMemoryPointCloud::set_publish_shared_memory_name(const Strin
     if (publish_shared_memory_name == p_name) return;
     snapshot_writer.close();
     snapshot_writer_open = false;
+    native_snapshot_writer.close();
+    native_snapshot_writer_open = false;
     publish_shared_memory_name = p_name;
 }
 String RealSenseSharedMemoryPointCloud::get_publish_shared_memory_name() const { return publish_shared_memory_name; }
@@ -1343,6 +1396,8 @@ void RealSenseSharedMemoryPointCloud::restart_direct_realsense() {
     if (direct_realsense.is_valid() && direct_realsense->is_open()) {
         direct_realsense->close();
     }
+    // Recover with fresh SDK pipeline and alignment state for this camera.
+    direct_realsense.unref();
     next_direct_realsense_open_attempt_sec = 0.0;
     direct_realsense_status = direct_realsense_enabled ? String("RealSense direct capture restart requested") : String("RealSense direct capture is disabled");
 }
@@ -1729,15 +1784,24 @@ Dictionary RealSenseSharedMemoryPointCloud::get_depth_u16_frame(int p_max_width)
 }
 
 bool RealSenseSharedMemoryPointCloud::request_camera_rgb_encode(int p_max_width, int p_jpeg_quality) {
-    const Ref<Image> image = get_raw_color_image();
-    if (image.is_null() || image->is_empty()) return false;
     RgbdEncodeJob job;
+    if (native_snapshot_encoding_enabled() && direct_realsense_enabled && direct_realsense.is_valid()) {
+        job.native_color = direct_realsense->get_raw_color_snapshot();
+    }
+    if (job.native_color.valid()) {
+        job.color_width = job.native_color.width;
+        job.color_height = job.native_color.height;
+        job.color_format = Image::FORMAT_RGBA8;
+    } else {
+        const Ref<Image> image = get_raw_color_image();
+        if (image.is_null() || image->is_empty()) return false;
+        job.color_width = image->get_width();
+        job.color_height = image->get_height();
+        job.color_format = image->get_format();
+        job.color_data = image->get_data();
+    }
     job.original_rgb = true;
     job.sequence = current_frame_sequence;
-    job.color_width = image->get_width();
-    job.color_height = image->get_height();
-    job.color_format = image->get_format();
-    job.color_data = image->get_data();
     job.max_width = std::clamp(p_max_width, 1, 3840);
     job.jpeg_quality = std::clamp(p_jpeg_quality, 1, 100);
     job.capture_unix_ms = std::chrono::duration<double, std::milli>(std::chrono::system_clock::now().time_since_epoch()).count()
@@ -1786,10 +1850,34 @@ bool RealSenseSharedMemoryPointCloud::request_rgbd_encode(int p_max_width, int p
     job.depth_width = current_depth_image->get_width();
     job.depth_height = current_depth_image->get_height();
     job.depth_data = current_depth_image->get_data();
-    job.color_width = current_color_image->get_width();
-    job.color_height = current_color_image->get_height();
-	job.color_format = current_color_image->get_format();
-	job.color_data = current_color_image->get_data();
+    Ref<Image> color_image = current_color_image;
+    // Only use a raw image from the same acquisition. Delayed history frames
+    // and shared-memory readers retain the backwards-compatible aligned path.
+    if (direct_realsense_enabled && primary_delay_ms <= 0.0) {
+        const Dictionary projection = get_raw_color_projection();
+        if (!projection.is_empty()) {
+            if (native_snapshot_encoding_enabled()) job.native_color = direct_realsense->get_raw_color_snapshot();
+            if (job.native_color.valid()) {
+                job.color_projection = projection;
+            } else {
+                const Ref<Image> raw = get_raw_color_image();
+                if (raw.is_valid() && !raw->is_empty()) {
+                    color_image = raw;
+                    job.color_projection = projection;
+                }
+            }
+        }
+    }
+    if (job.native_color.valid()) {
+        job.color_width = job.native_color.width;
+        job.color_height = job.native_color.height;
+        job.color_format = Image::FORMAT_RGBA8;
+    } else {
+        job.color_width = color_image->get_width();
+        job.color_height = color_image->get_height();
+        job.color_format = color_image->get_format();
+        job.color_data = color_image->get_data();
+    }
 	// The encoded image is the sampled grid, while sensor intrinsics describe
 	// the full-resolution pixels. Keep web deprojection in the grid's frame.
 	job.intrinsics = current_intrinsics / real_t(std::max(1, current_stride));
@@ -1805,7 +1893,8 @@ bool RealSenseSharedMemoryPointCloud::request_rgbd_encode(int p_max_width, int p
         std::chrono::system_clock::now().time_since_epoch()
     ).count();
     if (job.depth_width <= 0 || job.depth_height <= 0 || job.color_width <= 0 || job.color_height <= 0 ||
-            job.depth_data.size() < job.depth_width * job.depth_height * 4 || job.color_data.is_empty()) {
+            job.depth_data.size() < job.depth_width * job.depth_height * 4 ||
+            (!job.native_color.valid() && job.color_data.is_empty())) {
         return false;
     }
 
@@ -1825,6 +1914,7 @@ bool RealSenseSharedMemoryPointCloud::request_rgbd_encode(int p_max_width, int p
         rgbd_last_submitted_sequence = rgbd_encoder_pending.sequence;
         rgbd_last_submitted_width = rgbd_encoder_pending.max_width;
         rgbd_last_submitted_quality = rgbd_encoder_pending.jpeg_quality;
+        rgbd_last_native_snapshot = rgbd_encoder_pending.native_color.valid();
     }
     rgbd_encoder_cv.notify_one();
     return true;
@@ -1850,6 +1940,10 @@ Dictionary RealSenseSharedMemoryPointCloud::take_rgbd_encoded_frame() {
     result["intrinsics"] = completed.intrinsics;
     result["sequence"] = int64_t(completed.sequence);
     result["color_jpeg"] = completed.color_jpeg;
+    result["color_space"] = completed.color_projection.is_empty() ? "aligned_depth" : "original_rgb";
+    result["color_width"] = completed.color_width;
+    result["color_height"] = completed.color_height;
+    result["color_projection"] = completed.color_projection;
     result["depth_compressed"] = completed.compressed_depth;
 #ifdef _WIN32
     result["depth_encoding"] = "u16_mm_deflate";
@@ -1872,6 +1966,7 @@ Dictionary RealSenseSharedMemoryPointCloud::get_rgbd_encoder_status() const {
     status["last_completed_sequence"] = int64_t(rgbd_last_completed_sequence);
     status["dropped_pending"] = int64_t(rgbd_dropped_pending);
     status["dropped_completed"] = int64_t(rgbd_dropped_completed);
+    status["native_color_snapshot"] = rgbd_last_native_snapshot;
     return status;
 }
 
@@ -1939,13 +2034,14 @@ void RealSenseSharedMemoryPointCloud::rgbd_encoder_worker_loop() {
             rgbd_encoder_busy = true;
         }
 
-        RgbdEncodeResult completed = encode_rgbd_job(job);
+        const bool original_rgb = job.original_rgb;
+        RgbdEncodeResult completed = encode_rgbd_job(std::move(job));
         {
             std::lock_guard<std::mutex> lock(rgbd_encoder_mutex);
             rgbd_encoder_active_jobs = std::max(0, rgbd_encoder_active_jobs - 1);
             rgbd_encoder_busy = rgbd_encoder_active_jobs > 0;
             if (completed.valid) {
-                if (job.original_rgb) {
+                if (original_rgb) {
                     if (completed.sequence > camera_rgb_last_completed_sequence) {
                         camera_rgb_last_completed_sequence = completed.sequence;
                         camera_rgb_completed = std::move(completed);
@@ -1974,14 +2070,37 @@ void RealSenseSharedMemoryPointCloud::rgbd_encoder_worker_loop() {
 }
 
 RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointCloud::encode_rgbd_job(
-		const RgbdEncodeJob &p_job) {
+		RgbdEncodeJob p_job) {
 	RgbdEncodeResult result;
 	const auto started = std::chrono::steady_clock::now();
+	// Only the encoder worker materializes RGBA for a compatibility path.
+	// Native full-resolution BGR/BGRA uses the same libjpeg settings directly.
+	bool direct_native_color = p_job.native_color.valid() && !p_job.color_match_enabled &&
+		(!p_job.original_rgb || p_job.max_width >= p_job.color_width);
+#if defined(_WIN32) || !defined(JCS_EXTENSIONS)
+	direct_native_color = false;
+#endif
+	if (p_job.native_color.valid() && !direct_native_color) {
+		p_job.color_data.resize(int64_t(p_job.color_width) * p_job.color_height * 4);
+		uint8_t *out = p_job.color_data.ptrw();
+		const auto &native = p_job.native_color;
+		for (int y = 0; y < native.height; ++y) {
+			const uint8_t *row = native.pixels->data() + size_t(y) * native.pitch;
+			if (native.bytes_per_pixel == 3) rgbd_pixels::bgr_to_rgba(row, out + size_t(y) * native.width * 4, native.width, false);
+			else for (int x = 0; x < native.width; ++x) {
+				const uint8_t *pixel = row + x * native.bytes_per_pixel;
+				uint8_t *destination = out + (size_t(y) * native.width + x) * 4;
+				destination[0] = pixel[2]; destination[1] = pixel[1]; destination[2] = pixel[0]; destination[3] = 255;
+			}
+		}
+		p_job.native_color = NativeColorSnapshot();
+	}
 	if (p_job.original_rgb) {
 		const int width=std::max(1,std::min(p_job.color_width,p_job.max_width));
 		const int height=std::max(1,int(std::lround(double(p_job.color_height)*width/p_job.color_width)));
 #ifndef _WIN32
-		result.color_jpeg=encode_resampled_rgb_jpeg_fast(p_job.color_data,p_job.color_width,p_job.color_height,
+		if (direct_native_color) result.color_jpeg = encode_native_bgr_jpeg_fast(p_job.native_color, p_job.jpeg_quality);
+		else result.color_jpeg=encode_resampled_rgb_jpeg_fast(p_job.color_data,p_job.color_width,p_job.color_height,
 			rgbd_color_channels(p_job.color_format),0,0,p_job.color_width,p_job.color_height,width,height,
 			p_job.jpeg_quality,false,Vector3(1,1,1),Vector3());
 #else
@@ -2072,10 +2191,13 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
     }
     }
 
-	const int color_left = std::clamp(int(std::floor(crop_left_normalized * p_job.color_width)), 0, p_job.color_width - 1);
-	const int color_top = std::clamp(int(std::floor(crop_top_normalized * p_job.color_height)), 0, p_job.color_height - 1);
-	const int color_right = std::clamp(int(std::ceil(crop_right_normalized * p_job.color_width)), color_left + 1, p_job.color_width);
-	const int color_bottom = std::clamp(int(std::ceil(crop_bottom_normalized * p_job.color_height)), color_top + 1, p_job.color_height);
+    const bool raw_color = !p_job.color_projection.is_empty();
+    const int color_target_width = raw_color ? p_job.color_width : target_width;
+    const int color_target_height = raw_color ? p_job.color_height : target_height;
+	const int color_left = std::clamp(int(std::floor((raw_color ? 0.0 : crop_left_normalized) * p_job.color_width)), 0, p_job.color_width - 1);
+	const int color_top = std::clamp(int(std::floor((raw_color ? 0.0 : crop_top_normalized) * p_job.color_height)), 0, p_job.color_height - 1);
+	const int color_right = std::clamp(int(std::ceil((raw_color ? 1.0 : crop_right_normalized) * p_job.color_width)), color_left + 1, p_job.color_width);
+	const int color_bottom = std::clamp(int(std::ceil((raw_color ? 1.0 : crop_bottom_normalized) * p_job.color_height)), color_top + 1, p_job.color_height);
     PackedByteArray color_jpeg;
     PackedByteArray compressed_depth;
 #ifndef _WIN32
@@ -2083,7 +2205,9 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
     // creating and destroying an OS thread for every synchronized frame.
     auto depth_future = rgbd_depth_compression_pool().submit(depth_mm, target_width);
     const int source_channels = rgbd_color_channels(p_job.color_format);
-    if (source_channels > 0) {
+    if (direct_native_color) {
+        color_jpeg = encode_native_bgr_jpeg_fast(p_job.native_color, p_job.jpeg_quality);
+    } else if (source_channels > 0) {
         // Resize/crop directly into libjpeg scanlines. This removes the
         // create/get_region/resize/convert chain and its full-frame copies.
         color_jpeg = encode_resampled_rgb_jpeg_fast(
@@ -2095,8 +2219,8 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
             color_top,
             color_right,
             color_bottom,
-            target_width,
-            target_height,
+            color_target_width,
+            color_target_height,
             p_job.jpeg_quality,
             p_job.color_match_enabled,
             p_job.color_gain,
@@ -2119,8 +2243,8 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
         if (color_image.is_null() || color_image->is_empty()) {
             return result;
         }
-        if (color_image->get_width() != target_width || color_image->get_height() != target_height) {
-            color_image->resize(target_width, target_height, Image::INTERPOLATE_BILINEAR);
+        if (color_image->get_width() != color_target_width || color_image->get_height() != color_target_height) {
+            color_image->resize(color_target_width, color_target_height, Image::INTERPOLATE_BILINEAR);
         }
         if (color_image->get_format() != Image::FORMAT_RGB8) {
             color_image->convert(Image::FORMAT_RGB8);
@@ -2128,7 +2252,7 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
         if (p_job.color_match_enabled) {
             PackedByteArray corrected = color_image->get_data();
             uint8_t *pixels = corrected.ptrw();
-            const int pixel_count = target_width * target_height;
+            const int pixel_count = color_target_width * color_target_height;
             const float gain[3] = {p_job.color_gain.x, p_job.color_gain.y, p_job.color_gain.z};
             const float bias[3] = {p_job.color_bias.x, p_job.color_bias.y, p_job.color_bias.z};
             for (int pixel = 0; pixel < pixel_count; ++pixel) {
@@ -2140,10 +2264,10 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
                     ));
                 }
             }
-            color_image = Image::create_from_data(target_width, target_height, false, Image::FORMAT_RGB8, corrected);
+            color_image = Image::create_from_data(color_target_width, color_target_height, false, Image::FORMAT_RGB8, corrected);
         }
         color_jpeg = encode_rgb_jpeg_fast(
-            color_image->get_data(), target_width, target_height, p_job.jpeg_quality
+            color_image->get_data(), color_target_width, color_target_height, p_job.jpeg_quality
         );
     }
     compressed_depth = depth_future.get();
@@ -2162,8 +2286,8 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
     if (color_image.is_null() || color_image->is_empty()) {
         return result;
     }
-    if (color_image->get_width() != target_width || color_image->get_height() != target_height) {
-        color_image->resize(target_width, target_height, Image::INTERPOLATE_BILINEAR);
+    if (color_image->get_width() != color_target_width || color_image->get_height() != color_target_height) {
+        color_image->resize(color_target_width, color_target_height, Image::INTERPOLATE_BILINEAR);
     }
     if (color_image->get_format() != Image::FORMAT_RGB8) {
         color_image->convert(Image::FORMAT_RGB8);
@@ -2171,7 +2295,7 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
     if (p_job.color_match_enabled) {
         PackedByteArray corrected = color_image->get_data();
         uint8_t *pixels = corrected.ptrw();
-        const int pixel_count = target_width * target_height;
+        const int pixel_count = color_target_width * color_target_height;
         const float gain[3] = {p_job.color_gain.x, p_job.color_gain.y, p_job.color_gain.z};
         const float bias[3] = {p_job.color_bias.x, p_job.color_bias.y, p_job.color_bias.z};
         for (int pixel = 0; pixel < pixel_count; ++pixel) {
@@ -2183,7 +2307,7 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
                 ));
             }
         }
-        color_image = Image::create_from_data(target_width, target_height, false, Image::FORMAT_RGB8, corrected);
+        color_image = Image::create_from_data(color_target_width, color_target_height, false, Image::FORMAT_RGB8, corrected);
     }
     color_jpeg = color_image->save_jpg_to_buffer(float(p_job.jpeg_quality) / 100.0f);
     compressed_depth = depth_mm.compress(FileAccess::COMPRESSION_DEFLATE);
@@ -2204,6 +2328,9 @@ RealSenseSharedMemoryPointCloud::RgbdEncodeResult RealSenseSharedMemoryPointClou
 		float((p_job.intrinsics.z - crop_left) * scale_x),
 		float((p_job.intrinsics.w - crop_top) * scale_y)
     );
+    result.color_width = color_target_width;
+    result.color_height = color_target_height;
+    result.color_projection = p_job.color_projection;
     result.color_jpeg = std::move(color_jpeg);
     result.compressed_depth = std::move(compressed_depth);
     result.capture_unix_ms = p_job.capture_unix_ms;

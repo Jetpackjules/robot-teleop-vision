@@ -45,6 +45,10 @@
       background: #050607;
       cursor: crosshair;
     }
+    html.teleop-mirror-view #viewport-video,
+    html.teleop-mirror-view #viewport-image,
+    html.teleop-mirror-view #hybrid-canvas,
+    html.teleop-mirror-view #rgb-camera-canvas { transform: scaleX(-1); }
     #viewport-video[hidden],
     #viewport-image[hidden],
     #hybrid-canvas[hidden],
@@ -176,6 +180,10 @@
     }
     .calibration-progress progress { width: 100%; height: 12px; accent-color: var(--accent); }
     .section-title { margin: 3px 0 0; color: var(--text); font-size: 13px; }
+    .episode-recording { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
+    .episode-recording input[type="text"] { width: 100%; box-sizing: border-box; min-height: 40px; padding: 9px; border: 1px solid var(--line); border-radius: 6px; background: #111; color: var(--text); font: inherit; }
+    .episode-recording [data-recording-status] { margin: 0; overflow-wrap: anywhere; line-height: 1.5; }
+    .episode-recording[data-recording-state="recording"] [data-recording-status] { color: var(--accent); }
     .helper-text { margin: -2px 0 2px; color: var(--muted); font-size: 12px; }
     .navigation-guide {
       padding: 9px 10px;
@@ -244,6 +252,11 @@
     details.advanced-disclosure > summary { padding: 9px 10px; color: var(--text); font-size: 13px; }
     .disclosure-body { display: grid; gap: 9px; padding: 0 10px 10px; }
     #site-settings-status { min-height: 18px; color: var(--muted); font-size: 12px; }
+    .crop-statistics-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; margin: 12px 0; }
+    .crop-statistics-list dt { color: var(--text); font-weight: 600; }
+    .crop-statistics-list dd { margin: 0 0 8px; font-variant-numeric: tabular-nums; }
+    #modeled-workspace-status p { margin: 8px 0; }
+    #modeled-workspace-options input[type="number"] { width: 100%; min-width: 0; padding: 7px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 5px; }
     #start-overlay {
       position: fixed;
       inset: 0;
@@ -272,9 +285,33 @@
       .advanced-body { grid-template-columns: 1fr; }
       .advanced-section.wide { grid-column: auto; }
     }
+    #workspace-editor {position:fixed;inset:0;pointer-events:none;z-index:45;}
+    #workspace-editor[hidden] {display:none;}
+    #workspace-editor > svg {position:absolute;overflow:visible;pointer-events:none;touch-action:none;}
+    .workspace-edit-wire {fill:none;stroke:#d5eafa;stroke-width:1.5;opacity:.9;pointer-events:none;}
+    .workspace-edit-wire text {font:600 13px system-ui;stroke:none;}
+    .workspace-handle {pointer-events:all;cursor:grab;touch-action:none;outline:none;}
+    .workspace-stroke-hit {pointer-events:stroke;}
+    .workspace-handle:focus-visible > :last-child {stroke:white;stroke-width:4;}
+    .workspace-handle:hover > :last-child {stroke:#fff;stroke-width:3;}
+    .workspace-handle.is-dragging {cursor:grabbing;}
+    .workspace-ring {pointer-events:none;}
+    .workspace-edit-toolbar {position:absolute;left:50%;bottom:22px;transform:translateX(-50%);width:min(650px,calc(100% - 28px));box-sizing:border-box;background:#171d22;border:1px solid #53606b;border-radius:12px;padding:12px 14px;pointer-events:auto;display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;box-shadow:0 8px 28px #0008;}
+    .workspace-edit-toolbar strong {font-size:15px;}
+    .workspace-edit-modes,.workspace-edit-actions {display:flex;gap:4px;}
+    .workspace-edit-actions {margin-left:auto;}
+    .workspace-edit-toolbar button {width:auto;margin:0;padding:8px 10px;min-height:38px;flex-shrink:0;font-size:13px;}
+    .workspace-edit-toolbar [aria-pressed=true] {background:#304e65;border-color:#a4d5fa;}
+    .workspace-edit-toolbar kbd {font:11px system-ui;color:#c9d3dd;margin-left:4px;}
+    #workspace-edit-help {margin:0;width:100%;font-size:13px;color:#c9d3dd;line-height:1.4;}
+    #workspace-edit-readout {font-size:12px;color:#bac8d4;font-variant-numeric:tabular-nums;}
+    #workspace-edit-coverage {width:100%;font-size:13px;color:var(--text);font-variant-numeric:tabular-nums;}
+    .workspace-handle:focus-visible {outline:2px solid #d5eafa;outline-offset:3px;}
+    @media(max-width:620px){.workspace-edit-toolbar{bottom:12px;gap:8px;} .workspace-edit-toolbar strong{width:100%;} .workspace-edit-toolbar kbd{display:none;} .workspace-edit-toolbar button{min-height:44px;} }
   </style>
-  <script type="module" src="./godot_webcam_tracker_bridge.js?v=20260803_settings_cleanup_v1"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261020_color_recovery"></script>
+  <link rel="stylesheet" href="./controller_ui.css?v=20261107_demo_overlay_axes">
+  <script type="module" src="./godot_webcam_tracker_bridge.js?v=20261109_background_startup"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261109_background_startup"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -282,11 +319,170 @@
   <canvas id="hybrid-canvas" hidden></canvas>
   <canvas id="rgb-camera-canvas" hidden aria-label="Full RGB camera view"></canvas>
 
-  <div class="topbar">
-    <div class="control-stack">
-      <details class="settings" open>
-        <summary>Controller</summary>
-        <div class="settings-body">
+  <header class="topbar">
+    <button id="open-advanced" class="settings-trigger" type="button" aria-controls="advanced-setup" aria-expanded="false">Settings</button>
+
+    <section id="trial-hud" aria-label="Current trial">
+      <div class="trial-copy">
+        <h1 id="trial-task">Free exploration: practise the view and arm controls</h1>
+        <div class="trial-meta"><span id="trial-position" aria-label="Trial 1 of 3">1/3</span><span class="meta-divider" aria-hidden="true">/</span><span id="trial-condition">Fixed cameras</span><div id="challenge-views" role="group" aria-label="Challenge view" hidden>
+          <button id="challenge-fixed_rgb" type="button" aria-pressed="false">RGB</button>
+          <button id="challenge-mouse_3d" type="button" aria-pressed="false">Mouse 3D</button>
+          <button id="challenge-head_3d" type="button" aria-pressed="false">Head tracking</button>
+        </div><label id="challenge-head-position-control" hidden><input id="challenge-head-position" type="checkbox"> Head position</label></div>
+      </div>
+      <div class="trial-clock"><output id="trial-timer" aria-label="Trial time remaining" aria-live="off">00:00</output><span id="trial-recording-state" hidden></span></div>
+      <div class="trial-actions">
+        <button id="trial-action" class="primary" type="button" disabled>Set up session</button>
+      </div>
+      <progress id="trial-progress" value="0" max="600" aria-label="Trial progress"></progress>
+      <p id="trial-message" role="status" aria-live="polite" hidden></p>
+    </section>
+
+    <details id="connection-details" class="connection-details">
+      <summary class="status-main" aria-label="Connection details"><span id="status-dot" class="dot bad"></span><span id="status-title">Connecting</span><svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="m4 6 4 4 4-4" stroke="currentColor" stroke-width="1.5"/></svg></summary>
+      <div class="connection-body"><div id="status-lines" class="status-lines">Preparing controller</div><div id="robot-status-root"></div></div>
+    </details>
+  </header>
+
+  <aside id="challenge-head-position-panel" aria-label="Head position" hidden>
+    <div class="head-position-header"><strong>Head tracking</strong><span id="challenge-head-position-status">Tracking lost</span></div>
+    <svg viewBox="0 0 140 76" aria-hidden="true">
+      <path class="head-position-crosshair" d="M70 5v66M5 38h130"/>
+      <circle class="head-position-neutral" cx="70" cy="38" r="2.5"/>
+      <line id="challenge-head-position-line" x1="70" y1="38" x2="70" y2="38"/>
+      <circle id="challenge-head-position-dot" cx="70" cy="38" r="4"/>
+    </svg>
+  </aside>
+  <div id="trial-urgent-border" aria-hidden="true" hidden></div>
+  <div id="trial-movement-reminder" role="status" hidden>START TRIAL TO MOVE</div>
+  <dialog id="trial-result-dialog" aria-labelledby="trial-result-title">
+    <form id="trial-result-form">
+      <h2 id="trial-result-title">Trial complete</h2>
+      <p id="trial-result-summary"></p>
+      <fieldset id="trial-experience-ratings" hidden>
+        <legend>Participant ratings</legend>
+        <p class="helper-text">Ask before discussing the task score.</p>
+        <label>How stressful was that trial?<select id="trial-experience-stress"><option value="">Choose a rating</option><option value="1">1 · Not at all</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7 · Extremely</option></select></label>
+        <label>How easy was it to get the view you wanted?<select id="trial-experience-view_ease"><option value="">Choose a rating</option><option value="1">1 · Very difficult</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7 · Very easy</option></select></label>
+      </fieldset>
+      <div id="trial-block-result" hidden><label><span id="trial-count-label">Count in cup</span><input id="trial-block-count" type="number" min="0" max="9999" step="1" required></label><label id="trial-knocked-over-control" hidden>Cubes touching the table at the end, excluding the original bottom cube<input id="trial-knocked-over-count" type="number" min="0" max="9999" step="1"></label><output id="trial-block-score" aria-live="polite"></output></div>
+      <div id="trial-outcome-control" hidden><label>Result<select id="trial-outcome"><option value="success">Pass</option><option value="failure">Fail</option></select></label></div>
+      <fieldset id="trial-experience-preference" hidden>
+        <legend>Overall preference</legend>
+        <label>Which viewing mode would you choose for another round?
+          <select id="trial-experience-preferred_view">
+            <option value="">Choose a viewing mode</option>
+            <option value="fixed_rgb">Fixed cameras</option>
+            <option value="mouse_3d">Mouse 3D</option>
+            <option value="head_3d">Head tracking</option>
+            <option value="no_preference">No preference</option>
+          </select>
+        </label>
+        <label>Why? (optional)<textarea id="trial-experience-preference_reason" rows="2" maxlength="500"></textarea></label>
+      </fieldset>
+      <p id="trial-result-error" role="alert" hidden></p>
+      <div class="trial-result-actions"><button id="trial-result-close" type="button">Close</button><button id="trial-save-block-count" class="primary" type="button">Save &amp; Next</button></div>
+    </form>
+  </dialog>
+
+  <div id="view-navigation" aria-label="View controls">
+    <div id="camera-navigation" hidden>
+      <button id="previous-camera" type="button" aria-label="Previous camera" aria-keyshortcuts="ArrowLeft"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="m14 6-6 6 6 6" stroke="currentColor" stroke-width="1.7"/></svg></button>
+      <span id="camera-name">Waiting for cameras</span>
+      <button id="next-camera" type="button" aria-label="Next camera" aria-keyshortcuts="ArrowRight"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="m10 6 6 6-6 6" stroke="currentColor" stroke-width="1.7"/></svg></button>
+    </div>
+    <button id="reset-view" type="button" hidden>Reset view</button>
+    <button id="reset-head-tracking" type="button" hidden>Reset head tracking</button>
+  </div>
+  <div id="robot-floating-root"></div>
+
+  <aside id="advanced-setup" hidden role="region" aria-labelledby="advanced-title">
+    <div class="advanced-shell">
+      <div class="advanced-header"><h2 id="advanced-title">Settings</h2><button id="close-advanced" type="button">Close</button></div>
+      <div class="settings-tabs" role="tablist" aria-label="Settings">
+        <button id="tab-session" role="tab" type="button" aria-selected="true" aria-controls="settings-session">Session</button>
+        <button id="tab-controls" role="tab" type="button" aria-selected="false" aria-controls="settings-controls" tabindex="-1">Arm</button>
+        <button id="tab-view" role="tab" type="button" aria-selected="false" aria-controls="settings-view" tabindex="-1">View</button>
+        <button id="tab-diagnostics" role="tab" type="button" aria-selected="false" aria-controls="settings-diagnostics" tabindex="-1">Diagnostics</button>
+      </div>
+      <div class="advanced-body">
+        <div id="settings-session" class="settings-pane" role="tabpanel" aria-labelledby="tab-session" tabindex="0">
+          <section id="episode-recording" class="episode-recording" aria-labelledby="recording-title">
+            <h3 id="recording-title" class="section-title">Demonstration recording</h3>
+            <label>Task instruction
+              <input data-recording-task type="text" required maxlength="500" value="Move the object from one plate to the other" placeholder="Move the object from one plate to the other" autocomplete="off">
+            </label>
+            <details class="advanced-disclosure"><summary>Recording controls and host status</summary><div class="disclosure-body">
+            <button id="trial-pause" type="button" hidden>Pause</button>
+            <p class="helper-text">Records original RGB from all active capture cameras and any open wrist view, plus measured joints and applied actions, on the robot host.</p>
+            <button data-recording-start class="primary" type="button" disabled>Start recording</button>
+            <label>Episode outcome
+              <select data-recording-outcome disabled>
+                <option value="unrated">Not rated</option>
+                <option value="success">Success</option>
+                <option value="failure">Failure</option>
+              </select>
+            </label>
+            <div class="button-row">
+              <button data-recording-stop type="button" disabled>Stop and save</button>
+              <button data-recording-discard type="button" disabled>Discard</button>
+            </div>
+            <p data-recording-status class="helper-text" role="status" aria-live="polite">Checking host recording…</p>
+            </div></details>
+          </section>
+          <section class="advanced-section">
+            <h3>Trial plan</h3>
+            <label id="trial-session-edit">Session name<input id="trial-session-input" type="text" maxlength="120" required value="Session" placeholder="e.g., Participant 01" autocomplete="off" title="The date and time are saved with the recording."></label>
+            <label class="toggle-row"><span>Guided trials</span><input id="guided-trials" type="checkbox" checked></label>
+            <p class="helper-text">One view at a time. Guided trials end when the countdown reaches zero. The facilitator reviews the result before continuing.</p>
+            <p class="helper-text">Arm control stays enabled between views and recordings. Use Hold Arm before resetting objects.</p>
+            <label>Session activities<select id="trial-task-kind"><option value="all" selected>Full study · Practice, then Tasks 1–3</option><option value="mug_challenge">CoRL demo</option><option value="practice_cups">Practice, then Task 1 only · Stack cups</option><option value="cup_stack_v1">Task 1 only · Stack cups</option><option value="single_block">Practice only · All three views</option><option value="cube_stack_v1">Task 2 only · Stack cubes</option><option id="trial-task3-option" value="stack_to_mug_v1">Task 3 only · Move cubes into mug</option></select></label>
+            <label class="toggle-row"><span>Randomize measured task order (practice stays first)</span><input id="random-activity-order" type="checkbox" checked></label>
+            <details class="advanced-disclosure"><summary>Task instructions and scoring</summary><div class="disclosure-body">
+              <p class="helper-text">Score the setup as it stands when the trial ends. Enter all requested counts before continuing.</p>
+              <label>Practice instruction<input id="trial-task1-instruction" type="text" required maxlength="500"></label>
+              <label>Practice scoring<select id="trial-task1-metric"><option value="practice">Practice · unscored</option></select></label>
+              <label>Task 1 cup stacking instruction<input id="trial-transfer-instruction" type="text" required maxlength="500"></label>
+              <label>Task 1 time limit (seconds)<input id="trial-transfer-duration" type="number" required min="30" max="7200" step="1" value="60"></label>
+              <p class="helper-text">Task 1 counts the cups in the tallest stack. Reset the cups before each trial.</p>
+              <label>Task 2 instruction<input id="trial-task2-instruction" type="text" required maxlength="500"></label>
+              <label>Task 2 scoring<select id="trial-task2-metric"><option value="block_count">Cubes in tallest stack</option></select></label>
+              <label>Task 3 instruction<input id="trial-task3-instruction" type="text" required maxlength="500"></label>
+              <label>Task 3 scoring<select id="trial-task3-metric"><option value="block_count">Cubes in mug and knocked over</option></select></label>
+            </div></details>
+            <label>View order within each activity<select id="trial-order">
+              <option value="random" selected>Randomize separately for each round</option>
+              <option value="fixed_rgb,mouse_3d,head_3d">Fixed cameras → Mouse 3D → Head tracking</option>
+              <option value="fixed_rgb,head_3d,mouse_3d">Fixed cameras → Head tracking → Mouse 3D</option>
+              <option value="mouse_3d,fixed_rgb,head_3d">Mouse 3D → Fixed cameras → Head tracking</option>
+              <option value="mouse_3d,head_3d,fixed_rgb">Mouse 3D → Head tracking → Fixed cameras</option>
+              <option value="head_3d,fixed_rgb,mouse_3d">Head tracking → Fixed cameras → Mouse 3D</option>
+              <option value="head_3d,mouse_3d,fixed_rgb">Head tracking → Mouse 3D → Fixed cameras</option>
+            </select></label>
+            <label>Practice per mode (seconds)<input id="trial-practice-duration" type="number" required min="30" max="7200" step="1" value="60"></label>
+            <label>Tasks 2 and 3 time limit (seconds)<input id="trial-duration" type="number" required min="30" max="7200" step="1" value="75" title="Applies to new sessions. The time limit stops recording; arm control stays enabled. Use Hold Arm when resetting objects."></label>
+            <button id="trial-save-protocol" type="button">Save task settings on host</button>
+            <p id="trial-protocol-status" class="helper-text" role="status">Loading task settings…</p>
+            <p id="trial-plan-help" class="helper-text">The full study starts with one unscored practice per view. Tasks 1–3 each have two rounds of all three views (18 measured trials total). Use the same 3D renderer for both 3D conditions.</p>
+            <button id="restore-trial-view" type="button">Restore current trial view</button>
+            <button id="new-trial-session" type="button">New session</button>
+            <p id="trial-session-status" class="helper-text" role="status"></p>
+          </section>
+
+
+        </div>
+        <div id="settings-controls" class="settings-pane" role="tabpanel" aria-labelledby="tab-controls" tabindex="0" hidden>
+          <section class="advanced-section"><h3>Arm controls</h3><div id="robot-settings-root"></div></section>
+        <section class="advanced-section wide">
+          <h3>Robot setup and calibration</h3>
+          <div id="robot-setup-root"></div>
+          <div id="robot-view-root"></div>
+        </section>
+        </div>
+        <div id="settings-view" class="settings-pane" role="tabpanel" aria-labelledby="tab-view" tabindex="0" hidden>
+          <section class="advanced-section"><h3>View and streaming</h3>
+          <details open><summary>Cameras in live 3D view</summary><div id="preview-camera-controls">Loading cameras…</div><p class="helper-text">Uncheck a camera to exclude its points. In 20k/40k/All native points mode its preview connections close too. Capture and recording stay unchanged. This browser remembers your selection.</p></details>
           <label>View
             <select id="display-mode">
               <option value="point_cloud">3D point cloud</option>
@@ -306,64 +502,136 @@
               <option value="latency">Low latency</option>
             </select>
           </label>
+          <label>Point detail<select id="point-preview-enabled"><option value="0">Full detail</option><option value="-2">Balanced mesh (compressed)</option><option value="-1">All native points (squares)</option><option value="40000">40k points per camera</option><option value="20000">20k points per camera</option></select></label>
+          <p id="point-preview-help" class="helper-text">All native points uses the same coloured squares as 20k/40k, with every valid sample in the workspace crop. Balanced mesh uses fewer depth samples and compressed RGB. Quality and Low latency can be combined with any point detail. Preview only; capture and recording stay unchanged.</p>
+          <p id="point-counts" class="helper-text">Waiting for point counts…</p>
+          <div id="workspace-point-budget-controls" hidden>
+            <label class="toggle-row"><span>Prioritize workspace points</span><input id="workspace-point-budget" type="checkbox" aria-describedby="workspace-point-budget-help"></label>
+            <p id="workspace-point-budget-help" class="helper-text">Spend the 20k or 40k budget on measured points inside the modeled workspace.</p>
+          </div>
+          <label id="square-point-size-control">Square point size <output id="square-point-size-value">1.00×</output><input id="square-point-size" type="range" min="0.25" max="4" step="0.05" value="1"></label>
+          <fieldset id="squares-fusion-controls">
+            <legend>Cross-camera squares fusion · experimental</legend>
+            <label class="toggle-row"><span>Fuse RGB and filter conflicting depths</span><input id="squares-fusion-enabled" type="checkbox" checked></label>
+            <p class="helper-text">Shares valid colour across matching surfaces and rejects depth contradictions. Where B/C agree, top camera A fills gaps without adding nearby duplicate layers. Uses fresh visible cameras only. Off keeps the original fast squares renderer. Preview only; calibration and recordings stay unchanged.</p>
+            <label class="toggle-row"><span>Repair washed-out edge colors</span><input id="squares-edge-repair-enabled" type="checkbox"></label>
+            <p class="helper-text">Repairs a washed-out edge when nearby points on the same surface and another camera agree on its color.</p>
+            <label class="toggle-row"><span>Hide uncolored squares</span><input id="hide-gray-squares" type="checkbox"></label>
+            <p class="helper-text">Hides points with no valid RGB after fusion. Keeps valid gray and white colors.</p>
+            <label class="toggle-row"><span>Suppress tabletop fringes</span><input id="squares-table-fringes-enabled" type="checkbox"></label>
+            <p class="helper-text">Hides stray scan points near the modeled tabletop where depth and color support a nearby colored object. Requires fusion and a modeled tabletop. Preview only.</p>
+            <label class="toggle-row"><span>Fill small surface gaps</span><input id="squares-fill-surface-gaps" type="checkbox"></label>
+            <p class="helper-text">Fills narrow breaks where nearby points agree in depth and color. With edge repair on, it can also recover color near depth edges. Preview only.</p>
+            <p id="squares-fusion-status" class="helper-text" role="status">Off.</p>
+          </fieldset>
+          <fieldset id="point-cleanup-controls">
+            <legend>Point cleanup</legend>
+            <label class="toggle-row"><span>Enable point cleanup</span><input id="point-cleanup-enabled" type="checkbox"></label>
+            <label>Required neighbours <output id="point-cleanup-support-value"></output><input id="point-cleanup-support" type="range" min="1" max="16" step="1" value="3" disabled></label>
+            <label>Neighbour radius · 1 mm–10 cm <output id="point-cleanup-radius-value"></output><input id="point-cleanup-radius" type="range" min="1" max="100" step="1" value="15" disabled></label>
+            <p class="helper-text">Runs after workspace crop and 20k / 40k / all-point selection. Removes points with too few displayed neighbours inside this 3D radius. More neighbours or a smaller radius removes more, including thin details. Off bypasses cleanup entirely. Capture and recording stay unchanged.</p>
+            <p id="point-cleanup-stats" class="helper-text" role="status">Cleanup off.</p>
+            <p class="helper-text">Changes preview in this tab. Use Save Current Setup as Default below to share these settings with all viewers across reloads and host restarts.</p>
+          </fieldset>
+          <fieldset id="blendpcr-controls">
+            <legend>BlendPCR surface controls</legend>
+            <label>Depth tolerance <output id="blend-depth-value"></output><input id="blend-depth" type="range" min="0.5" max="6" step="0.1" value="1"></label>
+            <label>Required neighbours <output id="blend-support-value"></output><input id="blend-support" type="range" min="0" max="4" step="1" value="2"></label>
+            <label>Maximum triangle edge <output id="blend-edge-value"></output><input id="blend-edge" type="range" min="1" max="1000" step="1" value="80"></label>
+            <button id="blend-reset" type="button">Reset surface controls</button>
+            <p class="helper-text">To reduce ramps between separate surfaces, lower depth tolerance below 1× or shorten the maximum edge. More neighbours reject isolated triangles; zero disables that check. Stricter settings can remove thin details and leave holes. These controls affect BlendPCR meshes, including Balanced mesh, rather than the 20k, 40k or All native points square views. Camera and recording data stay unchanged.</p>
+          </fieldset>
           <div class="button-row">
             <button id="recenter" class="primary" type="button">Recenter</button>
             <button id="restart" type="button">Reconnect Video</button>
           </div>
-          <div id="robot-settings-root"></div>
-          <button id="open-advanced" type="button">Advanced Setup</button>
-        </div>
-      </details>
-    </div>
 
-    <div class="status-chip">
-      <div class="status-main"><span id="status-dot" class="dot"></span><span id="status-title">Starting</span></div>
-      <div id="status-lines" class="status-lines">Preparing controller</div>
-      <div id="robot-status-root"></div>
-    </div>
-  </div>
-
-  <div id="robot-floating-root"></div>
-
-  <div id="advanced-setup" hidden role="dialog" aria-modal="true" aria-labelledby="advanced-title">
-    <div class="advanced-shell">
-      <div class="advanced-header"><h2 id="advanced-title">Advanced Setup</h2><button id="close-advanced" type="button">Done</button></div>
-      <div class="advanced-body">
+          </section>
         <section class="advanced-section">
           <h3>Camera and streaming</h3>
           <label class="toggle-row"><span>White background</span><input id="white-background-enabled" type="checkbox"></label>
+          <label class="toggle-row"><span>Depth only (gray)</span><input id="depth-only-enabled" type="checkbox" aria-describedby="depth-only-help" aria-keyshortcuts="Backspace"></label>
+          <p id="depth-only-help" class="helper-text">Show 3D surfaces without camera color. Press Backspace to toggle.</p>
           <label class="toggle-row"><span>Show camera locations</span><input id="camera-locations-enabled" type="checkbox"></label>
           <p class="helper-text">Camera bodies, labels, and viewing directions. Zoom out to see the full rig.</p>
           <p class="helper-text">Quality uses maximum supported depth and RGB resolution at 30 Hz; Low latency does the same at 60 Hz. Switching briefly restarts the shared cameras for all viewers. Capture targets may exceed delivered FPS.</p>
         </section>
-
         <section class="advanced-section">
           <h3>Head and mouse navigation</h3>
-          <label class="toggle-row"><span>Head tracking</span><input id="head-tracking-enabled" type="checkbox" checked></label>
+          <label class="toggle-row"><span>Head tracking</span><input id="head-tracking-enabled" type="checkbox"></label>
           <div class="navigation-guide">Left-drag orbit · right-drag or Shift-drag pan · wheel zoom · double-click or middle-click set orbit center</div>
           <div id="head-tracking-options" class="conditional-controls">
             <p class="helper-text">Head tracking response</p>
             <label>Orbit span <span id="orbit-span-value" class="value-label">160 deg</span><input id="orbit-span" type="range" min="30" max="360" step="5" value="160"></label>
-            <label>Orbit response <span id="orbit-response-value" class="value-label">2.5</span><input id="orbit-response" type="range" min="0.4" max="6" step="0.1" value="2.5"></label>
+            <label>Orbit response <span id="orbit-response-value" class="value-label">2.5</span><input id="orbit-response" type="range" min="0.4" max="12" step="0.1" value="2.5"></label>
             <label class="toggle-row"><span>Head Z zoom</span><input id="dolly-enabled" type="checkbox" checked></label>
             <label>Zoom strength <span id="dolly-gain-value" class="value-label">0.008 m/cm</span><input id="dolly-gain" type="range" min="0" max="0.04" step="0.001" value="0.008"></label>
           </div>
-          <label>View distance <span id="orbit-distance-value" class="value-label">0.35 m</span><input id="orbit-distance" type="range" min="0.25" max="2.5" step="0.05" value="0.35"></label>
+          <label>View distance <span id="orbit-distance-value" class="value-label">0.35 m</span><input id="orbit-distance" type="range" min="0.125" max="2.5" step="0.025" value="0.35"></label>
           <label>View height <span id="head-height-value" class="value-label">0.35 m</span><input id="head-height" type="range" min="0" max="1" step="0.01" value="0.35"></label>
           <label>View elevation <span id="orbit-elevation-value" class="value-label">0 deg</span><input id="orbit-elevation" type="range" min="-60" max="60" step="1" value="0"></label>
           <label>Field of view <span id="inspect-fov-value" class="value-label">55 deg</span><input id="inspect-fov" type="range" min="30" max="100" step="1" value="55"></label>
         </section>
-
         <section class="advanced-section">
-          <h3>Workspace guide</h3>
-          <label class="toggle-row"><span>Flat support surface</span><input id="workspace-surface-enabled" type="checkbox"></label>
-          <label class="toggle-row"><span>Robot workspace guide</span><input id="workspace-boundary-enabled" type="checkbox"></label>
-          <label>Surface height offset <span id="workspace-surface-offset-value" class="value-label">0 mm</span><input id="workspace-surface-offset" type="range" min="-0.25" max="0.25" step="0.001" value="0"></label>
-          <label>Surface size <span id="workspace-surface-size-value" class="value-label">1.20 m</span><input id="workspace-surface-size" type="range" min="0.25" max="4" step="0.05" value="1.2"></label>
-          <label>Surface opacity <span id="workspace-surface-opacity-value" class="value-label">18%</span><input id="workspace-surface-opacity" type="range" min="0.04" max="0.5" step="0.01" value="0.18"></label>
-          <p class="helper-text">The surface is robot-neutral. A workspace guide appears only when the active robot module declares one; safety enforcement remains inside that module.</p>
-        </section>
+          <h3>Modeled workspace</h3>
+          <label class="toggle-row"><span>Modeled table and floor</span><input id="modeled-workspace-enabled" type="checkbox" aria-describedby="modeled-workspace-help"></label>
+          <p id="modeled-workspace-help" class="helper-text">Show live objects above an artificial table. Switch off to restore the full scene. Applies to browser 3D views.</p>
+          <div id="modeled-workspace-options" class="conditional-controls" hidden>
+            <button id="modeled-workspace-edit" class="primary" type="button">Edit Table in 3D</button>
+            <button id="modeled-workspace-align" type="button">Place Below Arm Base</button>
+            <p class="helper-text">Starts below the calibrated arm base when available. Use the green Y handle to tune the height, then Done to keep it or Cancel to restore it. Camera and arm calibration stay unchanged.</p>
+            <label>Tabletop noise cutoff <output id="modeled-workspace-clearance-value">6 mm</output><input id="modeled-workspace-clearance" type="range" min="0" max="30" step="1" value="6" aria-describedby="tabletop-cutoff-help"></label>
+            <p id="tabletop-cutoff-help" class="helper-text">Hides measured points within this height above the table without moving it. Applies to all cameras. Increase only enough to remove floor speckles; larger values also hide thin objects near the surface. Saved with your table settings.</p>
+            <details class="advanced-disclosure"><summary>Exact placement and lighting</summary><div class="disclosure-body">
+            <button id="modeled-workspace-orbit" type="button">Place Tabletop at Orbit Point</button>
+            <label class="toggle-row"><span>Scene lighting</span><input id="scene-lighting-enabled" type="checkbox" checked></label>
+            <label class="toggle-row"><span>CAD shadows</span><input id="scene-shadows-enabled" type="checkbox" checked></label>
+            <p class="helper-text">Shared lights for the table and Solid robot overlay. Camera colors keep their original lighting.</p>
+            <label>Table height (m)<input id="modeled-workspace-table-height" type="number" min="0.1" max="4" step="0.01" value="0.72"></label>
+            <label>Table width (m)<input id="modeled-workspace-width" type="number" min="0.1" max="4" step="0.01" value="1.2"></label>
+            <label>Table depth (m)<input id="modeled-workspace-depth" type="number" min="0.1" max="4" step="0.01" value="0.8"></label>
 
+                <label>Center X (m)<input id="modeled-workspace-x" type="number" min="-20" max="20" step="0.001" value="0"></label>
+                <label>Tabletop Y (m)<input id="modeled-workspace-y" type="number" min="-20" max="20" step="0.001" value="0"></label>
+                <label>Center Z (m)<input id="modeled-workspace-z" type="number" min="-20" max="20" step="0.001" value="0"></label>
+                <label>Table heading (degrees)<input id="modeled-workspace-heading" type="number" min="-180" max="180" step="1" value="0"></label>
+                <label>Object region height (m)<input id="modeled-workspace-height" type="number" min="0.05" max="3" step="0.05" value="0.8"></label>
+                <label>Light angle (degrees)<input id="modeled-workspace-light-angle" type="range" min="-180" max="180" step="1" value="35"></label>
+              </div>
+            </details>
+          </div>
+          <div id="modeled-workspace-status" class="helper-text" role="status" aria-live="polite"></div>
+        </section>
+        <section class="advanced-section" id="camera-alignment-controls">
+          <h3>Camera alignment</h3>
+          <p class="helper-text">Uses Godot’s existing calibration to align the physical cameras. Put the arm in Hold and keep the scene still. The preview pauses during calibration. Each run backs up camera and arm calibration first.</p>
+          <label class="toggle-row"><span>Use ArUco / ChArUco board as the tabletop</span><input id="camera-board-tabletop" type="checkbox" checked></label>
+          <p class="helper-text">Lay the board flat on the same surface as the arm base. Successful marker or board calibration levels the scene and sets the tabletop to Y=0. Turn this off for an upright board.</p>
+          <div class="button-row">
+            <button id="camera-align-auto" type="button" disabled>Auto Align Cameras</button>
+            <button id="camera-align-refine" type="button" disabled>Refine Current Alignment</button>
+          </div>
+          <label>ArUco black square size (mm)<input id="camera-aruco-size" type="number" min="20" max="1000" step="0.1" value="150"></label>
+          <label>ArUco marker ID · DICT_4X4_100<input id="camera-aruco-id" type="number" min="0" max="99" step="1" value="49"></label>
+          <p class="helper-text">Measure one full side of the black square, outer corner to outer corner, excluding the white margin. Keep the same marker still and visible to all cameras.</p>
+          <button id="camera-align-aruco" type="button" disabled>Align Cameras with ArUco</button>
+          <details id="camera-charuco-controls">
+            <summary>ChArUco board calibration</summary>
+            <p class="helper-text">Uses the whole checkerboard and freshly measured depth planes for every camera. Rejects unreliable depth fits instead of reusing fixed offsets. Enter its printed specifications; count squares, not inner corners. Supports the classic OpenCV board layout with marker IDs starting at 0.</p>
+            <label>Squares across<input id="camera-charuco-x" value="16" type="number" min="3" max="40" step="1" required></label>
+            <label>Squares down<input id="camera-charuco-y" value="10" type="number" min="3" max="40" step="1" required></label>
+            <label>Checker square side (mm)<input id="camera-charuco-square" value="18" type="number" min="1" max="1000" step="0.1" required></label>
+            <label>Marker black square side (mm)<input id="camera-charuco-marker" value="14.5" type="number" min="0.5" max="1000" step="0.1" required></label>
+            <label>Marker dictionary<select id="camera-charuco-dictionary" required><option value="">Select the board’s dictionary</option><option value="0">DICT_4X4_50</option><option value="1">DICT_4X4_100</option><option value="2">DICT_4X4_250</option><option value="3">DICT_4X4_1000</option><option value="4">DICT_5X5_50</option><option value="5" selected>DICT_5X5_100</option><option value="6">DICT_5X5_250</option><option value="7">DICT_5X5_1000</option><option value="8">DICT_6X6_50</option><option value="9">DICT_6X6_100</option><option value="10">DICT_6X6_250</option><option value="11">DICT_6X6_1000</option><option value="12">DICT_7X7_50</option><option value="13">DICT_7X7_100</option><option value="14">DICT_7X7_250</option><option value="15">DICT_7X7_1000</option></select></label>
+            <p class="helper-text">Keep the board flat, rigid, still and visible to every camera. At least eight well-spread checker corners must be detected in each camera.</p>
+            <button id="camera-align-charuco" type="button" disabled>Align Cameras with ChArUco</button>
+            <button id="camera-align-top-only" type="button" disabled>Align top camera A only · keep B/C and arm fixed</button>
+            <p class="helper-text">Uses these board specifications. Checks A against both side cameras and saves only A. Keeps B/C, tabletop level and arm calibration unchanged; rejects inconsistent results.</p>
+          </details>
+          <div id="camera-alignment-status" class="helper-text" role="status" aria-live="polite">Checking Godot camera alignment…</div>
+          <p id="camera-depth-correction-status" class="helper-text"></p>
+          <p id="camera-alignment-backup" class="helper-text"></p>
+        </section>
         <section class="advanced-section">
           <h3>Site defaults</h3>
           <p class="helper-text">Save the current camera position and settings for every new browser that opens this installation.</p>
@@ -371,13 +639,8 @@
           <button id="reload-site-defaults" type="button">Reload Saved Defaults</button>
           <div id="site-settings-status"></div>
         </section>
-
-        <section class="advanced-section wide">
-          <h3>Robot setup and calibration</h3>
-          <div id="robot-setup-root"></div>
-          <div id="robot-view-root"></div>
-        </section>
-
+        </div>
+        <div id="settings-diagnostics" class="settings-pane" role="tabpanel" aria-labelledby="tab-diagnostics" tabindex="0" hidden>
         <section class="advanced-section wide">
           <h3>Troubleshooting</h3>
           <p class="helper-text">Both stream profiles keep native depth precision and full RGB frames.</p>
@@ -386,13 +649,11 @@
             <a id="transport-link" class="button" href="/frame-stream">Frame Stream Fallback</a>
           </div>
         </section>
-
         <section class="advanced-section wide">
           <h3>Camera image levels</h3>
           <div id="camera-image-levels" class="network-stats">Camera levels not yet available.</div>
           <p class="helper-text">Measured from original RGB, before mesh blending. Exposure, gain and framing affect brightness; these values are not room illuminance in lux.</p>
         </section>
-
         <section class="advanced-section wide">
           <h3>Diagnostics</h3>
           <div id="network-stats" class="network-stats">Network stats unavailable</div>
@@ -401,9 +662,10 @@
             <canvas id="rgbd-latency-graph" width="708" height="96" aria-label="RGB-D latency over the last 120 seconds"></canvas>
           </div>
         </section>
+        </div>
       </div>
     </div>
-  </div>
+  </aside>
 
   <div id="start-overlay" hidden>
     <div class="start-card">
@@ -414,6 +676,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20261020_color_recovery"></script>
+  <script type="module" src="./controller_hybrid.js?v=20261109_background_startup"></script>
 </body>
 </html>

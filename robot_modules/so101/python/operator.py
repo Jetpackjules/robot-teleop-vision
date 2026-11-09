@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, ClassVar
@@ -23,6 +24,7 @@ class So101Operator(GenericRobotOperator):
     _motion_types = frozenset(
         {
             "arm_command",
+            "arm_match_leader",
             "arm_cartesian_velocity",
             "arm_joint_velocity",
             "arm_tool_velocity",
@@ -113,8 +115,39 @@ class So101Operator(GenericRobotOperator):
             "fault": "follower service unavailable",
         }
 
+    def recording_spec(self) -> dict[str, Any]:
+        return {"robot_type": "so101_robot_teleop", "names": ["shoulder_pan", "shoulder_lift",
+                "elbow_flex", "wrist_flex", "wrist_roll", "gripper"],
+                "units": ["degree", "degree", "degree", "degree", "degree", "percent"],
+                "coordinates": "Robot Teleop internal normalized joint coordinates; motor-profile conversion already applied.",
+                "action": "Last successfully applied absolute normalized position target, including held targets."}
+
+    def recording_sample(self, status: Mapping[str, Any]) -> dict[str, Any] | None:
+        if status.get("follower_connected") is not True or status.get("measured_feedback_fresh") is not True:
+            return None
+        if status.get("fault") or status.get("calibration_sweep_active") or status.get("rest_return_active"):
+            return None
+        vectors = [status.get("follower_normalized"), status.get("applied_normalized")]
+        age = status.get("last_read_age_ms")
+        write_age = status.get("last_write_age_ms")
+        if type(age) not in (int, float) or not math.isfinite(age) or not 0 <= age <= 350:
+            return None
+        if type(write_age) not in (int, float) or not math.isfinite(write_age) or write_age < 0:
+            return None
+        if any(not isinstance(v, (list, tuple)) or len(v) != 6 or any(
+            type(n) not in (int, float) or not math.isfinite(n) for n in v) for v in vectors):
+            return None
+        sequence, epoch = status.get("last_seq", -1), status.get("restart_count", 0)
+        if type(sequence) is not int or type(epoch) is not int:
+            return None
+        return {"state": list(vectors[0]), "action": list(vectors[1]), "read_age_ms": age, "write_age_ms": write_age,
+                "sequence": sequence, "epoch": epoch}
+
     def hold_message(self) -> dict[str, Any]:
         return {"type": "arm_hold"}
+
+    def is_hold(self, message: Mapping[str, Any]) -> bool:
+        return message.get("type") == "arm_hold"
 
     def is_motion(self, message: Mapping[str, Any]) -> bool:
         return message.get("type") in self._motion_types
@@ -243,6 +276,19 @@ class So101Operator(GenericRobotOperator):
             "arm_idle_return_enabled",
         )
 
+    def view_settings_error(self, settings: Mapping[str, Any], status: Mapping[str, Any]) -> str:
+        starting = settings.get("calibrate_robot_position") is True or settings.get("refine_robot_joint_alignment") is True
+        if not starting:
+            return ""
+        if status.get("follower_connected") is not True or status.get("measured_feedback_fresh") is not True:
+            return "Robot feedback is offline. Start the follower service and wait for fresh joint feedback."
+        calibration = status.get("robot_calibration", {})
+        if not calibration.get("state") or calibration.get("state") in ("offline", "loading"):
+            return "Godot calibration is offline. Open the robot scene or start the runtime."
+        if calibration.get("state") in ("capturing", "solving"):
+            return "An arm calibration is already running."
+        return ""
+
     def structured_view_settings(self, data: Mapping[str, Any]) -> dict[str, Any]:
         key = "robot_visual_calibration_action"
         if key not in data:
@@ -251,12 +297,28 @@ class So101Operator(GenericRobotOperator):
         if not isinstance(action, dict):
             raise ValueError("visual calibration action must be an object")  # noqa: TRY004 - HTTP validation contract
         operation = action.get("operation")
-        if operation not in ("begin", "preview", "reset", "cancel", "save", "export", "import"):
+        if operation not in ("begin", "preview", "reset", "cancel", "save", "export", "import",
+                             "base_begin", "base_preview", "base_reset", "base_cancel", "base_save"):
             raise ValueError("unsupported visual calibration operation")
         request_id = action.get("request_id")
         if not isinstance(request_id, str) or not 1 <= len(request_id) <= 80:
             raise ValueError("visual calibration request_id is required (maximum 80 characters)")
         result = {"request_id": request_id, "operation": operation}
+        if operation.startswith("base_") and operation != "base_begin":
+            session_id = action.get("session_id")
+            if not isinstance(session_id, str) or not 1 <= len(session_id) <= 80:
+                raise ValueError("base adjustment session_id is required")
+            result["session_id"] = session_id
+            if operation in ("base_preview", "base_save"):
+                for name, limit in (("offset_x", 2.0), ("offset_z", 2.0), ("yaw_degrees", 180.0)):
+                    value = action.get(name)
+                    if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or abs(value) > limit:
+                        raise ValueError(f"base adjustment {name} must be finite and within +/-{limit}")
+                    result[name] = float(value)
+                height = action.get("offset_y", 0.0)
+                if isinstance(height, bool) or not isinstance(height, (float, int)) or not math.isfinite(height) or abs(height) > 2.0:
+                    raise ValueError("base adjustment offset_y must be finite and within +/-2.0")
+                result["offset_y"] = float(height)
         if operation == "import":
             file = action.get("file")
             if not isinstance(file, dict):

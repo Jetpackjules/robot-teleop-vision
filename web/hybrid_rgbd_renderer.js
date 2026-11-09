@@ -1,9 +1,30 @@
-import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261020_color_coverage";
+import {CLAW_MASK_SHADER,bindClawMeshMask,updateClawMeshMask} from './claw_mesh_mask.js';
+import {cameraDepthSamples} from './point_preview_sampling.js?v=20261027_sparse_delta';
+import {NativePointAssembler} from './native_point_channel.js?v=20261027_native_rtc';
+import {IndependentCameraSocket} from './independent_camera_socket.js?v=20261028_camera_lanes';
+import {decodeSparsePoints} from './sparse_point_decode_worker.js?v=20261028_near60';
+import {WorkspaceEditor} from './workspace_editor.js?v=20261021_original_rgb';
+import {orientedBox,screenRay} from './workspace_transform.js?v=20261021_direct_workspace';
+import {timeBrowserWork} from './browser_work_timing.js?v=20261027_stalls';
+import {RobotPosePreview} from './robot_pose_preview.js?v=20261027_smooth_preview';
+import {MeasuredJointAnimation} from './robot_joint_animation.js?v=20261027_camera_sync';
+import { MultiCameraFusion, FUSION_FRAGMENT_SHADER, cameraIsFresh, chooseColorReference, orderedCameras, pointPixelScale } from "./hybrid_camera_fusion.js?v=20261027_host_sparse";
 
-import { BrowserBlendPCR } from "./hybrid_blendpcr.js?v=20261020_color_coverage";
+import { BrowserBlendPCR, nativeMeshIndices } from "./hybrid_blendpcr.js?v=20261021_original_rgb";
+import { DEPTH_SHADING_SHADER } from "./depth_shading.js?v=20261020_depth_only";
 import { CameraRgbViewer } from "./camera_rgb_viewer.js?v=20261020_color_recovery";
-import { NativeRgbdDecoderPool, isIndependentNativeFrame, takeIndependentFrameBatch } from "./rgbd_decode_pool.js?v=20261020_native_pixels";
-import { COLOR_PROJECTION_SHADER, bindColorProjection } from './hybrid_color_projection.js?v=20261020_color_coverage';
+import { NativeRgbdDecoderPool, isIndependentNativeFrame, takeIndependentFrameBatch } from "./rgbd_decode_pool.js?v=20261028_near60";
+import { COLOR_PROJECTION_SHADER, bindColorProjection, colorFrameDimensions } from './hybrid_color_projection.js?v=20261021_original_rgb';
+import { workspaceSourceWindow, workspaceVisibleTiles, bindWorkspaceTiles, unbindWorkspaceTiles } from './table_geometry.js?v=20261021_original_rgb';
+import { MODELED_WORKSPACE_DEFAULTS, MODELED_WORKSPACE_PALETTE, MODELED_WORKSPACE_SHADER, ModeledWorkspaceRenderer, modeledWorkspace, modeledWorkspaceOutside, modeledWorkspaceBounds, bindModeledWorkspace, raycastModeledWorkspace, raycastModeledWorkspaceOccluder } from './modeled_workspace.js?v=20261021_original_rgb';
+import {raycastRobotPrimitive} from './scene_picking.js';
+import {SCENE_LIGHTING_SHADER,bindSceneLighting,SceneShadowRenderer} from './scene_lighting.js?v=20261021_lit_workspace';
+import {NativePointColors} from './hybrid_point_colors.js?v=20261026_native_render';
+import {visibleNativeTiles} from './native_geometry.js?v=20261026_native_render';
+import {NativeRobotMask} from './native_robot_mask.js?v=20261026_quality_profile';
+import {triangleNormals,robotSurfaceMaterial} from './robot_surface_materials.js?v=20261026_realistic_arm';
+import {fetchRobotModel} from './robot_model_loader.js?v=20261027_link_recovery';
+import {SampledPointPreview} from './sampled_point_preview.js?v=20261109_background_startup';
 
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},
@@ -14,7 +35,6 @@ const EMPTY_ROBOT_RENDERER = Object.freeze({
   calibrationBoundsLinks: [],
   maskChain: { names: [], radii: [] },
   manualView: {},
-  workspaceBoundary: null,
 });
 
 function activeRobotRenderer() {
@@ -27,19 +47,26 @@ const state = {
   gl: null,
   program: null,
   uniforms: null,
+  indexedProgram: null,
+  indexedUniforms: null,
+  indexedUnavailable: false,
   cameraFusion: null,
   blendPCR: null,
+  sampledPointPreview: null,
+  pointPreviewUnavailable: '',
   robotProgram: null,
   robotUniforms: null,
   robotVao: null,
-  workspaceGuide: null,
   cameraGuide: null,
   cameraGuideLabels: new Map(),
   cameraGuideLabelRoot: null,
   robotMeshes: {},
   robotRenderer: EMPTY_ROBOT_RENDERER,
   robotTransforms: {},
+  robotPosePreview: new RobotPosePreview(),
+  robotJointAnimation: new MeasuredJointAnimation(),
   robotTransformsUpdatedMs: 0,
+  robotRegistration: null,
   manualRgbCanvas: null,
   manualCropCanvas: null,
   manualRgbBaseCanvas: null,
@@ -52,6 +79,7 @@ const state = {
   rawRgbViewer: null,
   rgbdPaused: false,
   robotLoadToken: 0,
+  robotLoadController: null,
   dataChannel: null,
   dataChannelHandlers: null,
   dataChannelFallbackTimer: 0,
@@ -75,6 +103,7 @@ const state = {
   animationFrame: 0,
   lastRenderMs: 0,
   pendingFrameQueue: [],
+  pendingCameraUploads: new Map(),
   temporalDepthKeyframes: new Map(),
   temporalColorKeyframes: new Map(),
   persistentMetadata: null,
@@ -85,6 +114,8 @@ const state = {
   currentViewer: null,
   focusWorld: null,
   focusPicked: false,
+  orbitReference: null,
+  orbitAimOffset: null,
   orbitAnchorDirection: null,
   orbitAnchorHeadDelta: null,
   lastHeadDelta: [0, 0, 0],
@@ -107,10 +138,11 @@ const state = {
     focus_vertical_offset: 0.35,
     dolly_enabled: true,
     dolly_gain: 0.008,
-    min_distance: 0.2,
+    min_distance: 0.125,
     max_distance: 3.0,
     fov: 55,
     splat_fill: 1.3,
+    square_point_scale: 1,
     geometry_mode: "mesh",
     blendpcr_enabled: false,
     overlap_suppression_enabled: false,
@@ -118,16 +150,20 @@ const state = {
     mesh_depth_delta: 0.035,
     mesh_max_edge: 0.055,
     point_underlay: false,
+    point_preview_enabled: false,
+    mesh_preview_enabled: false,
     robot_overlay_enabled: true,
+    robot_overlay_scope: "full",
+    robot_overlay_claw_opacity: 1,
+    robot_overlay_claw_buffer_mm: 0,
+    robot_overlay_body_opacity: 1,
+    robot_overlay_body_buffer_mm: 0,
     robot_overlay_style: "alignment",
     robot_overlay_mask_scanned_robot: true,
     white_background_enabled: false,
-    workspace_surface_enabled: false,
-    workspace_boundary_enabled: false,
+    depth_only_enabled: false,
     camera_locations_enabled: false,
-    workspace_surface_offset: 0,
-    workspace_surface_size: 1.2,
-    workspace_surface_opacity: 0.18,
+    ...MODELED_WORKSPACE_DEFAULTS,
   },
   stats: {
     status: "idle",
@@ -198,6 +234,35 @@ flat out uint v_triangle_id;
 uniform highp sampler2DArray u_rig_quality;
 uniform highp int u_rig_index;
 uniform highp int u_quality_enabled;
+#ifdef NATIVE_POINT_COLORS
+uniform highp sampler2DArray u_point_color_cache;
+uniform highp int u_point_color_cache_enabled;
+#endif
+uniform ivec2 u_source_origin;
+uniform ivec2 u_source_size;
+uniform highp int u_sparse_tiles;
+layout(location=0) in uvec2 a_source_tile;
+layout(location=1) in uint a_source_vertex;
+${MODELED_WORKSPACE_SHADER}
+
+${CLAW_MASK_SHADER}
+bool robot_masked(vec3 world) {
+  if(claw_mesh_masked(world))return true;
+  for(int index=0;index<6;index++) {
+    vec3 segment=u_mask_capsule_b[index].xyz-u_mask_capsule_a[index].xyz;
+    float length_squared=dot(segment,segment);
+    float along=length_squared>0.000001
+      ?clamp(dot(world-u_mask_capsule_a[index].xyz,segment)/length_squared,0.0,1.0):0.0;
+    vec3 offset=world-u_mask_capsule_a[index].xyz-segment*along;
+    if(dot(offset,offset)<=u_mask_capsule_a[index].w*u_mask_capsule_a[index].w)return true;
+  }
+  return false;
+}
+vec3 source_world(ivec2 pixel) {
+  float z=float(texelFetch(u_depth,pixel,0).r)*0.001;
+  return (u_model*vec4((float(pixel.x)-u_intrinsics.z)*z/u_intrinsics.x,
+    -(float(pixel.y)-u_intrinsics.w)*z/u_intrinsics.y,-z,1.0)).xyz;
+}
 
 bool depth_supported(ivec2 pixel, uint depth_mm) {
   float tolerance_mm = max(2.0, u_mesh_depth_delta * float(depth_mm) * 0.5);
@@ -213,18 +278,42 @@ bool depth_supported(ivec2 pixel, uint depth_mm) {
 }
 
 void main() {
+  int vertex_id=u_sparse_tiles==1?int(a_source_vertex):gl_VertexID;
   v_source_pixel = vec2(0.0);
   v_world_position = vec3(0.0);
-  v_triangle_id = uint(gl_VertexID / 3 + 1);
+  v_triangle_id = uint(vertex_id / 3 + 1);
   ivec2 pixel_coord;
   bool triangle_valid = true;
+  ivec2 source_size=all(greaterThan(u_source_size,ivec2(0)))?u_source_size:u_size;
   if (u_render_mode == 1) {
-    int cells_x = u_size.x - 1;
-    int vertex_in_cell = gl_VertexID % 6;
-    int cell_index = gl_VertexID / 6;
+#ifdef INDEXED_NATIVE_MESH
+      int grid_width=u_sparse_tiles==1?33:u_size.x;
+      int grid_count=grid_width*(u_sparse_tiles==1?9:2);
+      ivec2 grid_origin=u_sparse_tiles==1?ivec2(a_source_tile):ivec2(0,gl_InstanceID+u_source_origin.y);
+      if(vertex_id<grid_count)pixel_coord=ivec2(vertex_id%grid_width,vertex_id/grid_width)+grid_origin;
+      else {
+        int primitive=vertex_id-grid_count,cell=primitive/2;
+        ivec2 top_left=ivec2(cell%(grid_width-1),cell/(grid_width-1))+grid_origin;
+        bool inside=all(lessThan(top_left,u_size-ivec2(1)));
+        vec4 quality=inside?texelFetch(u_rig_quality,ivec3(top_left,u_rig_index),0):vec4(0);
+        bool valid=((primitive%2)==0?quality.r:quality.g)>0.5;
+        // A rejected triangle collapses onto its first corner. Valid triangles
+        // keep all three exact native samples; neighboring triangles share
+        // their other vertices in the GPU's post-transform cache.
+        pixel_coord=valid?top_left+ivec2(0,1):top_left+ivec2((primitive%2)==0?0:1,0);
+      }
+      pixel_coord=min(pixel_coord,u_size-ivec2(1));
+#else
+    int cells_x = u_sparse_tiles==1?32:source_size.x - 1;
+    int vertex_in_cell = vertex_id % 6;
+    int cell_index = vertex_id / 6;
     int cell_x = cell_index % cells_x;
     int cell_y = cell_index / cells_x;
-    ivec2 top_left = ivec2(cell_x, cell_y);
+    ivec2 top_left = ivec2(cell_x, cell_y)+(u_sparse_tiles==1?ivec2(a_source_tile):u_source_origin);
+    if(any(greaterThanEqual(top_left,u_size-ivec2(1)))) {
+      gl_Position=vec4(2.0,2.0,2.0,1.0);v_valid=0.0;v_color=vec3(0);return;
+    }
+    v_triangle_id=uint((top_left.y*(u_size.x-1)+top_left.x)*2+(vertex_in_cell/3)+1);
     ivec2 top_right = top_left + ivec2(1, 0);
     ivec2 bottom_left = top_left + ivec2(0, 1);
     ivec2 bottom_right = top_left + ivec2(1, 1);
@@ -242,6 +331,12 @@ void main() {
       triangle_c = bottom_left;
       pixel_coord = vertex_in_cell == 3 ? triangle_a : (vertex_in_cell == 4 ? triangle_b : triangle_c);
     }
+    // The final corner supplies the flat triangle ID. Reject the complete
+    // native triangle if any corner is scanned arm, matching BlendPCR's hit
+    // reconstruction without interpolation-dependent fragments at the edge.
+    if(u_robot_mask_enabled==1&&(vertex_in_cell==2||vertex_in_cell==5)
+      &&(robot_masked(source_world(triangle_a))||robot_masked(source_world(triangle_b))||robot_masked(source_world(triangle_c))))
+      v_triangle_id=0u;
     if (u_quality_enabled == 1) {
       vec4 quality = texelFetch(u_rig_quality, ivec3(top_left,u_rig_index), 0);
       triangle_valid = (vertex_in_cell < 3 ? quality.r : quality.g) > 0.5;
@@ -269,8 +364,13 @@ void main() {
       && depth_supported(triangle_b, depth_b)
       && depth_supported(triangle_c, depth_c);
     }
+#endif
   } else {
-    pixel_coord = ivec2(gl_VertexID % u_size.x, gl_VertexID / u_size.x);
+    pixel_coord = u_sparse_tiles==1?ivec2(vertex_id%32,vertex_id/32)+ivec2(a_source_tile)
+      :ivec2(vertex_id % source_size.x, vertex_id / source_size.x)+u_source_origin;
+    if(any(greaterThanEqual(pixel_coord,u_size))) {
+      gl_Position=vec4(2.0,2.0,2.0,1.0);gl_PointSize=0.0;v_valid=0.0;v_color=vec3(0);return;
+    }
   }
   int x = pixel_coord.x;
   int y = pixel_coord.y;
@@ -292,29 +392,21 @@ void main() {
     -z
   );
   vec3 world_position = (u_model * vec4(local_position, 1.0)).xyz;
+  if(u_render_mode!=1 && modeled_workspace_outside(world_position)) {
+    gl_Position=vec4(2.0,2.0,2.0,1.0);gl_PointSize=0.0;v_color=vec3(0);v_valid=0.0;return;
+  }
   v_local_position = local_position;
-  if (u_robot_mask_enabled == 1) {
-    for (int index = 0; index < 6; index++) {
-      vec3 segment = u_mask_capsule_b[index].xyz - u_mask_capsule_a[index].xyz;
-      float segment_length_squared = dot(segment, segment);
-      float along = segment_length_squared > 0.000001
-        ? clamp(dot(world_position - u_mask_capsule_a[index].xyz, segment) / segment_length_squared, 0.0, 1.0)
-        : 0.0;
-      vec3 closest = u_mask_capsule_a[index].xyz + segment * along;
-      float radius = u_mask_capsule_a[index].w;
-      if (dot(world_position - closest, world_position - closest) <= radius * radius) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-        gl_PointSize = 0.0;
-        v_color = vec3(0.0);
-        v_valid = 0.0;
-        return;
-      }
-    }
+  if (u_robot_mask_enabled == 1 && u_render_mode != 1 && robot_masked(world_position)) {
+    gl_Position=vec4(2,2,2,1);gl_PointSize=0.;v_color=vec3(0);v_valid=0.;return;
   }
   gl_Position = u_view_projection * vec4(world_position, 1.0);
   v_world_position = world_position;
   gl_PointSize = clamp(u_point_size * z / max(0.001, gl_Position.w), 1.0, u_max_point_size);
   v_color = texelFetch(u_color, ivec2(x, y), 0).rgb;
+#ifdef NATIVE_POINT_COLORS
+  if(u_point_color_cache_enabled==1&&u_render_mode!=1)
+    v_color=texelFetch(u_point_color_cache,ivec3(pixel_coord,u_rig_index),0).rgb;
+#endif
   if (u_fusion_enabled == 1) {
     vec3 fusion_position = (u_world_to_fusion * vec4(world_position, 1.0)).xyz;
     float fusion_projected_depth = -fusion_position.z;
@@ -346,15 +438,25 @@ in float v_valid;
 in vec3 v_local_position;
 uniform highp int u_render_mode;
 uniform highp int u_quality_enabled;
+uniform highp int u_depth_only_enabled;
+#ifdef NATIVE_POINT_COLORS
+uniform highp int u_point_color_cache_enabled;
+#endif
+uniform mat4 u_model;
 uniform sampler2D u_color;
 uniform ivec2 u_size;
+flat in uint v_triangle_id;
 out vec4 out_color;
 
 ${FUSION_FRAGMENT_SHADER}
 ${COLOR_PROJECTION_SHADER}
+${DEPTH_SHADING_SHADER}
+${MODELED_WORKSPACE_SHADER}
 
 void main() {
   if (v_valid < 0.9999) discard;
+  if (u_render_mode == 1 && v_triangle_id == 0u) discard;
+  if (modeled_workspace_outside(v_world_position)) discard;
   if (u_render_mode == 1 && rig_overlap()) discard;
   // A surface triangle is only usable when all three vertices survived the
   // depth-continuity test. Interpolation makes v_valid less than one if even
@@ -364,15 +466,28 @@ void main() {
     vec2 centered = gl_PointCoord * 2.0 - 1.0;
     if (dot(centered, centered) > 1.0) discard;
   }
-  vec3 color = u_render_mode == 1
-    ? texelFetch(u_color, clamp(ivec2(floor(v_source_pixel + 0.5)), ivec2(0), u_size - 1), 0).rgb
-    : v_color;
-  bool has_color;
-  if(u_quality_enabled==1) {
-    vec4 sample_color=texelFetch(u_rig_color,ivec3(clamp(ivec2(floor(v_source_pixel+0.5)),ivec2(0),u_size-1),u_rig_index),0);
-    has_color=sample_color.a>0.5;color=sample_color.rgb;
-  } else has_color=camera_has_color(v_local_position);
-  if(!has_color)color=vec3(0.34);
+  if (u_depth_only_enabled == 1) {
+    vec3 normal;
+    if (u_render_mode == 1) {
+      normal = cross(dFdx(v_world_position), dFdy(v_world_position));
+    } else {
+      // Points have no rasterized surface derivatives. Use a neighboring
+      // measured triangle when available, retaining isolated depth samples.
+      RigHit hit;
+      normal = mat3(u_model) * vec3(0.0, 0.0, 1.0);
+      if (u_quality_enabled == 1 && rig_surface(u_rig_index, v_world_position, hit))
+        normal = mat3(u_model) * hit.normal;
+    }
+    out_color = vec4(depth_surface_gray(normal), 1.0);
+    return;
+  }
+#ifdef NATIVE_POINT_COLORS
+  if(u_point_color_cache_enabled==1&&u_render_mode!=1){out_color=vec4(v_color,1);return;}
+#endif
+  vec4 source_color=camera_sample_color(u_color,v_local_position,
+    clamp(ivec2(floor(v_source_pixel+0.5)),ivec2(0),u_size-1));
+  vec3 color=source_color.a>0.5?source_color.rgb:vec3(0.34);
+  bool has_color=source_color.a>0.5;
   out_color = vec4(rig_color(color,has_color), 1.0);
 }
 `;
@@ -386,9 +501,15 @@ uniform mat4 u_view_projection;
 uniform mat4 u_model;
 uniform vec2 u_viewport;
 uniform float u_outline_pixels;
+out vec3 v_robot_normal;
+out vec3 v_robot_world;
+out vec3 v_robot_local;
 
 void main() {
   vec4 world = u_model * vec4(a_position, 1.0);
+  v_robot_world=world.xyz;
+  v_robot_local=a_position;
+  v_robot_normal=transpose(inverse(mat3(u_model)))*a_normal;
   vec4 clip = u_view_projection * world;
   if (u_outline_pixels > 0.0 && dot(a_normal, a_normal) > 0.01) {
     mat3 normal_matrix = transpose(inverse(mat3(u_model)));
@@ -408,10 +529,25 @@ const ROBOT_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 
 uniform vec4 u_color;
+uniform vec2 u_robot_material;
+uniform float u_robot_surface_detail;
+in vec3 v_robot_normal;
+in vec3 v_robot_world;
+in vec3 v_robot_local;
 out vec4 out_color;
+${SCENE_LIGHTING_SHADER}
 
 void main() {
-  out_color = u_color;
+  vec3 color=u_color.rgb;
+  if(u_robot_surface_detail>0.) {
+    // Link-local plastic grain fades below a pixel to avoid distant shimmer.
+    vec3 cell=v_robot_local*1800.;
+    vec3 footprint=fwidth(cell);
+    float detail=1.-smoothstep(.45,1.25,max(footprint.x,max(footprint.y,footprint.z)));
+    float grain=fract(sin(dot(floor(cell),vec3(127.1,311.7,74.7)))*43758.5453);
+    color*=1.+(grain-.5)*.045*detail*u_robot_surface_detail;
+  }
+  out_color = vec4(scene_material(color,v_robot_normal,v_robot_world,u_robot_material),u_color.a);
 }
 `;
 
@@ -545,6 +681,8 @@ function compileShader(gl, type, source) {
   return shader;
 }
 
+const standardSurfacePrograms=new WeakSet();
+
 function createProgram(gl, vertexSource = VERTEX_SHADER, fragmentSource = FRAGMENT_SHADER) {
   const vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
   const fragment = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
@@ -555,11 +693,46 @@ function createProgram(gl, vertexSource = VERTEX_SHADER, fragmentSource = FRAGME
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const message = gl.getProgramInfoLog(program) || "shader linking failed";
+    const message = gl.getProgramInfoLog(program) || `shader linking failed (GL ${gl.getError()}, context lost ${gl.isContextLost()})`;
     gl.deleteProgram(program);
     throw new Error(message);
   }
+  if(vertexSource===VERTEX_SHADER&&fragmentSource===FRAGMENT_SHADER)standardSurfacePrograms.add(program);
   return program;
+}
+
+function ensureIndexedProgram() {
+  if(state.indexedUnavailable)return false;
+  if(state.indexedProgram)return true;
+  const gl=state.gl;
+  try {
+    state.indexedProgram=createProgram(gl,VERTEX_SHADER.replace('#version 300 es','#version 300 es\n#define INDEXED_NATIVE_MESH'));
+    state.indexedUniforms=findUniforms(gl,state.indexedProgram);
+    gl.useProgram(state.indexedProgram);
+    for(const [name,unit] of [['depth',0],['color',1],['fusionDepth',2],['fusionColor',3],['rigDepth',4],['rigData',5],['rigQuality',6],['rigColor',7]])
+      gl.uniform1i(state.indexedUniforms[name],unit);
+    gl.uniform1f(state.indexedUniforms.maxPointSize,Math.min(32,gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]));
+    return true;
+  } catch(_) {state.indexedUnavailable=true;return false;}
+}
+
+// Separate original-RGB and legacy color shaders. Keeping both large camera
+// loops live in one shader exceeds some ANGLE/D3D compiler limits.
+function ensureOriginalProgram(indexed=false,pointColors=false) {
+  const key=pointColors?'originalPoints':indexed?'originalIndexed':'original';
+  if(state[key+'Unavailable'])return false;
+  if(state[key+'Program'])return true;
+  const gl=state.gl;
+  try {
+    const pointDefine=pointColors?'\n#define NATIVE_POINT_COLORS':'';
+    const vertex=VERTEX_SHADER.replace('#version 300 es',`#version 300 es${pointDefine}${indexed?'\n#define INDEXED_NATIVE_MESH':''}`);
+    const fragment=FRAGMENT_SHADER.replace('#version 300 es',`#version 300 es\n#define ORIGINAL_RGB${pointDefine}`);
+    const program=createProgram(gl,vertex,fragment),u=findUniforms(gl,program);
+    state[key+'Program']=program;state[key+'Uniforms']=u;gl.useProgram(program);
+    for(const [name,unit] of [['depth',0],['color',1],['fusionDepth',2],['fusionColor',3],['rigDepth',4],['rigData',5],['rigQuality',6],['rigColor',7]])gl.uniform1i(u[name],unit);
+    gl.uniform1f(u.maxPointSize,Math.min(32,gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]));
+    return true;
+  }catch(error){state[key+'Unavailable']=true;state.stats.renderWarning=String(error.message||error);return false;}
 }
 
 function findRobotUniforms(gl, program) {
@@ -569,6 +742,8 @@ function findRobotUniforms(gl, program) {
     color: gl.getUniformLocation(program, "u_color"),
     viewport: gl.getUniformLocation(program, "u_viewport"),
     outlinePixels: gl.getUniformLocation(program, "u_outline_pixels"),
+    material: gl.getUniformLocation(program, "u_robot_material"),
+    surfaceDetail: gl.getUniformLocation(program, "u_robot_surface_detail"),
   };
 }
 
@@ -589,6 +764,17 @@ function transformDictionaryMatrix(value) {
     Number(value.basis_z[0]), Number(value.basis_z[1]), Number(value.basis_z[2]), 0,
     Number(value.origin[0]), Number(value.origin[1]), Number(value.origin[2]), 1,
   ]);
+}
+
+function acceptRobotOverlayState(robot) {
+  state.robotJointAnimation.accept(robot);
+  const now=performance.now();
+  if(!state.robotPosePreview.accept(robot,now))return false;
+  state.robotTransforms=state.robotPosePreview.sample(now);
+  state.robotTransformsUpdatedMs=now;
+  state.robotRegistration=robot.registration||null;
+  state.stats.robotTransforms=Object.keys(state.robotTransforms).length;
+  return true;
 }
 
 function nodeLocalMatrix(node) {
@@ -690,9 +876,19 @@ function glbPrimitives(gltf, binary) {
           indices = new Uint32Array(source.length);
           for (let index = 0; index < source.length; index += 1) indices[index] = source[index];
         }
+        const pbr = gltf.materials?.[primitive.material]?.pbrMetallicRoughness || {};
+        const color = [...(pbr.baseColorFactor || [1, 1, 1, 1])];
+        if (Number.isInteger(primitive.attributes.COLOR_0)) {
+          const accessor = gltf.accessors[primitive.attributes.COLOR_0];
+          const vertex = accessorValues(gltf, binary, primitive.attributes.COLOR_0);
+          const divisor = accessor.normalized ? ({5121:255,5123:65535}[accessor.componentType] || 1) : 1;
+          for (let i = 0; i < Math.min(4, vertex.componentCount); i++) color[i] *= vertex.values[i] / divisor;
+        }
+        const material = {color, roughness: pbr.roughnessFactor ?? .65, metalness: pbr.metallicFactor ?? 0, detail: 0};
         output.push({
           positions: new Float32Array(positions.values),
-          normals: normals ? new Float32Array(normals.values) : new Float32Array(positions.count * 3),
+          normals: normals ? new Float32Array(normals.values) : triangleNormals(positions.values, indices, Number(primitive.mode ?? 4)),
+          material,
           count: indices ? indices.length : positions.count,
           indices,
           mode: Number(primitive.mode ?? 4),
@@ -711,22 +907,38 @@ function robotDrawMode(gl, mode) {
 }
 
 async function loadRobotMeshes(gl, token) {
+  state.robotLoadController?.abort();
+  const controller = state.robotLoadController = new AbortController();
   deleteRobotMeshes(gl, state.robotMeshes);
   state.robotMeshes = {};
   state.stats.robotModelsLoaded = 0;
   const modelUrls = state.robotRenderer.modelUrls || {};
   state.stats.robotModelsExpected = Object.keys(modelUrls).length;
   state.stats.robotLoadError = "";
-  const failures = [];
+  const failures = new Map();
+  const pending = new Set(Object.keys(modelUrls));
+  const current = () => state.running && state.gl === gl && state.robotLoadToken === token;
+  const publish = () => {
+    if (!current()) return;
+    state.stats.robotModelsLoaded = Object.keys(state.robotMeshes).length;
+    state.stats.robotModelsPending = [...pending];
+    state.stats.robotLoadError = [...failures].map(([name, message]) => `${name}: ${message}`).join('; ');
+  };
+  publish();
   await Promise.all(Object.entries(modelUrls).map(async ([name, url]) => {
     let uploaded = [];
     try {
-      const response = await fetch(url, { cache: "no-cache" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const { gltf, binary } = parseGlb(await response.arrayBuffer());
-      const primitives = glbPrimitives(gltf, binary);
-      if (!primitives.length) throw new Error("model has no drawable primitives");
-      if (!state.running || state.gl !== gl || state.robotLoadToken !== token) return;
+      const primitives = await fetchRobotModel(url, {
+        signal: controller.signal,
+        decode(buffer) {
+          const {gltf, binary} = parseGlb(buffer);
+          const primitives = glbPrimitives(gltf, binary);
+          if (!primitives.length) throw new Error('model has no drawable primitives');
+          return primitives;
+        },
+        onRetry(error) { failures.set(name, error.message || String(error)); publish(); },
+      });
+      if (!primitives || !current()) return;
       uploaded = primitives.map((primitive) => {
         const positionBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
@@ -740,11 +952,11 @@ async function loadRobotMeshes(gl, token) {
           gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
           gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, primitive.indices, gl.STATIC_DRAW);
         }
-        const keepForCalibration = (state.robotRenderer.calibrationLinks || []).includes(name);
         return {
           ...primitive,
-          cpuPositions: keepForCalibration ? primitive.positions : null,
-          cpuIndices: keepForCalibration ? primitive.indices : null,
+          material: robotSurfaceMaterial(primitive.material, state.robotRenderer.materialPalette),
+          cpuPositions: primitive.positions,
+          cpuIndices: primitive.indices,
           positions: null,
           normals: null,
           indices: null,
@@ -758,16 +970,18 @@ async function loadRobotMeshes(gl, token) {
         return;
       }
       state.robotMeshes[name] = uploaded;
-      state.stats.robotModelsLoaded = Object.keys(state.robotMeshes).length;
+      failures.delete(name);
     } catch (error) {
       if (uploaded.length) deleteRobotMeshes(gl, { [name]: uploaded });
       const message = `${name}: ${error && error.message ? error.message : error}`;
-      failures.push(message);
+      failures.set(name, error && error.message ? error.message : String(error));
       console.warn("Hybrid robot link unavailable:", message);
+    } finally {
+      pending.delete(name);
+      publish();
     }
   }));
   if (state.running && state.gl === gl && state.robotLoadToken === token) {
-    state.stats.robotLoadError = failures.join("; ");
     console.info(`Hybrid robot overlay loaded ${state.stats.robotModelsLoaded}/${state.stats.robotModelsExpected} links`);
   }
 }
@@ -782,151 +996,6 @@ function deleteRobotMeshes(gl, meshes = state.robotMeshes) {
     }
   }
   if (meshes === state.robotMeshes) state.robotMeshes = {};
-}
-
-function deleteWorkspaceGuide(gl) {
-  if (!gl || !state.workspaceGuide) return;
-  for (const item of Object.values(state.workspaceGuide.items || {})) {
-    if (item?.buffer) gl.deleteBuffer(item.buffer);
-  }
-  state.workspaceGuide = null;
-}
-
-function lineRing(vertices, centerX, centerY, centerZ, radius, segments = 64) {
-  if (!(radius > 0)) return;
-  for (let index = 0; index < segments; index += 1) {
-    const first = (index / segments) * Math.PI * 2;
-    const second = ((index + 1) / segments) * Math.PI * 2;
-    vertices.push(
-      centerX + Math.cos(first) * radius, centerY, centerZ + Math.sin(first) * radius,
-      centerX + Math.cos(second) * radius, centerY, centerZ + Math.sin(second) * radius,
-    );
-  }
-}
-
-function workspaceGuideGeometry() {
-  const anchorName = String(state.robotRenderer.workspaceBoundary?.anchorLink || state.robotRenderer.baseLink || "");
-  const anchor = transformDictionaryMatrix(state.robotTransforms[anchorName]);
-  const centerX = anchor ? anchor[12] : 0;
-  const anchorY = anchor ? anchor[13] : 0;
-  const centerZ = anchor ? anchor[14] : 0;
-  const offset = Number(state.settings.workspace_surface_offset || 0);
-  const size = clamp(Number(state.settings.workspace_surface_size || 1.2), 0.2, 10);
-  const surfaceY = anchorY + offset;
-  const half = size * 0.5;
-  const fill = [
-    centerX - half, surfaceY, centerZ - half,
-    centerX + half, surfaceY, centerZ - half,
-    centerX - half, surfaceY, centerZ + half,
-    centerX - half, surfaceY, centerZ + half,
-    centerX + half, surfaceY, centerZ - half,
-    centerX + half, surfaceY, centerZ + half,
-  ];
-  const grid = [];
-  const divisions = 12;
-  for (let index = 0; index <= divisions; index += 1) {
-    const along = -half + (size * index) / divisions;
-    grid.push(
-      centerX - half, surfaceY + 0.0005, centerZ + along,
-      centerX + half, surfaceY + 0.0005, centerZ + along,
-      centerX + along, surfaceY + 0.0005, centerZ - half,
-      centerX + along, surfaceY + 0.0005, centerZ + half,
-    );
-  }
-
-  const boundary = [];
-  const descriptor = state.robotRenderer.workspaceBoundary;
-  if (descriptor?.shape === "cylinder") {
-    const inner = Math.max(0, Number(descriptor.innerRadius || 0));
-    const outer = Math.max(inner, Number(descriptor.outerRadius || 0));
-    const minimumY = anchorY + Number(descriptor.minimumHeight || 0);
-    const maximumY = anchorY + Number(descriptor.maximumHeight || 0);
-    for (const height of [minimumY, maximumY]) {
-      lineRing(boundary, centerX, height, centerZ, inner);
-      lineRing(boundary, centerX, height, centerZ, outer);
-    }
-    for (let index = 0; index < 12; index += 1) {
-      const angle = (index / 12) * Math.PI * 2;
-      boundary.push(
-        centerX + Math.cos(angle) * outer, minimumY, centerZ + Math.sin(angle) * outer,
-        centerX + Math.cos(angle) * outer, maximumY, centerZ + Math.sin(angle) * outer,
-      );
-    }
-  }
-  return { anchorName, anchor, fill, grid, boundary };
-}
-
-function ensureWorkspaceGuide() {
-  const gl = state.gl;
-  if (!gl) return null;
-  const geometry = workspaceGuideGeometry();
-  const signature = JSON.stringify([
-    geometry.anchorName,
-    geometry.anchor ? [geometry.anchor[12], geometry.anchor[13], geometry.anchor[14]] : null,
-    state.settings.workspace_surface_offset,
-    state.settings.workspace_surface_size,
-    state.robotRenderer.workspaceBoundary || null,
-  ]);
-  if (state.workspaceGuide?.signature === signature) return state.workspaceGuide;
-  deleteWorkspaceGuide(gl);
-  const upload = (values, mode) => {
-    if (!values.length) return null;
-    const buffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(values), gl.STATIC_DRAW);
-    return { buffer, count: values.length / 3, mode };
-  };
-  state.workspaceGuide = {
-    signature,
-    items: {
-      fill: upload(geometry.fill, gl.TRIANGLES),
-      grid: upload(geometry.grid, gl.LINES),
-      boundary: upload(geometry.boundary, gl.LINES),
-    },
-  };
-  return state.workspaceGuide;
-}
-
-function drawWorkspaceGuide(viewProjection) {
-  if (!state.robotProgram || !state.robotVao) return;
-  const showSurface = state.settings.workspace_surface_enabled === true;
-  const showBoundary = state.settings.workspace_boundary_enabled === true
-    && state.robotRenderer.workspaceBoundary;
-  if (!showSurface && !showBoundary) return;
-  const guide = ensureWorkspaceGuide();
-  if (!guide) return;
-  const gl = state.gl;
-  gl.useProgram(state.robotProgram);
-  gl.bindVertexArray(state.robotVao);
-  gl.uniformMatrix4fv(state.robotUniforms.viewProjection, false, viewProjection);
-  gl.uniformMatrix4fv(state.robotUniforms.model, false, identityMatrix());
-  gl.uniform2f(state.robotUniforms.viewport, Math.max(gl.canvas.width, 1), Math.max(gl.canvas.height, 1));
-  gl.uniform1f(state.robotUniforms.outlinePixels, 0);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
-  gl.disableVertexAttribArray(1);
-  gl.vertexAttrib3f(1, 0, 1, 0);
-  gl.enable(gl.DEPTH_TEST);
-  gl.depthFunc(gl.LEQUAL);
-  gl.enable(gl.BLEND);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-  gl.depthMask(false);
-  const draw = (item, color) => {
-    if (!item) return;
-    gl.bindBuffer(gl.ARRAY_BUFFER, item.buffer);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
-    gl.uniform4fv(state.robotUniforms.color, color);
-    gl.drawArrays(item.mode, 0, item.count);
-  };
-  if (showSurface) {
-    const opacity = clamp(Number(state.settings.workspace_surface_opacity || 0.18), 0.01, 0.8);
-    draw(guide.items.fill, [0.08, 0.7, 0.92, opacity]);
-    draw(guide.items.grid, [0.22, 0.84, 1.0, Math.min(0.75, opacity + 0.24)]);
-  }
-  if (showBoundary) draw(guide.items.boundary, [1.0, 0.28, 0.08, 0.9]);
-  gl.depthMask(true);
-  gl.disable(gl.BLEND);
-  gl.bindVertexArray(null);
 }
 
 function cameraMarkerGeometry(camera, depth = 0.12) {
@@ -977,6 +1046,8 @@ function drawCameraGuides(viewProjection) {
   const rect = state.canvas.getBoundingClientRect();
   const present = new Set();
   gl.useProgram(state.robotProgram);
+  gl.uniform1f(state.robotUniforms.surfaceDetail, 0);
+  gl.uniform2f(state.robotUniforms.material, .6, .08);
   gl.bindVertexArray(state.robotVao);
   gl.uniformMatrix4fv(state.robotUniforms.viewProjection, false, viewProjection);
   gl.uniform2f(state.robotUniforms.viewport, Math.max(gl.canvas.width, 1), Math.max(gl.canvas.height, 1));
@@ -1017,7 +1088,7 @@ function drawCameraGuides(viewProjection) {
     label.hidden = clip[3] <= 0 || Math.abs(x) > 1 || Math.abs(y) > 1;
     label.textContent = `${camera.metadata.model || "Camera"} ${id.slice(-4)}${fresh ? "" : " (stale)"}`;
     label.style.color = `rgb(${color.map(value => Math.round(value * 255)).join(",")})`;
-    label.style.transform = `translate(${rect.left + (x + 1) * rect.width * 0.5 + 8}px, ${rect.top + (1 - y) * rect.height * 0.5 - 18}px)`;
+    label.style.transform = `translate(${rect.left + ((state.settings.view_mirror_left_right ? -x : x) + 1) * rect.width * 0.5 + 8}px, ${rect.top + (1 - y) * rect.height * 0.5 - 18}px)`;
   }
   for (const [id, label] of state.cameraGuideLabels) {
     if (present.has(id)) continue;
@@ -1027,6 +1098,41 @@ function drawCameraGuides(viewProjection) {
   gl.depthMask(true);
   gl.enable(gl.DEPTH_TEST);
   gl.disable(gl.BLEND);
+  gl.bindVertexArray(null);
+}
+
+function robotLinkVisible(name) {
+  const claw = (state.robotRenderer.endEffectorLinks || []).includes(name);
+  return (claw && state.settings.robot_overlay_claw_opacity > 0) || (!claw && state.settings.robot_overlay_scope !== "claw" && state.settings.robot_overlay_body_opacity > 0);
+}
+
+function raycastRobotOverlay(ray,limit=Infinity) {
+  if(!ray||!state.settings.robot_overlay_enabled||!state.robotProgram||!state.robotVao)return null;
+  let nearest=null;
+  for(const [name,primitives] of Object.entries(state.robotMeshes)) {
+    if(!robotLinkVisible(name))continue;
+    const global=transformDictionaryMatrix(state.robotTransforms[name]);if(!global)continue;
+    for(const primitive of primitives) {
+      const hit=raycastRobotPrimitive(ray,primitive,multiplyMatrix(global,primitive.localMatrix),nearest?.distance??limit);
+      if(hit)nearest=hit;
+    }
+  }
+  return nearest;
+}
+
+function drawRobotShadow(program,modelUniform) {
+  if(!state.settings.robot_overlay_enabled||!['solid','realistic'].includes(state.settings.robot_overlay_style)||!state.robotVao)return;
+  const gl=state.gl;gl.bindVertexArray(state.robotVao);
+  for(const [name,primitives] of Object.entries(state.robotMeshes)) {
+    if (!robotLinkVisible(name)) continue;
+    const matrix=transformDictionaryMatrix(state.robotTransforms[name]);if(!matrix)continue;
+    for(const primitive of primitives) {
+      gl.bindBuffer(gl.ARRAY_BUFFER,primitive.positionBuffer);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,0,0);
+      gl.uniformMatrix4fv(modelUniform,false,multiplyMatrix(matrix,primitive.localMatrix));
+      if(primitive.indexBuffer){gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,primitive.indexBuffer);gl.drawElements(robotDrawMode(gl,primitive.mode),primitive.count,gl.UNSIGNED_INT,0);}
+      else gl.drawArrays(robotDrawMode(gl,primitive.mode),0,primitive.count);
+    }
+  }
   gl.bindVertexArray(null);
 }
 
@@ -1040,9 +1146,15 @@ function drawRobotOverlay(viewProjection) {
   gl.enable(gl.DEPTH_TEST);
   gl.depthFunc(gl.LEQUAL);
   const alignmentStyle = state.settings.robot_overlay_style === "alignment";
-  const drawLinks = (outline) => {
+  const realisticStyle = state.settings.robot_overlay_style === "realistic";
+  bindSceneLighting(gl,state.robotProgram,state.settings,state.currentViewer?.slice(12,15),state.sceneShadow,!alignmentStyle);
+  const drawLinks = (outline, pass = null) => {
     gl.uniform1f(state.robotUniforms.outlinePixels, outline ? 1.75 : 0.0);
     for (const [name, primitives] of Object.entries(state.robotMeshes)) {
+      if (!robotLinkVisible(name)) continue;
+      const claw = (state.robotRenderer.endEffectorLinks || []).includes(name);
+      const opacity = claw ? state.settings.robot_overlay_claw_opacity : state.settings.robot_overlay_body_opacity;
+      if (pass === 'opaque' && opacity < 1 || pass === 'ghost' && opacity >= 1) continue;
       const globalMatrix = transformDictionaryMatrix(state.robotTransforms[name]);
       if (!globalMatrix) continue;
       const accentLink = (state.robotRenderer.accentLinks || []).includes(name);
@@ -1053,6 +1165,10 @@ function drawRobotOverlay(viewProjection) {
         : state.robotRenderer.colors?.[name] || [0.9, 0.75, 0.18, 1];
       gl.uniform4fv(state.robotUniforms.color, color);
       for (const primitive of primitives) {
+      const material = realisticStyle ? primitive.material : {color, roughness:.6, metalness:.08, detail:0};
+      gl.uniform4fv(state.robotUniforms.color, [...material.color.slice(0,3), material.color[3] * opacity]);
+      gl.uniform2f(state.robotUniforms.material, material.roughness, material.metalness);
+      gl.uniform1f(state.robotUniforms.surfaceDetail, material.detail || 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, primitive.positionBuffer);
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
@@ -1085,26 +1201,51 @@ function drawRobotOverlay(viewProjection) {
     gl.disable(gl.BLEND);
     gl.disable(gl.CULL_FACE);
     gl.depthMask(true);
-    drawLinks(false);
+    drawLinks(false, 'opaque');
+    if ([state.settings.robot_overlay_body_opacity, state.settings.robot_overlay_claw_opacity].some(opacity => opacity > 0 && opacity < 1)) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+      drawLinks(false, 'ghost');
+      gl.disable(gl.CULL_FACE);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
   }
   gl.bindVertexArray(null);
 }
 
 function robotMaskCapsules() {
+  // Visibility scope affects model drawing only. Occlusion always uses the
+  // calibrated full-arm chain, including links hidden by claw-only mode.
+  // Keep camera geometry visible until every replacement model is available.
+  // A failed asset download must not leave a masked hole in the real arm.
+  if (Object.keys(state.robotRenderer.modelUrls || {}).some(name => !state.robotMeshes[name]?.length)) return null;
   const chain = state.robotRenderer.maskChain || {};
   const names = Array.isArray(chain.names) ? chain.names : [];
   const radii = Array.isArray(chain.radii) ? chain.radii.slice(0, 6) : [];
   if (!radii.length || names.length < radii.length + 1) return null;
   const starts = new Float32Array(24);
   const ends = new Float32Array(24);
+  const clawSignature=updateClawMeshMask(state.gl,
+    ['gripper_link','moving_jaw_so101_v1_link'].map(name=>{
+      const matrix=transformDictionaryMatrix(state.robotTransforms[name]);
+      return matrix?inverseRigidTransform(matrix):null;
+    }),state.settings.robot_overlay_claw_buffer_mm/1000);
+
   for (let index = 0; index < radii.length; index += 1) {
     const start = transformDictionaryMatrix(state.robotTransforms[names[index]]);
     const end = transformDictionaryMatrix(state.robotTransforms[names[index + 1]]);
     if (!start || !end) return null;
-    starts.set([start[12], start[13], start[14], radii[index]], index * 4);
-    ends.set([end[12], end[13], end[14], radii[index]], index * 4);
+    // Each link uses its independently controlled visual mask buffer.
+    const claw = (state.robotRenderer.endEffectorLinks || []).includes(names[index]);
+    const radius = claw&&clawSignature ? 0 : radii[index] + (claw ? state.settings.robot_overlay_claw_buffer_mm : state.settings.robot_overlay_body_buffer_mm) / 1000;
+    starts.set([start[12], start[13], start[14], radius], index * 4);
+    ends.set([end[12], end[13], end[14], radius], index * 4);
   }
-  return { starts, ends };
+  return { starts, ends, clawSignature };
 }
 
 function findUniforms(gl, program) {
@@ -1115,6 +1256,9 @@ function findUniforms(gl, program) {
     model: gl.getUniformLocation(program, "u_model"),
     intrinsics: gl.getUniformLocation(program, "u_intrinsics"),
     size: gl.getUniformLocation(program, "u_size"),
+    sourceOrigin: gl.getUniformLocation(program, "u_source_origin"),
+    sourceSize: gl.getUniformLocation(program, "u_source_size"),
+    sparseTiles: gl.getUniformLocation(program, "u_sparse_tiles"),
     pointSize: gl.getUniformLocation(program, "u_point_size"),
     maxPointSize: gl.getUniformLocation(program, "u_max_point_size"),
     rigEnabled: gl.getUniformLocation(program, "u_rig_enabled"),
@@ -1126,6 +1270,8 @@ function findUniforms(gl, program) {
     rigColor: gl.getUniformLocation(program, "u_rig_color"),
     rigColorEnabled: gl.getUniformLocation(program, "u_rig_color_enabled"),
     qualityEnabled: gl.getUniformLocation(program, "u_quality_enabled"),
+    pointColorCacheEnabled: gl.getUniformLocation(program, "u_point_color_cache_enabled"),
+    depthOnlyEnabled: gl.getUniformLocation(program, "u_depth_only_enabled"),
     renderMode: gl.getUniformLocation(program, "u_render_mode"),
     meshDepthDelta: gl.getUniformLocation(program, "u_mesh_depth_delta"),
     meshMaxEdge: gl.getUniformLocation(program, "u_mesh_max_edge"),
@@ -1194,6 +1340,9 @@ function parsePacket(arrayBuffer) {
   let offset = metadataEnd;
   const payloads = [];
   for (const camera of metadata.cameras || []) {
+    // Preserve each packet's geometry clock before independent-camera packets
+    // are coalesced. Older capture services expose only the packet clock.
+    camera.geometry_capture_unix_ms = Number(camera.capture_unix_ms || metadata.capture_unix_ms || 0);
     const colorEnd = offset + Number(camera.color_length || 0);
     const depthEnd = colorEnd + Number(camera.depth_length || 0);
     if (colorEnd > bytes.length || depthEnd > bytes.length) throw new Error("truncated RGB-D payload");
@@ -1360,11 +1509,11 @@ function rgbaToRgb(rgba) {
 }
 
 async function decodeColor(bytes, metadata = {}) {
-  const width = Number(metadata.width || 0);
-  const height = Number(metadata.height || 0);
+  const [width,height] = colorFrameDimensions(metadata);
   const cameraKey = String(metadata.id || metadata.serial || metadata.model || "camera");
   if (metadata.color_encoding !== "rgb8_keyframe_tiles_jpeg") {
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: metadata.color_encoding==='png'?'image/png':'image/jpeg' }));
+    if(bitmap.width!==width||bitmap.height!==height){bitmap.close();throw new Error("color dimensions do not match metadata");}
     if (
       metadata.color_temporal_keyframe === true
       && Number(metadata.color_keyframe_id || 0) > 0
@@ -1562,10 +1711,20 @@ async function decodeColor(bytes, metadata = {}) {
 }
 
 async function decodeCamera(payload) {
-  let color, rawDepth;
-  if (state.nativeDecoder && !state.nativeDecoder.disabled
+  let color, rawDepth, depthTiles=null,previewSamples=null,validPoints=null;
+  // A startup shader compile can delay worker replies beyond their deadline.
+  // Retry fresh independent frames after cooldown instead of staying on the
+  // slower compatibility decoder for the remainder of the session.
+  if(state.nativeDecoder?.disabled)state.nativeDecoder.tryRecover?.();
+  if(payload.metadata.depth_encoding==='u16_mm_sparse_points_deflate'&&(!state.nativeDecoder||state.nativeDecoder.disabled)){
+    const decoded=await decodeSparsePoints(payload.depth,payload.metadata);
+    previewSamples=decoded.previewSamples;validPoints=decoded.validPoints;rawDepth=decoded.depth;
+    color={bitmap:null,pixels:null,rgbaPixels:decoded.rgbaPixels};
+  } else if (state.nativeDecoder && !state.nativeDecoder.disabled
       && state.socketOptions?.exactDepth === true && isIndependentNativeFrame(payload.metadata)) {
-    const decoded = await state.nativeDecoder.decode(payload);
+    const decoded = await state.nativeDecoder.decode({...payload,pointPreview:state.settings.point_preview_enabled===true,pointPreviewBudget:state.settings.point_preview_budget===0?0:state.settings.point_preview_budget===40000?40000:20000,workspaceTiles:state.useNativeTileCulling!==false||state.settings.modeled_workspace_enabled===true});
+    depthTiles=decoded.depthTiles;
+    previewSamples=decoded.previewSamples;validPoints=decoded.validPoints;
     color = {bitmap: decoded.bitmap, pixels: null,rgbaPixels:decoded.rgbaPixels};rawDepth = decoded.depth;
     for(const key of ["workerMs","dispatchMs"])state.stats[key]=state.stats[key]>0?state.stats[key]*.8+decoded[key]*.2:decoded[key];
   } else {
@@ -1576,17 +1735,21 @@ async function decodeCamera(payload) {
   }
   const width = Number(payload.metadata.width || 0);
   const height = Number(payload.metadata.height || 0);
-  if (width <= 0 || height <= 0 || rawDepth.length < width * height) {
+  const compact=Boolean(previewSamples?.depths);
+  if (width <= 0 || height <= 0 || (!compact&&(!rawDepth||rawDepth.length < width * height))) {
     if (color.bitmap) color.bitmap.close();
     throw new Error(`invalid depth dimensions ${width}x${height}`);
   }
-  const depth = payload.metadata.depth_exact === true || state.socketOptions?.exactDepth === true
+  const depth = compact ? null : payload.metadata.depth_exact === true || state.socketOptions?.exactDepth === true
     ? rawDepth : repairSmallDepthHoles(rawDepth, width, height);
   return {
     metadata: payload.metadata,
     width,
     height,
     depth,
+    depthTiles:depth===rawDepth?depthTiles:null,
+    previewSamples:compact||depth===rawDepth?previewSamples:null,validPoints,
+    colorWidth:colorFrameDimensions(payload.metadata)[0],colorHeight:colorFrameDimensions(payload.metadata)[1],
     bitmap: color.bitmap,
     colorPixels: color.pixels,
     colorRgbaPixels: color.rgbaPixels,
@@ -1597,67 +1760,91 @@ async function decodeCamera(payload) {
 
 function deleteCameraTextures(camera) {
   if (!state.gl) return;
-  if (camera.depthTexture) state.gl.deleteTexture(camera.depthTexture);
-  if (camera.colorTexture) state.gl.deleteTexture(camera.colorTexture);
+  for(const slot of camera.textureSlots||[camera]) {
+    if (slot.depthTexture) state.gl.deleteTexture(slot.depthTexture);
+    if (slot.colorTexture) state.gl.deleteTexture(slot.colorTexture);
+  }
   if (camera.meshIndexBuffer) state.gl.deleteBuffer(camera.meshIndexBuffer);
+  if (camera.cropTileBuffer?.buffer) state.gl.deleteBuffer(camera.cropTileBuffer.buffer);
+  if (camera.cropTileBuffer?.vertexBuffer) state.gl.deleteBuffer(camera.cropTileBuffer.vertexBuffer);
+  if (camera.cropIndexBuffer) state.gl.deleteBuffer(camera.cropIndexBuffer);
+  camera.cropTileBuffer=null;camera.cropIndexBuffer=null;
 }
 
-function createMeshIndexBuffer(gl, width, height) {
-  const indices = new Uint32Array((width - 1) * (height - 1) * 6);
-  let offset = 0;
-  for (let y = 0; y < height - 1; y += 1) {
-    for (let x = 0; x < width - 1; x += 1) {
-      const topLeft = y * width + x;
-      const topRight = topLeft + 1;
-      const bottomLeft = topLeft + width;
-      const bottomRight = bottomLeft + 1;
-      indices[offset++] = topLeft;
-      indices[offset++] = topRight;
-      indices[offset++] = bottomLeft;
-      indices[offset++] = topRight;
-      indices[offset++] = bottomRight;
-      indices[offset++] = bottomLeft;
-    }
-  }
+function createMeshIndexBuffer(gl, width) {
+  // Preserve the ordinary renderer's row-major tie order at shared edges.
+  // One two-row strip is instanced over every source row. Its indices fit in
+  // 16 bits for normal sensor grids and stay hot in the GPU's index cache.
+  const values = nativeMeshIndices(width, 2, false);
+  const indices = width*4-3<=65535?new Uint16Array(values):values;
   const buffer = gl.createBuffer();
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffer);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
-  return { buffer, count: indices.length };
+  return { buffer, count: indices.length, type: indices instanceof Uint16Array?gl.UNSIGNED_SHORT:gl.UNSIGNED_INT };
 }
 
 function ensureMeshIndexBuffer(camera) {
   if (camera.meshIndexBuffer || !state.gl || camera.width <= 1 || camera.height <= 1) return;
-  const mesh = createMeshIndexBuffer(state.gl, camera.width, camera.height);
+  const mesh = createMeshIndexBuffer(state.gl, camera.width);
   camera.meshIndexBuffer = mesh.buffer;
   camera.meshIndexCount = mesh.count;
+  camera.meshIndexType = mesh.type;
 }
 
 function uploadCamera(decoded) {
   const gl = state.gl;
+  [decoded.colorWidth,decoded.colorHeight]=colorFrameDimensions({...decoded.metadata,width:decoded.width,height:decoded.height});
   const previous = state.cameras.find((camera) => camera.metadata.id === decoded.metadata.id);
   const camera = previous || {};
-  if (!previous || previous.width !== decoded.width || previous.height !== decoded.height) {
+  if(decoded.previewSamples?.depths){
     deleteCameraTextures(camera);
-    camera.depthTexture = gl.createTexture();
-    camera.colorTexture = gl.createTexture();
+    Object.assign(camera,decoded,{textureSlots:[],textureSlotIndex:-1,depthTexture:null,colorTexture:null,meshIndexBuffer:null,meshIndexCount:0});
+    camera.lastUpdateMs=performance.now();camera.uploadRevision=(previous?.uploadRevision||0)+1;
+    camera.intrinsicsArray=new Float32Array(camera.metadata.intrinsics);
+    // Materialize colour only for the explicitly opened manual RGB tool.
+    if(state.manualRgbCanvas?.offsetParent){
+      const samples=camera.previewSamples,rgba=new Uint8Array(camera.width*camera.height*4);
+      for(let i=0;i<samples.indices.length;i++){const target=samples.indices[i]*4;rgba.set(samples.colors.subarray(i*3,i*3+3),target);rgba[target+3]=255;}
+      camera.colorRgbaPixels=rgba;updateManualRgbBase(camera);renderManualCalibrationPreview(camera);delete camera.colorRgbaPixels;
+    }
+    return camera;
+  }
+  if (!previous || previous.width !== decoded.width || previous.height !== decoded.height || previous.colorWidth !== decoded.colorWidth || previous.colorHeight !== decoded.colorHeight) {
+    deleteCameraTextures(camera);
+    camera.textureSlots=[];
+    camera.textureSlotIndex=-1;
     camera.meshIndexBuffer = null;
     camera.meshIndexCount = 0;
+  }
+  const completeColor=decoded.colorRgbaPixels||decoded.bitmap||decoded.colorPixels;
+  // Rotate complete frames through a small texture ring. Uploading into the
+  // texture still sampled by an in-flight render can stall the main thread.
+  // Partial RGB updates keep their existing texture and temporal reference.
+  if(!camera.textureSlots.length||completeColor) {
+    camera.textureSlotIndex=(camera.textureSlotIndex+1)%(state.useUploadTextureRing===false?1:3);
+    let slot=camera.textureSlots[camera.textureSlotIndex];
+    if(!slot) {
+    slot={depthTexture:gl.createTexture(),colorTexture:gl.createTexture()};
+    camera.textureSlots[camera.textureSlotIndex]=slot;
 
-    gl.bindTexture(gl.TEXTURE_2D, camera.depthTexture);
+    gl.bindTexture(gl.TEXTURE_2D, slot.depthTexture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R16UI, decoded.width, decoded.height);
 
-    gl.bindTexture(gl.TEXTURE_2D, camera.colorTexture);
+    gl.bindTexture(gl.TEXTURE_2D, slot.colorTexture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     // Browser bitmaps are RGBA. RGB8 forces an extra format conversion on
     // ANGLE/D3D before each upload; the unused alpha does not change RGB.
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, decoded.width, decoded.height);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, decoded.colorWidth, decoded.colorHeight);
+    }
+    camera.depthTexture=slot.depthTexture;
+    camera.colorTexture=slot.colorTexture;
   }
   Object.assign(camera, decoded);
   camera.lastUpdateMs = performance.now();
@@ -1665,6 +1852,7 @@ function uploadCamera(decoded) {
   camera.intrinsicsArray = new Float32Array(camera.metadata.intrinsics);
 
   gl.bindTexture(gl.TEXTURE_2D, camera.depthTexture);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, camera.width, camera.height, gl.RED_INTEGER, gl.UNSIGNED_SHORT, camera.depth);
 
   gl.bindTexture(gl.TEXTURE_2D, camera.colorTexture);
@@ -1672,7 +1860,7 @@ function uploadCamera(decoded) {
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   updateManualRgbBase(camera);
   if (camera.colorRgbaPixels) {
-    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,camera.width,camera.height,gl.RGBA,gl.UNSIGNED_BYTE,camera.colorRgbaPixels);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,camera.colorWidth,camera.colorHeight,gl.RGBA,gl.UNSIGNED_BYTE,camera.colorRgbaPixels);
   } else if (camera.bitmap) {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, camera.bitmap);
     camera.bitmap.close();
@@ -1696,8 +1884,8 @@ function uploadCamera(decoded) {
       0,
       0,
       0,
-      camera.width,
-      camera.height,
+      camera.colorWidth,
+      camera.colorHeight,
       gl.RGBA,
       gl.UNSIGNED_BYTE,
       rgbToRgba(camera.colorPixels),
@@ -1725,6 +1913,7 @@ function rgbToRgba(rgb) {
 function updateManualRgbBase(camera) {
   const visible = state.manualRgbCanvas;
   if (!(visible instanceof HTMLCanvasElement)) return;
+  if (visible.closest("[hidden], details:not([open])")) return;
   const model = String(camera.metadata.model || "").toLowerCase();
   if (state.cameras.length > 0 && !model.includes("455")) return;
   let base = state.manualRgbBaseCanvas;
@@ -1732,15 +1921,15 @@ function updateManualRgbBase(camera) {
     base = document.createElement("canvas");
     state.manualRgbBaseCanvas = base;
   }
-  if (base.width !== camera.width || base.height !== camera.height) {
-    base.width = camera.width;
-    base.height = camera.height;
+  if (base.width !== camera.colorWidth || base.height !== camera.colorHeight) {
+    base.width = camera.colorWidth;
+    base.height = camera.colorHeight;
   }
   const context = base.getContext("2d", { alpha: false });
   if (camera.colorRgbaPixels) {
-    context.putImageData(new ImageData(new Uint8ClampedArray(camera.colorRgbaPixels.buffer),camera.width,camera.height),0,0);
+    context.putImageData(new ImageData(new Uint8ClampedArray(camera.colorRgbaPixels.buffer),camera.colorWidth,camera.colorHeight),0,0);
   } else if (camera.bitmap) {
-    context.drawImage(camera.bitmap, 0, 0, camera.width, camera.height);
+    context.drawImage(camera.bitmap, 0, 0, camera.colorWidth, camera.colorHeight);
   } else if (Array.isArray(camera.colorTileUpdates)) {
     for (const update of camera.colorTileUpdates) {
       context.putImageData(
@@ -1751,7 +1940,7 @@ function updateManualRgbBase(camera) {
     }
   } else if (camera.colorPixels) {
     context.putImageData(
-      new ImageData(rgbToRgba(camera.colorPixels), camera.width, camera.height),
+      new ImageData(rgbToRgba(camera.colorPixels), camera.colorWidth, camera.colorHeight),
       0,
       0,
     );
@@ -1760,6 +1949,7 @@ function updateManualRgbBase(camera) {
 
 function updateRgbDisplay(camera) {
   if (state.rawRgbViewer) return;
+  if (state.settings.display_mode !== "rgb_camera") return;
   const visible = state.rgbDisplayCanvas;
   if (!(visible instanceof HTMLCanvasElement)) return;
   const model = String(camera.metadata.model || "").toLowerCase();
@@ -1775,15 +1965,15 @@ function updateRgbDisplay(camera) {
     base = document.createElement("canvas");
     state.rgbDisplayBaseCanvas = base;
   }
-  if (base.width !== camera.width || base.height !== camera.height) {
-    base.width = camera.width;
-    base.height = camera.height;
+  if (base.width !== camera.colorWidth || base.height !== camera.colorHeight) {
+    base.width = camera.colorWidth;
+    base.height = camera.colorHeight;
   }
   const baseContext = base.getContext("2d", { alpha: false });
   if (camera.colorRgbaPixels) {
-    baseContext.putImageData(new ImageData(new Uint8ClampedArray(camera.colorRgbaPixels.buffer),camera.width,camera.height),0,0);
+    baseContext.putImageData(new ImageData(new Uint8ClampedArray(camera.colorRgbaPixels.buffer),camera.colorWidth,camera.colorHeight),0,0);
   } else if (camera.bitmap) {
-    baseContext.drawImage(camera.bitmap, 0, 0, camera.width, camera.height);
+    baseContext.drawImage(camera.bitmap, 0, 0, camera.colorWidth, camera.colorHeight);
   } else if (Array.isArray(camera.colorTileUpdates)) {
     for (const update of camera.colorTileUpdates) {
       baseContext.putImageData(
@@ -1794,14 +1984,14 @@ function updateRgbDisplay(camera) {
     }
   } else if (camera.colorPixels) {
     baseContext.putImageData(
-      new ImageData(rgbToRgba(camera.colorPixels), camera.width, camera.height),
+      new ImageData(rgbToRgba(camera.colorPixels), camera.colorWidth, camera.colorHeight),
       0,
       0,
     );
   }
-  if (visible.width !== camera.width || visible.height !== camera.height) {
-    visible.width = camera.width;
-    visible.height = camera.height;
+  if (visible.width !== camera.colorWidth || visible.height !== camera.colorHeight) {
+    visible.width = camera.colorWidth;
+    visible.height = camera.colorHeight;
   }
   visible.getContext("2d", { alpha: false }).drawImage(base, 0, 0);
 }
@@ -1814,8 +2004,8 @@ function renderManualCalibrationPreview(camera) {
   if (visible.closest("[hidden]")) return;
   const model = String(camera.metadata.model || "").toLowerCase();
   if (state.cameras.length > 0 && !model.includes("455")) return;
-  visible.width = camera.width;
-  visible.height = camera.height;
+  visible.width = camera.colorWidth;
+  visible.height = camera.colorHeight;
   const context = visible.getContext("2d", { alpha: false });
   context.drawImage(base, 0, 0);
   let overlay = state.manualOverlayCanvas;
@@ -1823,9 +2013,9 @@ function renderManualCalibrationPreview(camera) {
     overlay = document.createElement("canvas");
     state.manualOverlayCanvas = overlay;
   }
-  if (overlay.width !== camera.width || overlay.height !== camera.height) {
-    overlay.width = camera.width;
-    overlay.height = camera.height;
+  if (overlay.width !== camera.colorWidth || overlay.height !== camera.colorHeight) {
+    overlay.width = camera.colorWidth;
+    overlay.height = camera.colorHeight;
   }
   const cameraMatrix = Array.isArray(camera.metadata.transform)
     && camera.metadata.transform.length === 16
@@ -1833,13 +2023,13 @@ function renderManualCalibrationPreview(camera) {
     : null;
   if (!cameraMatrix || !Array.isArray(camera.metadata.intrinsics)) return;
   const opacity = Math.max(0.05, Math.min(0.9, Number(state.settings.manual_overlay_opacity ?? 0.3)));
-  const distalNames = state.robotRenderer.calibrationLinks || [];
+  const distalNames = (state.robotRenderer.calibrationLinks || []).filter(robotLinkVisible);
   if (!distalNames.length) return;
   const signature = JSON.stringify([
-    camera.width,
-    camera.height,
+    camera.colorWidth,
+    camera.colorHeight,
     camera.metadata.transform,
-    camera.metadata.intrinsics,
+    camera.metadata.intrinsics,camera.metadata.color_space,camera.metadata.color_projection,
     ...distalNames.map((name) => state.robotTransforms[name] || null),
   ]);
   let projectedBounds = state.manualOverlayBounds;
@@ -1847,11 +2037,18 @@ function renderManualCalibrationPreview(camera) {
     const overlayContext = overlay.getContext("2d");
     overlayContext.clearRect(0, 0, overlay.width, overlay.height);
     const worldToCamera = inverseRigidTransform(cameraMatrix);
-    const [fx, fy, cx, cy] = camera.metadata.intrinsics.map(Number);
-    projectedBounds = { minX: camera.width, minY: camera.height, maxX: 0, maxY: 0, count: 0 };
+    const rawProjection=camera.metadata.color_space==='original_rgb'?camera.metadata.color_projection:null;
+    const [fx, fy, cx, cy] = (rawProjection?.intrinsics||camera.metadata.intrinsics).map(Number);
+    projectedBounds = { minX: camera.colorWidth, minY: camera.colorHeight, maxX: 0, maxY: 0, count: 0 };
     const project = (matrix, positions, index) => {
       const local = [positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2]];
       const point = transformPoint(worldToCamera, transformPoint(matrix, local));
+      if(rawProjection) {
+        const e=rawProjection.extrinsics,p=[point[0],-point[1],-point[2]];
+        const cv=[e[0]*p[0]+e[3]*p[1]+e[6]*p[2]+e[9],e[1]*p[0]+e[4]*p[1]+e[7]*p[2]+e[10],e[2]*p[0]+e[5]*p[1]+e[8]*p[2]+e[11]];
+        if(cv[2]<=0.01)return null;
+        return [fx*cv[0]/cv[2]+cx,fy*cv[1]/cv[2]+cy];
+      }
       const depth = -point[2];
       if (depth <= 0.01) return null;
       return [fx * point[0] / depth + cx, -fy * point[1] / depth + cy];
@@ -1900,13 +2097,13 @@ function renderManualCalibrationPreview(camera) {
   const centerX = (projectedBounds.minX + projectedBounds.maxX) * 0.5;
   const centerY = (projectedBounds.minY + projectedBounds.maxY) * 0.5;
   const extent = Math.max(projectedBounds.maxX - projectedBounds.minX, projectedBounds.maxY - projectedBounds.minY, 80) * 1.5;
-  const sourceX = Math.max(0, Math.min(camera.width - extent, centerX - extent * 0.5));
-  const sourceY = Math.max(0, Math.min(camera.height - extent, centerY - extent * 0.5));
+  const sourceX = Math.max(0, Math.min(camera.colorWidth - extent, centerX - extent * 0.5));
+  const sourceY = Math.max(0, Math.min(camera.colorHeight - extent, centerY - extent * 0.5));
   crop.width = 420;
   crop.height = 420;
   const cropContext = crop.getContext("2d", { alpha: false });
   cropContext.imageSmoothingEnabled = false;
-  cropContext.drawImage(visible, sourceX, sourceY, Math.min(extent, camera.width), Math.min(extent, camera.height), 0, 0, crop.width, crop.height);
+  cropContext.drawImage(visible, sourceX, sourceY, Math.min(extent, camera.colorWidth), Math.min(extent, camera.colorHeight), 0, 0, crop.width, crop.height);
 }
 
 function beginFrameDecode(frame) {
@@ -1919,13 +2116,64 @@ function beginFrameDecode(frame) {
     }
     completed = null;
   };
-  const promise = Promise.allSettled(frame.payloads.map(decodeCamera)).then(results => {
+  const promise = Promise.allSettled(frame.payloads.map(payload=>decodeCamera(payload).then(camera=>{
+    camera.receivedAtMs=payload.receivedAtMs??frame.receivedAtMs??started;return camera;
+  }))).then(results => {
     completed = results;
     if (canceled || !state.running || generation !== state.robotLoadToken) release();
     return results;
   });
   return {frame, started, queueElapsed: Math.max(0,started-(frame.receivedAtMs??started)), promise,
     cancel() {canceled = true;release();}};
+}
+
+function clearPendingCameraUploads() {
+  for(const queue of state.pendingCameraUploads.values())for(const entry of queue)entry.camera.bitmap?.close();
+  state.pendingCameraUploads.clear();
+}
+
+function applyCameraUploads(decoded) {
+  const started=performance.now(),updated=decoded.filter(camera=>{if((state.settings.preview_excluded_cameras||[]).includes(String(camera.metadata.id))){camera.bitmap?.close();return false;}return !camera.previewSamples?.depths||state.settings.point_preview_enabled;}).map(uploadCamera);
+  const elapsed=performance.now()-started;
+  state.stats.uploadMs=state.stats.uploadMs>0?state.stats.uploadMs*.8+elapsed*.2:elapsed;
+  for(const camera of updated) {
+    const id=String(camera.metadata.id||camera.metadata.model||'camera');
+    state.stats.cameraFrames[id]=Number(state.stats.cameraFrames[id]||0)+1;
+    state.stats.cameraEncodeMs[id]=Number(camera.metadata.encode_ms||0);
+    if(!state.cameras.includes(camera))state.cameras.push(camera);
+  }
+  const staleBefore=performance.now()-5000;
+  state.cameras=orderedCameras(state.cameras.filter(camera=>{
+    if(Number(camera.lastUpdateMs||0)>=staleBefore)return true;
+    deleteCameraTextures(camera);return false;
+  }));
+  state.stats.cameras=state.cameras.length;
+  state.stats.width=Math.max(0,...state.cameras.map(camera=>camera.width));
+  state.stats.height=Math.max(0,...state.cameras.map(camera=>camera.height));
+}
+
+function queueCameraUploads(decoded) {
+  for(const camera of decoded) {
+    const id=String(camera.metadata.id||camera.metadata.serial||camera.metadata.model||'camera');
+    const queue=state.pendingCameraUploads.get(id)||[],capacity=camera.previewSamples?.depths?3:1;
+    queue.push({camera,at:camera.receivedAtMs??performance.now()});
+    while(queue.length>capacity)queue.shift().camera.bitmap?.close();
+    state.pendingCameraUploads.set(id,queue);
+  }
+  // Preserve short native-point bursts for successive real draws. The 50 ms
+  // receive-to-upload bound still drops stale frames instead of adding lag.
+  if(state.pendingCameraUploads.size>32)flushPendingCameraUploads();
+}
+
+function flushPendingCameraUploads(latestOnly=false) {
+  if(!state.pendingCameraUploads.size)return;
+  const decoded=[],now=performance.now();
+  for(const [id,queue]of state.pendingCameraUploads) {
+    while(queue.length>1&&(latestOnly||now-queue[0].at>50))queue.shift().camera.bitmap?.close();
+    if(queue.length)decoded.push(queue.shift().camera);
+    if(!queue.length)state.pendingCameraUploads.delete(id);
+  }
+  applyCameraUploads(decoded);
 }
 
 async function decodeNewestPackets() {
@@ -1944,17 +2192,20 @@ async function decodeNewestPackets() {
     state.stats.coalesced = Number(state.stats.coalesced || 0) + Number(frame.coalescedPackets || 0);
     const payloads = frame.payloads;
     const metadata = frame.metadata;
+    state.stats.streamCrop=metadata.stream_crop||null;
+    state.stats.meshPreview=metadata.mesh_preview||null;
     persistentFrame = (
       metadata.temporal_reference_mode === "persistent_v1"
     );
     const decodeStarted = prepared.started, queueElapsed = prepared.queueElapsed;
     const robot = metadata.robot;
     if (robot && robot.available !== false && robot.links && typeof robot.links === "object") {
-      state.robotTransforms = robot.links;
-      state.robotTransformsUpdatedMs = performance.now();
+      acceptRobotOverlayState(robot);
     } else if (robot && robot.available === false
                && performance.now() - state.robotTransformsUpdatedMs > 3000) {
       state.robotTransforms = {};
+      state.robotPosePreview.reset();
+      state.robotJointAnimation.reset();
     }
     state.stats.robotTransforms = Object.keys(state.robotTransforms).length;
     const results = await prepared.promise;
@@ -1981,25 +2232,16 @@ async function decodeNewestPackets() {
         && next.payloads.every(payload => isIndependentNativeFrame(payload.metadata))) {
       state.nextFrameDecode = beginFrameDecode(takeIndependentFrameBatch(state.pendingFrameQueue));
     }
-    const uploadStarted = performance.now();
-    const updatedCameras = decoded.map(uploadCamera);
-    const uploadElapsed = performance.now() - uploadStarted;
-    for (const [key, value] of [["codecMs", codecElapsed], ["uploadMs", uploadElapsed], ["queueMs", queueElapsed]]) {
+    if(state.deferCameraUploads!==false&&!state.rgbdPaused&&!persistentFrame
+        &&payloads.every(payload=>isIndependentNativeFrame(payload.metadata))) {
+      queueCameraUploads(decoded);
+    } else {
+      // Temporal RGB/depth patches must apply to their exact prior reference.
+      flushPendingCameraUploads(true);applyCameraUploads(decoded);
+    }
+    for (const [key, value] of [["codecMs", codecElapsed], ["queueMs", queueElapsed]]) {
       state.stats[key] = state.stats[key] > 0 ? state.stats[key] * 0.8 + value * 0.2 : value;
     }
-    for (const camera of updatedCameras) {
-      const id = String(camera.metadata.id || camera.metadata.model || "camera");
-      state.stats.cameraFrames[id] = Number(state.stats.cameraFrames[id] || 0) + 1;
-      state.stats.cameraEncodeMs[id] = Number(camera.metadata.encode_ms || 0);
-      if (!state.cameras.includes(camera)) state.cameras.push(camera);
-    }
-    const staleBefore = performance.now() - 5000;
-    state.cameras = state.cameras.filter((camera) => {
-      if (Number(camera.lastUpdateMs || 0) >= staleBefore) return true;
-      deleteCameraTextures(camera);
-      return false;
-    });
-    state.cameras = orderedCameras(state.cameras);
     const viewerTransform = metadata.viewer && metadata.viewer.transform;
     if (!state.baseViewer && Array.isArray(viewerTransform) && viewerTransform.length === 16) {
       state.baseViewer = {
@@ -2013,9 +2255,6 @@ async function decodeNewestPackets() {
       state.focusWorld = add(origin, scale(back, -state.settings.focus_distance));
     }
     state.stats.decoded += 1;
-    state.stats.cameras = state.cameras.length;
-    state.stats.width = Math.max(...state.cameras.map((camera) => camera.width));
-    state.stats.height = Math.max(...state.cameras.map((camera) => camera.height));
     state.stats.captureUnixMs = Number(metadata.capture_unix_ms || Date.now());
     state.stats.captureAgeMs = Math.max(0, Date.now() - state.stats.captureUnixMs);
     const decodeElapsed = performance.now() - decodeStarted;
@@ -2053,17 +2292,18 @@ function currentHeadDelta() {
   const latest = window.godotWebcamTrackerLatest || {};
   if (latest.active !== true) {
     state.lastHeadActive = false;
-    return [0, 0, 0];
+    return state.lastHeadDelta.slice();
   }
-  if (!state.headBaseline || !state.lastHeadActive) {
-    state.headBaseline = { x: Number(latest.x || 0), y: Number(latest.y || 0), z: Number(latest.z || 0) };
+  if (!state.headBaseline) {
+    state.headBaseline = { x: 0, y: 0, z: Number(latest.neutral_z_cm || 35) };
   }
   state.lastHeadActive = true;
-  return [
+  state.lastHeadDelta = [
     (Number(latest.x || 0) - state.headBaseline.x) * 0.01,
     -(Number(latest.y || 0) - state.headBaseline.y) * 0.01,
     (Number(latest.z || 0) - state.headBaseline.z) * 0.01,
   ];
+  return state.lastHeadDelta.slice();
 }
 
 function translatedViewer(base, delta) {
@@ -2122,28 +2362,40 @@ function orbitViewer(base, headDelta) {
     -settings.max_pitch,
     settings.max_pitch,
   );
+  const focus = currentOrbitFocus(base);
+  if (!state.orbitReference) state.orbitReference = {
+    distance: Math.max(.1, Number(settings.orbit_distance || .65)),
+    height: verticalLiftForFocus(focus), pitch: 0,
+  };
+  const reference = state.orbitReference;
   const pitch = clamp(
-    Number(settings.orbit_pitch_offset || 0) + trackedPitch + state.manualOrbitPitch,
+    Number(settings.orbit_pitch_offset || 0) - reference.pitch + trackedPitch + state.manualOrbitPitch,
     -80,
     80,
   ) * Math.PI / 180;
   const direction = rotateAroundAxis(baseDirection, worldUp, -yaw);
   const pitchAxis = rotateAroundAxis(baseRight, worldUp, -yaw);
-  let distance = Number(settings.orbit_distance || 0.65);
-  if (settings.dolly_enabled) distance += (relativeHead[2] * 100) * Number(settings.dolly_gain || 0);
-  distance += state.manualDolly;
-  distance = clamp(distance, Number(settings.min_distance || 0.2), Number(settings.max_distance || 3));
-  const focus = currentOrbitFocus(base);
-  const virtualHeadOffset = scale(worldUp, verticalLiftForFocus(focus));
-  // Rotate the complete camera offset, including its configured height.
-  // Adding height after pitching changes the orbit radius as the mouse moves.
-  const offset = add(scale(direction, distance), virtualHeadOffset);
+  const headDolly = settings.dolly_enabled ? (relativeHead[2] * 100) * Number(settings.dolly_gain || 0) : 0;
+  // Build the orbit at its reference radius, then dolly along its optical axis.
+  // Fixed camera height plus a changing horizontal radius would change pitch.
+  const offset = add(scale(direction, reference.distance), scale(worldUp, reference.height));
   const baseElevation = Math.atan2(offset[1], Math.hypot(offset[0], offset[2]));
   const elevationLimit = 80 * Math.PI / 180;
   const elevation = clamp(baseElevation - pitch, -elevationLimit, elevationLimit);
-  const orbitOffset = rotateAroundAxis(offset, pitchAxis, baseElevation - elevation);
-  const cameraPosition = add(focus, orbitOffset);
-  return lookAtTransform(cameraPosition, focus, worldUp);
+  const turn = baseElevation - elevation;
+  const orbitOffset = rotateAroundAxis(offset, pitchAxis, turn);
+  const aim = rotateAroundAxis(rotateAroundAxis(state.orbitAimOffset || [0, 0, 0], worldUp, -yaw), pitchAxis, turn);
+  const target = add(focus, aim);
+  const viewer = lookAtTransform(add(focus, orbitOffset), target, worldUp);
+  // The orbit radius differs from distance to the aimed-at claw, especially
+  // with a high camera or an aim offset. Clamp actual optical distance.
+  const rayDistance = Math.hypot(...orbitOffset.map((v,i)=>v-aim[i]));
+  state.orbitZoomBaseDistance = rayDistance + Number(settings.orbit_distance || .65) - reference.distance + headDolly;
+  const distance = clamp(state.orbitZoomBaseDistance + state.manualDolly,
+    Number(settings.min_distance || .125), Number(settings.max_distance || 3));
+  const dolly = distance - rayDistance;
+  for (let i = 0; i < 3; i++) viewer[12 + i] += viewer[8 + i] * dolly;
+  return viewer;
 }
 
 function attachPointerNavigation(options = {}) {
@@ -2172,7 +2424,7 @@ function attachPointerNavigation(options = {}) {
     if (!drag.active || event.pointerId !== drag.id) return;
     if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
     drag.moved = true;
-    const dx = event.clientX - drag.x;
+    const dx = (event.clientX - drag.x) * (state.settings.view_mirror_left_right ? -1 : 1);
     const dy = event.clientY - drag.y;
     drag.x = event.clientX;
     drag.y = event.clientY;
@@ -2184,7 +2436,7 @@ function attachPointerNavigation(options = {}) {
       if (viewer) {
         const distance = clamp(
           Number(state.settings.orbit_distance || 0.65) + state.manualDolly,
-          Number(state.settings.min_distance || 0.2),
+          Number(state.settings.min_distance || 0.125),
           Number(state.settings.max_distance || 3),
         );
         const metersPerPixel = 2 * distance
@@ -2211,13 +2463,14 @@ function attachPointerNavigation(options = {}) {
   };
   const wheel = (event) => {
     state.settings.inspect_enabled = true;
-    const distance = Math.max(0.1, Number(state.settings.orbit_distance || 0.65) + state.manualDolly);
-    state.manualDolly += event.deltaY * distance * 0.0015;
-    state.manualDolly = clamp(
-      state.manualDolly,
-      Number(state.settings.min_distance || 0.2) - Number(state.settings.orbit_distance || 0.65),
-      Number(state.settings.max_distance || 3) - Number(state.settings.orbit_distance || 0.65),
-    );
+    // Refresh the reference from the same camera math used by drawing, even
+    // when several wheel events arrive before the next rendered frame.
+    if (state.baseViewer?.transform) orbitViewer(state.baseViewer.transform,state.lastHeadDelta || [0,0,0]);
+    const baseDistance = state.orbitZoomBaseDistance ?? Number(state.settings.orbit_distance || .65);
+    const minimum = Number(state.settings.min_distance || .125), maximum = Number(state.settings.max_distance || 3);
+    const distance = clamp(baseDistance + state.manualDolly,minimum,maximum);
+    state.manualDolly = clamp(state.manualDolly + event.deltaY * distance * .0015,
+      minimum-baseDistance,maximum-baseDistance);
     event.preventDefault();
   };
   const contextMenu = (event) => event.preventDefault();
@@ -2261,8 +2514,21 @@ function resizeCanvas() {
   return { width, height, dpr };
 }
 
-function render() {
+function render() { return timeBrowserWork('renderer.render', renderImpl); }
+
+function renderImpl() {
   if (!state.running || !state.gl || !state.baseViewer) return;
+  if(Object.keys(state.robotPosePreview.target).length)state.robotTransforms=state.robotPosePreview.sample(performance.now());
+  flushPendingCameraUploads();
+  if (!state.robotPosePreview.manual && !state.robotPosePreview.base
+      && new URLSearchParams(globalThis.location?.search || '').get('robot_animation') !== 'legacy') {
+    const times=state.cameras.map(c=>Number(c.metadata.geometry_capture_unix_ms||0)).filter(t=>t>0);
+    const capture=times.length?Math.max(...times):0;
+    const links=state.robotJointAnimation.sample(capture);
+    if(links) state.robotTransforms=links;
+    state.stats.robotJointAnimation={...state.robotJointAnimation.status,
+      cameraSpreadMs:times.length?Math.max(...times)-Math.min(...times):0};
+  }
   if (state.settings.display_mode === "rgb_camera") {
     if (state.blendPCR?.signature) state.blendPCR.clearTargets();
     state.stats.renderWarning = "";
@@ -2281,10 +2547,16 @@ function render() {
   const projection = perspectiveMatrix(fov, dimensions.width / dimensions.height, state.baseViewer.near, state.baseViewer.far);
   const viewProjection = multiplyMatrix(projection, inverseRigidTransform(viewerTransform));
   state.viewProjection = viewProjection;
+  if(state.workspaceEditor?.active) {
+    const rect=state.canvas.getBoundingClientRect();
+    state.workspaceEditor.update({viewProjection,viewer:viewerTransform,fov,mirrored:state.settings.view_mirror_left_right===true,width:rect.width,height:rect.height,left:rect.left,top:rect.top});
+  }
 
   gl.viewport(0, 0, dimensions.width, dimensions.height);
   if (state.settings.white_background_enabled) {
     gl.clearColor(1, 1, 1, 1);
+  } else if (modeledWorkspace(state.settings)) {
+    gl.clearColor(...MODELED_WORKSPACE_PALETTE.background, 1);
   } else {
     gl.clearColor(0.03, 0.035, 0.04, 1);
   }
@@ -2292,18 +2564,22 @@ function render() {
   gl.enable(gl.DEPTH_TEST);
   gl.depthFunc(gl.LEQUAL);
   gl.disable(gl.BLEND);
+  updateClawMeshMask(gl,null,0,false);
   const maskCapsules = state.settings.robot_overlay_enabled && state.settings.robot_overlay_mask_scanned_robot
     ? robotMaskCapsules() : null;
-  const meshMode = state.settings.geometry_mode === "mesh";
+  const pointPreview = state.settings.point_preview_enabled===true&&!state.pointPreviewUnavailable;
+  const meshMode = !pointPreview&&state.settings.geometry_mode === "mesh";
   const now = performance.now();
   let cached = false;
-  state.stats.renderWarning = "";
-  if (state.cameras.length) {
+  state.stats.renderWarning = state.settings.point_preview_enabled&&state.pointPreviewUnavailable
+    ? `20k preview unavailable: ${state.pointPreviewUnavailable}; using full detail` : "";
+  if (!pointPreview&&state.cameras.length) {
     try {
       gl.bindFramebuffer(gl.FRAMEBUFFER,null);
       gl.bindVertexArray(null);
       state.cameraFusion.update(state.cameras, inverseRigidTransform, now, state.settings, {
         framebuffer: null, vertexArray: null, viewport: [0,0,dimensions.width,dimensions.height],
+        workspaceEditing: Boolean(state.workspaceEditor?.drag),
       });
       cached = true;
     } catch (error) {
@@ -2311,6 +2587,27 @@ function render() {
     }
   }
   let blended = false;
+  if(state.cameraFusion)state.cameraFusion.maskTexture=null;
+  if(cached&&meshMode&&state.settings.blendpcr_enabled&&maskCapsules&&state.useCachedRobotMask!==false&&!state.robotMaskCacheUnavailable){
+    try{
+      state.robotMaskCache ||= new NativeRobotMask(gl);
+      state.robotMaskCache.update(state.cameras,maskCapsules,[0,0,dimensions.width,dimensions.height]);
+      state.cameraFusion.maskTexture=state.robotMaskCache.texture;
+    }catch(error){state.robotMaskCache?.dispose();state.robotMaskCache=null;state.robotMaskCacheUnavailable=true;}
+  }
+  let pointColors=false;
+  if(!meshMode&&cached&&state.cameraFusion.originalRgb&&state.usePointColorCache!==false
+      &&!state.settings.depth_only_enabled&&!state.pointColorCacheUnavailable
+      &&state.cameras.every(camera=>camera.metadata.color_space==='original_rgb')){
+    try{
+      state.pointColors ||= new NativePointColors(gl);
+      state.pointColors.update(state.cameraFusion,state.cameras,maskCapsules,[0,0,dimensions.width,dimensions.height]);
+      pointColors=true;
+    }catch(error){
+      state.pointColors?.dispose();state.pointColors=null;state.pointColorCacheUnavailable=true;
+      state.stats.renderWarning=`Point color cache unavailable: ${error.message||error}; using direct colors`;
+    }
+  }
   if (meshMode && state.settings.blendpcr_enabled && cached) {
     try {
       state.blendPCR ||= new BrowserBlendPCR(gl, VERTEX_SHADER);
@@ -2330,11 +2627,30 @@ function render() {
     state.blendPCR.clearTargets();
   }
   state.stats.renderMethod = blended ? "blendpcr" : (state.settings.blendpcr_enabled ? "independent_mesh" : state.settings.display_mode || "independent_mesh");
+  if(!pointPreview) {
+  state.stats.pointPreview=null;
   const unified = meshMode && state.settings.overlap_suppression_enabled && cached && state.cameras.length >= 2;
   const fusionReference = !cached && state.settings.camera_color_fusion_enabled ? chooseColorReference(state.cameras, now) : null;
-  gl.useProgram(state.program);
+  const originalProgram=state.program,originalUniforms=state.uniforms;
+  const cropBounds = modeledWorkspaceBounds(state.settings);
+  let sourceCells = 0, submittedCells = 0;
+  const indexedMesh=!blended&&meshMode&&cached&&!maskCapsules&&!state.settings.overlap_suppression_enabled
+    &&!state.settings.camera_color_fusion_enabled&&state.useIndexedMeshes!==false
+    &&standardSurfacePrograms.has(state.program)&&ensureIndexedProgram();
+  if(indexedMesh) {state.program=state.indexedProgram;state.uniforms=state.indexedUniforms;}
+  if(cached&&!blended&&state.cameraFusion.originalRgb) {
+    if(ensureOriginalProgram(indexedMesh,pointColors)) {
+      const key=pointColors?'originalPoints':indexedMesh?'originalIndexed':'original';
+      state.program=state[key+'Program'];state.uniforms=state[key+'Uniforms'];
+    }
+  }
+  try {
+  gl.useProgram(state.program);bindClawMeshMask(gl,state.program);
   if (cached) state.cameraFusion.bind(state.program);
   else gl.uniform1i(state.uniforms.rigCount, 0);
+  gl.uniform1i(state.uniforms.pointColorCacheEnabled,pointColors?1:0);
+  gl.uniform1i(gl.getUniformLocation(state.program,'u_point_color_cache'),pointColors?8:7);
+  if(pointColors)state.pointColors.bind(state.program);
   gl.uniformMatrix4fv(state.uniforms.viewProjection, false, viewProjection);
   gl.uniform1i(state.uniforms.robotMaskEnabled, maskCapsules ? 1 : 0);
   if (maskCapsules) {
@@ -2344,12 +2660,28 @@ function render() {
   gl.uniform1f(state.uniforms.meshDepthDelta, Number(state.settings.mesh_depth_delta || 0.045));
   gl.uniform1f(state.uniforms.meshMaxEdge, Number(state.settings.mesh_max_edge || 0.08));
   gl.uniform1i(state.uniforms.qualityEnabled, cached ? 1 : 0);
+  gl.uniform1i(state.uniforms.depthOnlyEnabled, state.settings.depth_only_enabled === true ? 1 : 0);
   gl.uniform1i(state.uniforms.rigEnabled, unified ? 1 : 0);
   gl.uniform1i(state.uniforms.rigColorEnabled, cached && state.settings.camera_color_fusion_enabled ? 1 : 0);
   gl.uniform1f(state.uniforms.fusionDepthTolerance, 0.035);
 
+  bindModeledWorkspace(gl, state.program, state.settings);
+  gl.vertexAttribI4ui(0,0,0,0,0);
+  gl.vertexAttribI4ui(1,0,0,0,0);
+
   for (const [cameraIndex, camera] of state.cameras.entries()) {
     if (blended || !cameraIsFresh(camera, now)) continue;
+    const source = workspaceSourceWindow(camera, state.useWorkspaceCulling === false ? null : cropBounds);
+    const tiles=state.useWorkspaceCulling===false?null:state.useNativeTileCulling===false||meshMode
+      ?workspaceVisibleTiles(camera,cropBounds)
+      :visibleNativeTiles(camera,viewProjection,cropBounds,meshMode?[0,0]:[32/dimensions.width,32/dimensions.height]);
+    sourceCells += Math.max(0, camera.width - 1) * Math.max(0, camera.height - 1);
+    submittedCells += tiles?tiles.cellCount:Math.max(0, source.width - 1) * Math.max(0, source.height - 1);
+    if (tiles?tiles.length===0:(source.width < (meshMode ? 2 : 1) || source.height < (meshMode ? 2 : 1))) continue;
+    gl.uniform1i(state.uniforms.sparseTiles,tiles?1:0);
+    if(tiles)camera.cropTileBuffer=bindWorkspaceTiles(gl,tiles,camera.cropTileBuffer||{});
+    gl.uniform2i(state.uniforms.sourceOrigin, source.x, source.y);
+    gl.uniform2i(state.uniforms.sourceSize, source.width, source.height);
     gl.uniform1i(state.uniforms.rigIndex, cameraIndex);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, camera.depthTexture);
@@ -2377,19 +2709,66 @@ function render() {
       if (state.settings.point_underlay && !unified) {
         gl.uniform1i(state.uniforms.renderMode, 2);
         gl.uniform1f(state.uniforms.pointSize, pointSize * 0.85);
-        gl.drawArrays(gl.POINTS, 0, camera.width * camera.height);
+        if(tiles)gl.drawArraysInstanced(gl.POINTS,0,32*8,tiles.length/2);
+        else gl.drawArrays(gl.POINTS, 0, source.width * source.height);
       }
       // Validate each emitted triangle from its actual three depth samples, matching Godot's mesh rule.
       gl.uniform1i(state.uniforms.renderMode, 1);
       gl.uniform1f(state.uniforms.pointSize, pointSize);
-      gl.drawArrays(gl.TRIANGLES, 0, (camera.width - 1) * (camera.height - 1) * 6);
+      if(indexedMesh) {
+        if(tiles) {
+          if(!camera.cropIndexBuffer) {
+            camera.cropIndexBuffer=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,camera.cropIndexBuffer);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(nativeMeshIndices(33,9)),gl.STATIC_DRAW);
+          } else gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,camera.cropIndexBuffer);
+          gl.drawElementsInstanced(gl.TRIANGLES,32*8*6,gl.UNSIGNED_SHORT,0,tiles.length/2);
+        } else {
+          ensureMeshIndexBuffer(camera);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,camera.meshIndexBuffer);
+          const indexBytes=camera.meshIndexType===gl.UNSIGNED_SHORT?2:4;
+          gl.drawElementsInstanced(gl.TRIANGLES,(source.width-1)*6,camera.meshIndexType,source.x*6*indexBytes,source.height-1);
+        }
+      } else if(tiles)gl.drawArraysInstanced(gl.TRIANGLES,0,32*8*6,tiles.length/2);
+      else gl.drawArrays(gl.TRIANGLES, 0, (source.width - 1) * (source.height - 1) * 6);
     } else {
       gl.uniform1i(state.uniforms.renderMode, 0);
       gl.uniform1f(state.uniforms.pointSize, pointSize);
-      gl.drawArrays(gl.POINTS, 0, camera.width * camera.height);
+      if(tiles)gl.drawArraysInstanced(gl.POINTS,0,32*8,tiles.length/2);
+      else gl.drawArrays(gl.POINTS, 0, source.width * source.height);
+    }
+    if(tiles)unbindWorkspaceTiles(gl);
+  }
+  } finally {state.program=originalProgram;state.uniforms=originalUniforms;}
+  state.stats.workspaceCrop = blended ? state.blendPCR.cropStats : {enabled: Boolean(cropBounds), sourceCells, submittedCells};
+  } else {
+    try {
+      state.sampledPointPreview ||= new SampledPointPreview(gl);
+      state.stats.pointPreview=state.sampledPointPreview.render(state.cameras,{...dimensions,now,viewProjection,projection,viewer:viewerTransform},maskCapsules,state.settings);
+      state.stats.pointPreview.transport=state.cameras.every(c=>c.metadata.preview_native===true)?'camera buffers':state.cameras.every(c=>c.metadata.depth_encoding==='u16_mm_sparse_points_deflate')?'host sampled':'local fallback';
+      state.stats.renderMethod='sampled_points';state.stats.workspaceCrop=null;
+    } catch(error) {
+      state.sampledPointPreview?.dispose();state.sampledPointPreview=null;
+      state.pointPreviewUnavailable=String(error.message||error);
+      state.stats.pointPreview=null;state.stats.renderWarning=`20k preview unavailable: ${state.pointPreviewUnavailable}; using full detail`;
     }
   }
-  drawWorkspaceGuide(viewProjection);
+  const stage=modeledWorkspace(state.settings);
+  if (stage) {
+    state.modeledWorkspace ||= new ModeledWorkspaceRenderer(gl);
+  }
+  if(state.settings.scene_lighting_enabled!==false&&state.settings.scene_shadows_enabled!==false
+    &&(stage||robotBasePosition())&&!state.sceneShadowUnavailable) {
+    try {
+      state.sceneShadow ||= new SceneShadowRenderer(gl);
+      const center=stage?.center||robotBasePosition(),extent=Math.max(1,stage?.width||0,stage?.depth||0,stage?.tableHeight||0);
+      const signature=JSON.stringify([stage?.key,state.settings.modeled_workspace_light_angle,state.settings.robot_overlay_enabled,state.settings.robot_overlay_style,state.settings.robot_overlay_scope,state.robotTransforms,state.stats.robotModelsLoaded]);
+      state.sceneShadow.update(state.settings,center,extent,signature,(program,model)=>{
+        state.modeledWorkspace?.drawDepth(state.settings,program,model);
+        drawRobotShadow(program,model);
+      });
+    } catch(error){state.sceneShadow?.dispose();state.sceneShadow=null;state.sceneShadowUnavailable=true;state.stats.shadowWarning='CAD shadows unavailable; scene lighting remains active.';}
+  }
+  if(stage)state.modeledWorkspace.render(state.settings,viewProjection,viewerTransform.slice(12,15),state.sceneShadow);
   drawCameraGuides(viewProjection);
   drawRobotOverlay(viewProjection);
   state.stats.renderFrames += 1;
@@ -2421,6 +2800,42 @@ function updateStats() {
   };
 }
 
+function advanceRenderClock(now) {
+  const interval=1000/60,elapsed=now-state.lastRenderMs;
+  if(!state.lastRenderMs||elapsed>interval*4) {state.lastRenderMs=now;return true;}
+  if(elapsed<interval-0.5)return false;
+  // Carry the fractional remainder across refreshes. Resetting to "now"
+  // every render accidentally caps a 144 Hz display at 48 rather than 60.
+  state.lastRenderMs+=Math.max(1,Math.floor(elapsed/interval))*interval;
+  return true;
+}
+
+function gpuFrameReady() {
+  const gl = state.gl;
+  if (!gl) return true;
+  const fences = state.renderFences || [];
+  while (fences.length) {
+    const status = gl.clientWaitSync(fences[0], 0, 0);
+    if (status === gl.TIMEOUT_EXPIRED) {
+      // Two submissions retain CPU/GPU overlap while bounding old views.
+      if (fences.length < 2) return true;
+      state.stats.gpuDeferredFrames = Number(state.stats.gpuDeferredFrames || 0) + 1;
+      return false;
+    }
+    gl.deleteSync(fences.shift());
+    if (status === gl.WAIT_FAILED) state.gpuPacingUnavailable = true;
+  }
+  return true;
+}
+
+function markGpuFrame() {
+  const gl = state.gl;
+  if (!gl || state.gpuPacingUnavailable || typeof gl.fenceSync !== "function") return;
+  const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (fence) (state.renderFences ||= []).push(fence);
+  gl.flush();
+}
+
 function animationLoop(now) {
   if (!state.running) return;
   if (state.rawRgbViewer && (!state.lastRgbModeCheck || now-state.lastRgbModeCheck>250)) {
@@ -2444,22 +2859,23 @@ function animationLoop(now) {
     state.socket
     && state.socket.readyState === WebSocket.OPEN
     && state.lastPacketMs > 0
-    && now - state.lastPacketMs > 1500
+    && now - state.lastPacketMs > 5000
   ) {
     const options = state.socketOptions || {};
     state.stats.connected = false;
     state.stats.status = "RGB-D WebSocket stale; reconnecting";
     closeRgbdSocket();
-    state.reconnectTimer = window.setTimeout(() => {
-      state.reconnectTimer = 0;
-      startConfiguredRgbdFallback(options);
-    }, 100);
+    scheduleRgbdSocketRecovery(options);
   }
   // High-refresh displays were rendering hundreds of thousands of points at
   // 120-165 Hz and starving RGB-D decode/upload work on the same main thread.
-  if (!state.rgbdPaused && (!state.lastRenderMs || now - state.lastRenderMs >= 15.5)) {
-    state.lastRenderMs = now;
+  // Do not queue obsolete views behind GPU work. A zero-timeout fence poll
+  // leaves the main thread free for input, network and worker completion.
+  // When ready, render() uploads each camera's newest pending capture.
+  if (!state.rgbdPaused && advanceRenderClock(now) && gpuFrameReady()) {
+    const before = state.stats.renderFrames;
     render();
+    if (state.stats.renderFrames !== before) markGpuFrame();
   }
   updateStats();
   state.animationFrame = requestAnimationFrame(animationLoop);
@@ -2485,6 +2901,17 @@ function waitMilliseconds(milliseconds) {
 }
 
 function trimIndependentFrameQueue(queue, limit = 4) {
+  if(queue.every(frame=>frame.payloads.length===1&&frame.payloads[0].metadata.depth_encoding==='u16_mm_sparse_points_deflate')) {
+    const counts=new Map(),now=performance.now();
+    const keep=new Set();
+    for(let index=queue.length-1;index>=0;index--){
+      const frame=queue[index],meta=frame.payloads[0].metadata,id=String(meta.id||meta.serial||meta.model||'camera');
+      const count=counts.get(id)||0;counts.set(id,count+1);
+      if(count<3&&(count===0||now-frame.receivedAtMs<=50))keep.add(index);
+    }
+    const frames=queue.filter((_frame,index)=>keep.has(index)),dropped=queue.length-frames.length;
+    queue.splice(0,queue.length,...frames);return dropped;
+  }
   // Keep recent captures and their named references. Also retain the newest
   // keyframe for each camera, since its next delta may not have arrived yet.
   const keep = new Set();
@@ -2519,9 +2946,7 @@ function trimIndependentFrameQueue(queue, limit = 4) {
 }
 
 function handleRgbdPacket(arrayBuffer, transport) {
-  if (!(arrayBuffer instanceof ArrayBuffer)) return;
-  state.lastPacketMs = performance.now();
-  state.reconnectAttempt = 0;
+  if (!(arrayBuffer instanceof ArrayBuffer)) return false;
   state.stats.received += 1;
   state.stats.bytes += arrayBuffer.byteLength;
   state.stats.transport = transport;
@@ -2530,8 +2955,12 @@ function handleRgbdPacket(arrayBuffer, transport) {
     parsed = parsePacket(arrayBuffer);
   } catch (error) {
     state.stats.status = `packet error: ${error.message || error}`;
-    return;
+    return false;
   }
+  if(parsed.metadata.preview_transport==='host_sampled_points_v1'&&(!state.settings.point_preview_enabled||parsed.payloads.some(p=>p.metadata.preview_budget!==(state.settings.point_preview_budget===0?0:state.settings.point_preview_budget===40000?40000:20000))))return false;
+  state.lastPacketMs = performance.now();
+  state.reconnectAttempt = 0;
+  state.stats.connected = true;
   // Parallel HTTPS requests can complete in small bursts. Preserve complete
   // chronological frames instead of overwriting one while its predecessor is
   // decoding. The hard cap still prevents latency from accumulating.
@@ -2572,6 +3001,7 @@ function handleRgbdPacket(arrayBuffer, transport) {
     }
   }
   decodeNewestPackets();
+  return true;
 }
 
 function clearRgbdHttpReorder() {
@@ -2660,6 +3090,10 @@ function closeRgbdSocket() {
 function rgbdSocketUrl(options) {
   const scheme = window.location.protocol === "https:" ? "wss" : "ws";
   const query = new URLSearchParams({
+    native_points: state.settings.point_preview_enabled===true?"1":"0",
+    native_mesh: state.settings.mesh_preview_enabled===true?'balanced':'0',
+    point_predictor: state.settings.point_preview_enabled===true&&state.settings.point_preview_budget!==0?"shuffle_delta_v2":"delta_v1",
+    point_budget: String(state.settings.point_preview_budget===0?0:state.settings.point_preview_budget===40000?40000:20000),
     w: String(options.width || 384),
     fps: String(options.fps || 30),
     context_fps: String(options.contextFps || options.fps || 30),
@@ -2669,6 +3103,7 @@ function rgbdSocketUrl(options) {
     depth_exact: options.exactDepth === true ? "1" : "0",
     temporal_color: options.temporalColor === false ? "0" : "1",
     persistent_reference: options.persistentReference === true ? "1" : "0",
+    flow_control: options.flowControl !== false && options.temporalDepth === false && options.temporalColor === false ? "1" : "0",
     client: state.rgbdClientId,
   });
   return `${scheme}://${window.location.host}/rgbd-stream?${query}`;
@@ -2678,29 +3113,64 @@ function startRgbdWebSocket(options) {
   if (!state.running || document.hidden || state.rgbdPaused) return;
   stopRgbdHttpLatest();
   closeRgbdSocket();
-  const socket = new WebSocket(rgbdSocketUrl(options));
+  const independent=(state.settings.point_preview_enabled===true||state.settings.mesh_preview_enabled===true)
+    &&new URLSearchParams(window.location.search).get('independent_cameras')!=='0';
+  const url=rgbdSocketUrl(options);
+  const lanes=new URLSearchParams(window.location.search).get('camera_lanes')==='1'?'1':'2';
+  const socket = independent?new IndependentCameraSocket(`${url}&camera_lanes=${lanes}`,{excludedIds:state.settings.preview_excluded_cameras||[]}):new WebSocket(url);
   state.socket = socket;
   socket.binaryType = "arraybuffer";
   state.stats.connected = false;
   state.stats.status = "RGB-D WebSocket connecting";
   state.stats.transport = "WebSocket latest-frame";
+  const timedOut = () => {
+    state.reconnectTimer = 0;
+    if (state.socket !== socket) return;
+    closeRgbdSocket();
+    // Repeating cold connection deadlines can leave a WAN preview blank for
+    // tens of seconds. A timed-out attempt uses the alternate transport now.
+    startRgbdHttpLatest(options);
+  };
+  state.reconnectTimer = window.setTimeout(timedOut, 5000);
   socket.onopen = () => {
     if (!state.running || state.socket !== socket) return;
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = 0;
     const now = performance.now();
     state.socketOpenedMs = now;
     state.lastPacketMs = now;
-    state.stats.connected = true;
-    state.stats.status = "RGB-D WebSocket connected";
+    state.stats.connected = false;
+    state.stats.status = "RGB-D WebSocket open; waiting for camera frame";
+    state.reconnectTimer = window.setTimeout(timedOut, 2500);
   };
   socket.onmessage = (event) => {
     if (!state.running || state.socket !== socket || document.hidden) return;
-    handleRgbdPacket(event.data, "WebSocket latest-frame");
+    if (typeof event.data === "string") {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === "rgbd-sequence" && Number.isSafeInteger(message.sequence) && message.sequence > 0) {
+          socket.latestFrameSequence = message.sequence;
+        }
+      } catch (_) { /* Older transports need no acknowledgement. */ }
+      return;
+    }
+    if (handleRgbdPacket(event.data, "WebSocket latest-frame")) {
+      window.clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = 0;
+      state.stats.status = "RGB-D WebSocket connected";
+    }
+    if (socket.latestFrameSequence && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({type: "rgbd-ack", sequence: socket.latestFrameSequence}));
+      socket.latestFrameSequence = 0;
+    }
   };
   socket.onerror = () => {
     if (state.socket === socket) state.stats.status = "RGB-D WebSocket error";
   };
   socket.onclose = (event) => {
     if (!state.running || state.socket !== socket) return;
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = 0;
     state.socket = null;
     state.stats.connected = false;
     if (event.code === 4001) {
@@ -2708,15 +3178,30 @@ function startRgbdWebSocket(options) {
       state.stats.transport = "Superseded";
       return;
     }
-    state.stats.status = "RGB-D WebSocket unavailable; using HTTPS latest-frame";
-    state.stats.transport = "HTTPS latest-frame fallback";
-    window.setTimeout(() => startRgbdHttpLatest(options), 100);
+    scheduleRgbdSocketRecovery(options);
   };
+}
+
+function scheduleRgbdSocketRecovery(options) {
+  if (!state.running || document.hidden || state.rgbdPaused) return;
+  if (state.reconnectTimer) window.clearTimeout(state.reconnectTimer);
+  // A brief tunnel interruption should reconnect the preferred transport.
+  // Bound consecutive failures so hosts without WebSocket support still work.
+  const retrySocket = ++state.reconnectAttempt <= 3;
+  state.stats.status = retrySocket ? "RGB-D WebSocket reconnecting" : "RGB-D WebSocket unavailable; using HTTPS latest-frame";
+  state.stats.transport = retrySocket ? "WebSocket reconnecting" : "HTTPS latest-frame fallback";
+  state.reconnectTimer = window.setTimeout(() => {
+    state.reconnectTimer = 0;
+    if (!state.running || document.hidden || state.rgbdPaused) return;
+    if (state.dataChannel?.readyState === "open") return;
+    if (retrySocket) startRgbdWebSocket(options);
+    else startRgbdHttpLatest(options);
+  }, retrySocket ? Math.min(2000, 250 * 2 ** (state.reconnectAttempt - 1)) : 100);
 }
 
 function startConfiguredRgbdFallback(options) {
   if (state.rgbdPaused) return;
-  if ((options || {}).transport === "websocket") {
+  if (state.settings.point_preview_enabled===true || state.settings.mesh_preview_enabled===true || (options || {}).transport === "websocket") {
     startRgbdWebSocket(options || {});
   } else {
     startRgbdHttpLatest(options || {});
@@ -2742,9 +3227,22 @@ async function runRgbdHttpWorker(options, worker, generation) {
         await waitMilliseconds(250);
         continue;
       }
+      // Bootstrap with two requests so six large cold responses do not divide
+      // the WAN bandwidth before the first camera frame has completed.
+      if (worker > 1 && !state.stats.connected) {
+        await waitMilliseconds(100);
+        continue;
+      }
       const controller = new AbortController();
       state.httpControllers.add(controller);
-      const timeout = window.setTimeout(() => controller.abort(), 1500);
+      // A native RGB-D response can be over a megabyte. Allow a cold crop
+      // cache and a WAN transfer to finish instead of aborting every response.
+      let timeout = 0;
+      const progressed = () => {
+        window.clearTimeout(timeout);
+        timeout = window.setTimeout(() => controller.abort(), 5000);
+      };
+      progressed();
       try {
         const response = await fetch(
           latestRgbdUrl(options, state.httpSequence, worker),
@@ -2768,7 +3266,7 @@ async function runRgbdHttpWorker(options, worker, generation) {
         }
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const sequence = Number(response.headers.get("X-RGBD-Sequence") || 0);
-        const packet = await response.arrayBuffer();
+        const packet = await readRgbdHttpPacket(response, progressed);
         if (generation !== state.httpGeneration || !state.running) return;
         state.httpSequence = Math.max(state.httpSequence, sequence);
         state.stats.connected = true;
@@ -2798,8 +3296,29 @@ async function runRgbdHttpWorker(options, worker, generation) {
   }
 }
 
+async function readRgbdHttpPacket(response, progressed) {
+  // The deadline measures inactivity, not total transfer time. Keep the exact
+  // bytes of a progressing high-quality frame instead of repeatedly discarding it.
+  progressed();
+  if (!response.body?.getReader) return response.arrayBuffer();
+  const reader = response.body.getReader(), chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      chunks.push(value); size += value.byteLength; progressed();
+    }
+  } finally { reader.releaseLock(); }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes.buffer;
+}
+
 function startRgbdHttpLatest(options) {
-  if (!state.running) return;
+  if (!state.running || state.rgbdPaused) return;
   if (state.dataChannel && state.dataChannel.readyState === "open") return;
   if (state.httpWorkers > 0) return;
   if (document.hidden) {
@@ -2830,6 +3349,7 @@ function startRgbdHttpLatest(options) {
 
 function attachRgbdDataChannel(channel, options) {
   if (!channel) return false;
+  const assembler=channel.nativePointStream?new NativePointAssembler():null;
   state.dataChannel = channel;
   channel.binaryType = "arraybuffer";
   const onOpen = () => {
@@ -2848,7 +3368,8 @@ function attachRgbdDataChannel(channel, options) {
   };
   const onMessage = (event) => {
     if (!state.running || state.dataChannel !== channel || document.hidden) return;
-    handleRgbdPacket(event.data, "WebRTC latest-frame");
+    const packet=assembler?assembler.accept(event.data):event.data;
+    if(packet)handleRgbdPacket(packet, "WebRTC latest-frame");
   };
   const onClose = () => {
     if (!state.running || state.dataChannel !== channel) return;
@@ -2923,7 +3444,7 @@ export async function startGodotHybridRenderer(options = {}) {
   state.robotProgram = createProgram(gl, ROBOT_VERTEX_SHADER, ROBOT_FRAGMENT_SHADER);
   state.robotUniforms = findRobotUniforms(gl, state.robotProgram);
   state.robotVao = gl.createVertexArray();
-  gl.useProgram(state.program);
+  gl.useProgram(state.program);bindClawMeshMask(gl,state.program);
   gl.uniform1i(state.uniforms.depth, 0);
   gl.uniform1i(state.uniforms.color, 1);
   gl.uniform1i(state.uniforms.fusionDepth, 2);
@@ -2944,6 +3465,8 @@ export async function startGodotHybridRenderer(options = {}) {
     }
   });
   state.lastRenderMs = 0;
+  state.renderFences = [];
+  state.gpuPacingUnavailable = false;
   state.stats = {
     ...state.stats,
     status: "connecting",
@@ -2965,6 +3488,7 @@ export async function startGodotHybridRenderer(options = {}) {
     receiveFps: 0,
     decodeErrors: 0,
     renderFrames: 0,
+    gpuDeferredFrames: 0,
     renderFps: 0,
     cameraFrames: {},
     cameraFps: {},
@@ -2985,7 +3509,10 @@ export async function startGodotHybridRenderer(options = {}) {
   state.lastPacketMs = 0;
   state.visibilityHandler = handleRgbdVisibilityChange;
   document.addEventListener("visibilitychange", state.visibilityHandler);
-  if (attachRgbdDataChannel(options.dataChannel, state.socketOptions)) {
+  const pointChannel=state.settings.point_preview_enabled===true;
+  const compatibleChannel=!state.settings.mesh_preview_enabled&&!(pointChannel&&state.settings.point_preview_budget===0)&&options.dataChannel&&Boolean(options.dataChannel.nativePointStream)===pointChannel;
+  if(options.dataChannel&&!compatibleChannel)options.dataChannel.close();
+  if (compatibleChannel&&attachRgbdDataChannel(options.dataChannel, state.socketOptions)) {
     state.dataChannelFallbackTimer = window.setTimeout(() => {
       state.dataChannelFallbackTimer = 0;
       if (!state.dataChannel || state.dataChannel.readyState !== "open") {
@@ -3001,6 +3528,11 @@ export async function startGodotHybridRenderer(options = {}) {
 
 export function stopGodotHybridRenderer() {
   state.running = false;
+  state.robotLoadController?.abort();
+  state.robotLoadController = null;
+  for (const fence of state.renderFences || []) state.gl?.deleteSync(fence);
+  state.renderFences = [];
+  clearPendingCameraUploads();
   state.nextFrameDecode?.cancel();
   state.nextFrameDecode = null;
   state.nativeDecoder?.close();
@@ -3053,28 +3585,43 @@ export function stopGodotHybridRenderer() {
   state.cameras = [];
   state.blendPCR?.dispose();
   state.blendPCR = null;
+  state.sampledPointPreview?.dispose();state.sampledPointPreview=null;state.pointPreviewUnavailable='';
   state.cameraFusion?.clear();
   state.cameraFusion = null;
+  state.pointColors?.dispose();state.pointColors=null;state.pointColorCacheUnavailable=false;
+  state.robotMaskCache?.dispose();state.robotMaskCache=null;state.robotMaskCacheUnavailable=false;
   const gl = state.gl;
-  deleteWorkspaceGuide(gl);
+  state.modeledWorkspace?.dispose();
+  state.sceneShadow?.dispose();state.sceneShadow=null;state.sceneShadowUnavailable=false;
+  state.modeledWorkspace = null;
   deleteCameraGuides(gl);
   deleteRobotMeshes(gl);
   if (gl && state.robotProgram) gl.deleteProgram(state.robotProgram);
   if (gl && state.robotVao) gl.deleteVertexArray(state.robotVao);
   if (gl && state.program) gl.deleteProgram(state.program);
+  if (gl && state.indexedProgram) gl.deleteProgram(state.indexedProgram);
+  state.indexedProgram=state.indexedUniforms=null;state.indexedUnavailable=false;
+  for(const key of ['original','originalIndexed','originalPoints']) {
+    if(gl&&state[key+'Program'])gl.deleteProgram(state[key+'Program']);
+    state[key+'Program']=state[key+'Uniforms']=null;state[key+'Unavailable']=false;
+  }
   state.gl = null;
   state.program = null;
   state.uniforms = null;
   state.robotProgram = null;
   state.robotUniforms = null;
   state.robotVao = null;
-  state.workspaceGuide = null;
   state.robotTransforms = {};
+  state.robotPosePreview.reset();
+  state.robotRegistration=null;
+  state.robotJointAnimation.reset();
   state.robotRenderer = EMPTY_ROBOT_RENDERER;
   state.baseViewer = null;
   state.currentViewer = null;
   state.focusWorld = null;
   state.focusPicked = false;
+  state.orbitReference = null;
+  state.orbitAimOffset = null;
   state.orbitAnchorDirection = null;
   state.orbitAnchorHeadDelta = null;
   state.lastHeadDelta = [0, 0, 0];
@@ -3087,13 +3634,38 @@ export function stopGodotHybridRenderer() {
 }
 
 export function setGodotHybridViewSettings(settings = {}) {
+  const pointTransportChanged=['point_preview_enabled','mesh_preview_enabled'].some(key=>Object.hasOwn(settings,key)&&settings[key]!==state.settings[key])
+    ||(Object.hasOwn(settings,'point_preview_budget')&&settings.point_preview_budget!==state.settings.point_preview_budget
+      &&(settings.point_preview_budget===0||state.settings.point_preview_budget===0));
+  if(["blendpcr_relaxed","blendpcr_depth_tolerance","blendpcr_support","blendpcr_max_edge"].some(key=>Object.hasOwn(settings,key)&&settings[key]!==state.settings[key])){state.cameraFusion?.clear();state.blendPCR?.clearTargets();}
+  if(Object.hasOwn(settings,'point_preview_enabled')&&settings.point_preview_enabled!==state.settings.point_preview_enabled)
+    state.pointPreviewUnavailable='';
+  if(settings.display_mode==='rgb_camera'&&state.workspaceEditor?.active)state.workspaceEditor.finish(!state.workspaceEditor.geometry?.planar);
+  if (Array.isArray(settings.preview_excluded_cameras)) {
+    const excluded = settings.preview_excluded_cameras;
+    for (const camera of state.cameras) if (excluded.includes(String(camera.metadata.id))) {deleteCameraTextures(camera);state.sampledPointPreview?.dropCamera?.(camera);}
+    state.cameras = state.cameras.filter(camera => !excluded.includes(String(camera.metadata.id)));
+    state.socket?.setExcluded?.(excluded);
+    state.cameraFusion?.clear();state.blendPCR?.clearTargets();
+  }
   const overlayStyle = settings.robot_overlay_style;
   state.settings = {
     ...state.settings,
     ...settings,
-    robot_overlay_style: overlayStyle === "solid" ? "solid" : overlayStyle === "alignment"
-      ? "alignment"
-      : state.settings.robot_overlay_style,
+    robot_overlay_style: ["solid", "alignment", "realistic"].includes(overlayStyle)
+      ? overlayStyle : state.settings.robot_overlay_style,
+    robot_overlay_scope: ["full", "claw"].includes(settings.robot_overlay_scope)
+      ? settings.robot_overlay_scope : state.settings.robot_overlay_scope,
+    square_point_scale: Number.isFinite(settings.square_point_scale)
+      ? clamp(settings.square_point_scale,.25,4) : state.settings.square_point_scale,
+    robot_overlay_claw_opacity: Number.isFinite(settings.robot_overlay_claw_opacity)
+      ? clamp(settings.robot_overlay_claw_opacity, 0, 1) : state.settings.robot_overlay_claw_opacity,
+    robot_overlay_claw_buffer_mm: Number.isFinite(settings.robot_overlay_claw_buffer_mm)
+      ? clamp(settings.robot_overlay_claw_buffer_mm, 0, 50) : state.settings.robot_overlay_claw_buffer_mm,
+    robot_overlay_body_buffer_mm: Number.isFinite(settings.robot_overlay_body_buffer_mm)
+      ? clamp(settings.robot_overlay_body_buffer_mm, 0, 50) : state.settings.robot_overlay_body_buffer_mm,
+    robot_overlay_body_opacity: Number.isFinite(settings.robot_overlay_body_opacity)
+      ? clamp(settings.robot_overlay_body_opacity, 0, 1) : state.settings.robot_overlay_body_opacity,
   };
   if (["point_cloud", "shader_mesh", "independent_mesh", "unified_mesh", "blendpcr"].includes(settings.display_mode)) {
     state.settings.geometry_mode = settings.display_mode === "point_cloud" ? "points" : "mesh";
@@ -3102,6 +3674,20 @@ export function setGodotHybridViewSettings(settings = {}) {
     state.settings.blendpcr_enabled = settings.display_mode === "blendpcr";
   }
   if (settings.recenter) recenterGodotHybridRenderer();
+  if(pointTransportChanged&&!state.settings.point_preview_enabled){
+    state.cameras=state.cameras.filter(camera=>{if(!camera.previewSamples?.depths)return true;deleteCameraTextures(camera);return false;});
+    clearPendingCameraUploads();
+  }
+  if(pointTransportChanged&&state.running&&state.socketOptions
+      &&!(state.settings.point_preview_enabled&&state.settings.point_preview_budget!==0&&state.dataChannel?.nativePointStream
+        &&['connecting','open'].includes(state.dataChannel.readyState))){
+    if(state.dataChannelFallbackTimer)clearTimeout(state.dataChannelFallbackTimer);state.dataChannelFallbackTimer=0;
+    if((state.settings.point_preview_enabled||state.settings.mesh_preview_enabled)&&state.dataChannel){const channel=state.dataChannel;state.dataChannel=null;channel.close();}
+    state.pendingFrameQueue.length=0;
+    closeRgbdSocket();stopRgbdHttpLatest();
+    startConfiguredRgbdFallback(state.socketOptions);
+  }
+
   configureOriginalRgb();
 }
 
@@ -3133,9 +3719,42 @@ export function setGodotHybridRgbCamera(id) {
   state.rawRgbViewer?.setCamera(id);
 }
 
+export function alignGodotModeledWorkspace(options={}) {
+  if (!state.baseViewer) return null;
+  const base=transformDictionaryMatrix(state.robotTransforms[state.robotRenderer.baseLink]);
+  if(options.source!=='orbit'&&state.robotRegistration?.registered===true&&base&&Array.from(base).every(Number.isFinite)) {
+    return {modeled_workspace_center:[base[12],base[13]-.002,base[14]]};
+  }
+  if(options.source==='robot')return null;
+  return {modeled_workspace_center: currentOrbitFocus(state.baseViewer.transform).slice()};
+}
+
+export function frameGodotHeadTrackingView() {
+  const center = state.settings.modeled_workspace_center;
+  const robot = robotBasePosition();
+  const claw = transformDictionaryMatrix(state.robotTransforms.gripper_link);
+  if (!state.baseViewer || !robot || !claw || !Array.isArray(center) || center.length !== 3 || !center.every(Number.isFinite)) return false;
+  const tip = transformPoint(claw, [-0.0079, -0.000218121, -0.0981274]);
+  let back = [center[0] - robot[0], 0, center[2] - robot[2]];
+  if (Math.hypot(...back) < .03) back = [center[0] - tip[0], 0, center[2] - tip[2]];
+  if (Math.hypot(...back) < .001) back = [0, 0, 1];
+  state.focusWorld = center.slice(); state.focusPicked = true;
+  state.manualPan = [0, 0, 0]; state.manualOrbitYaw = 0; state.manualOrbitPitch = 0; state.manualDolly = 0;
+  state.orbitAnchorDirection = normalize(back); state.orbitAnchorHeadDelta = [0, 0, 0];
+  state.orbitAimOffset = tip.map((v, i) => v - center[i]);
+  state.orbitReference = {distance: Math.max(.1, Number(state.settings.orbit_distance || .65)),
+    height: Math.max(.15, Number(state.settings.focus_vertical_offset || .35), tip[1] - center[1] + .15),
+    pitch: Number(state.settings.orbit_pitch_offset || 0)};
+  state.headBaseline = {x: 0, y: 0, z: Number(window.godotWebcamTrackerLatest?.neutral_z_cm || 35)};
+  state.lastHeadActive = false;
+  return true;
+}
+
 export function recenterGodotHybridRenderer() {
   state.headBaseline = null;
   state.lastHeadActive = false;
+  state.orbitReference = null;
+  state.orbitAimOffset = null;
   state.orbitAnchorDirection = null;
   state.orbitAnchorHeadDelta = null;
   state.focusPicked = false;
@@ -3143,6 +3762,7 @@ export function recenterGodotHybridRenderer() {
   state.manualOrbitPitch = 0;
   state.manualDolly = 0;
   state.manualPan = [0, 0, 0];
+  if (state.settings.head_tracking_enabled && frameGodotHeadTrackingView()) return;
   if (state.baseViewer) state.focusWorld = defaultOrbitFocus(state.baseViewer.transform);
 }
 
@@ -3162,7 +3782,9 @@ export function getGodotHybridNavigationState(options = {}) {
     base: Array.from(base), fov: state.baseViewer.fov, near: state.baseViewer.near, far: state.baseViewer.far,
     focus: state.focusWorld?.slice() || null, picked: state.focusPicked,
     pan: state.manualPan.slice(), headBaseline: state.headBaseline && { ...state.headBaseline },
-    lastHeadActive: state.lastHeadActive,
+    lastHeadActive: state.lastHeadActive, lastHeadDelta: state.lastHeadDelta.slice(),
+    orbitReference: state.orbitReference && {...state.orbitReference}, orbitAimOffset: state.orbitAimOffset?.slice() || null,
+    orbitAnchorDirection: state.orbitAnchorDirection?.slice() || null, orbitAnchorHeadDelta: state.orbitAnchorHeadDelta?.slice() || null,
   };
   return navigation;
 }
@@ -3188,26 +3810,39 @@ export function setGodotHybridNavigationState(value = {}) {
     state.headBaseline = view.headBaseline && [view.headBaseline.x, view.headBaseline.y, view.headBaseline.z].every(Number.isFinite)
       ? { ...view.headBaseline } : null;
     state.lastHeadActive = Boolean(view.lastHeadActive);
+    state.lastHeadDelta = vector(view.lastHeadDelta, 3) ? view.lastHeadDelta.slice() : [0, 0, 0];
+    const ref = view.orbitReference;
+    state.orbitReference = ref && [ref.distance, ref.height, ref.pitch].every(Number.isFinite) && ref.distance > 0 ? {...ref} : null;
+    state.orbitAimOffset = vector(view.orbitAimOffset, 3) ? view.orbitAimOffset.slice() : null;
+    state.orbitAnchorDirection = vector(view.orbitAnchorDirection, 3) ? view.orbitAnchorDirection.slice() : null;
+    state.orbitAnchorHeadDelta = vector(view.orbitAnchorHeadDelta, 3) ? view.orbitAnchorHeadDelta.slice() : null;
   }
   return true;
 }
 
 export function focusGodotHybridRendererAt(clientX, clientY) {
-  if (!state.canvas || !state.viewProjection || state.cameras.length === 0) return false;
+  if (!state.canvas || !state.viewProjection) return false;
   const rect = state.canvas.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return false;
-  const targetX = ((clientX - rect.left) / rect.width) * 2 - 1;
+  const targetX = (((clientX - rect.left) / rect.width) * 2 - 1) * (state.settings.view_mirror_left_right ? -1 : 1);
   const targetY = 1 - ((clientY - rect.top) / rect.height) * 2;
-  let bestPoint = null;
+  const table = modeledWorkspace(state.settings);
+  const ray = state.currentViewer ? screenRay(clientX-rect.left,clientY-rect.top,{
+    width:rect.width,height:rect.height,viewer:state.currentViewer,mirrored:state.settings.view_mirror_left_right===true,
+    fov:Number(state.settings.fov || state.baseViewer?.fov || 60),
+  }) : null;
+  const tableHit = raycastModeledWorkspace(ray,table);
+  const blocker = raycastModeledWorkspaceOccluder(ray,table);
+  const armHit = raycastRobotOverlay(ray,blocker?blocker.distance+.001:Infinity);
+  const sceneHit = armHit&&(!tableHit||armHit.distance<tableHit.distance)?armHit:tableHit;
+  let bestPoint = sceneHit?.point || null;
+  const visibleDistance = Math.min(sceneHit?.distance??Infinity,blocker?.distance??Infinity);
   let bestScore = 0.03 * 0.03;
   for (const camera of state.cameras) {
     const intrinsics = camera.metadata.intrinsics;
     const stride = Math.max(1, Math.floor(Math.max(camera.width, camera.height) / 180));
     const combined = multiplyMatrix(state.viewProjection, camera.modelMatrix);
-    for (let y = 0; y < camera.height; y += stride) {
-      for (let x = 0; x < camera.width; x += stride) {
-        const depthMm = camera.depth[y * camera.width + x];
-        if (!depthMm) continue;
+    for (const [x,y,depthMm] of cameraDepthSamples(camera,stride)) {
         const z = depthMm * 0.001;
         const local = [
           (x - intrinsics[2]) * z / intrinsics[0],
@@ -3220,15 +3855,20 @@ export function focusGodotHybridRendererAt(clientX, clientY) {
         const ndcY = clip[1] / clip[3];
         const score = (ndcX - targetX) ** 2 + (ndcY - targetY) ** 2;
         if (score < bestScore) {
+          const world = transformPoint(camera.modelMatrix, local);
+          if (modeledWorkspaceOutside(world, table)) continue;
+          // A visible measured object above the table can still be selected;
+          // samples hidden behind the modeled geometry must not steal its hit.
+          if (ray && world.reduce((sum,v,i)=>sum+(v-ray.origin[i])*ray.direction[i],0)>visibleDistance+.001) continue;
           bestScore = score;
-          bestPoint = transformPoint(camera.modelMatrix, local);
+          bestPoint = world;
         }
-      }
     }
   }
   if (!bestPoint) return false;
   // Only move the target. The orbit inputs remain unchanged, so the complete
   // camera rig translates without changing its viewing angle.
+  state.orbitReference = null; state.orbitAimOffset = null;
   state.focusWorld = bestPoint;
   state.focusPicked = true;
   state.manualPan = [0, 0, 0];
@@ -3237,7 +3877,7 @@ export function focusGodotHybridRendererAt(clientX, clientY) {
 }
 
 export function getGodotHybridRendererStatus() {
-  if (state.rawRgbViewer) return { ...state.stats, ...state.rawRgbViewer.status() };
+  if (state.rawRgbViewer) return { ...state.stats, ...state.rawRgbViewer.status(), pointPreview: null };
   const captureAgeMs = state.stats.captureUnixMs > 0
     ? Math.max(0, Date.now() - state.stats.captureUnixMs)
     : -1;
@@ -3245,7 +3885,11 @@ export function getGodotHybridRendererStatus() {
     ? Math.max(0, performance.now() - state.lastPacketMs)
     : -1;
   const stalled = state.stats.connected === true && packetAgeMs > 1500;
-  return { ...state.stats, captureAgeMs, packetAgeMs, stalled, queueDepth: state.pendingFrameQueue.length, decodeBusy: state.decoding };
+  const expected = state.stats.robotModelsExpected || 0, loaded = state.stats.robotModelsLoaded || 0;
+  const robotModelWarning = state.settings.robot_overlay_enabled && loaded < expected
+    ? `Arm overlay ${loaded}/${expected} links${state.stats.robotModelsPending?.length ? ' loading' : ' loaded'}${state.stats.robotLoadError ? `: ${state.stats.robotLoadError}` : ''}` : '';
+  const pointCounts=Object.fromEntries(state.cameras.map(c=>[String(c.metadata.id),c.metadata.mesh_preview?Number(c.metadata.preview_source_points||0):Number.isFinite(c.validPoints)?c.validPoints:(c.depth?.reduce((n,z)=>n+(z>0),0)||0)]));
+  return { ...state.stats, pointCounts, pointCountTotal:Object.values(pointCounts).reduce((a,b)=>a+b,0), robotModelWarning, captureAgeMs, packetAgeMs, stalled, queueDepth: state.pendingFrameQueue.length, decodeBusy: state.decoding };
 }
 
 window.startGodotHybridRenderer = startGodotHybridRenderer;
@@ -3253,7 +3897,65 @@ window.setGodotHybridRgbCamera = setGodotHybridRgbCamera;
 window.stopGodotHybridRenderer = stopGodotHybridRenderer;
 window.setGodotHybridViewSettings = setGodotHybridViewSettings;
 window.recenterGodotHybridRenderer = recenterGodotHybridRenderer;
+window.frameGodotHeadTrackingView = frameGodotHeadTrackingView;
 window.getGodotHybridNavigationState = getGodotHybridNavigationState;
 window.setGodotHybridNavigationState = setGodotHybridNavigationState;
 window.focusGodotHybridRendererAt = focusGodotHybridRendererAt;
 window.getGodotHybridRendererStatus = getGodotHybridRendererStatus;
+// Compact passive timing snapshot, carried by existing keyboard diagnostics.
+window.getGodotHybridTimingTrace = () => {
+  if (!state.running) return [];
+  const now = Date.now();
+  const times = state.cameras.map(c => Number(c.metadata.geometry_capture_unix_ms || 0)).filter(t => t > 0);
+  return [{label: 'display.pipeline', ms: 0, ageMs: 0, stack: JSON.stringify({
+    cameraAgeMinMs: times.length ? now - Math.max(...times) : null,
+    cameraAgeMaxMs: times.length ? now - Math.min(...times) : null,
+    packetAgeMs: state.lastPacketMs > 0 ? performance.now() - state.lastPacketMs : null,
+    cameraSpreadMs: times.length ? Math.max(...times) - Math.min(...times) : null,
+    animationMode: state.robotJointAnimation.status.mode,
+    animationErrorMs: state.robotJointAnimation.status.errorMs ?? null,
+  })}];
+};
+window.updateGodotRobotOverlay = acceptRobotOverlayState;
+window.setGodotRobotPreviewActive = enabled=>state.robotPosePreview.setManual(enabled);
+window.previewGodotRobotBase = pose=>{state.robotPosePreview.setBaseTarget(pose,state.robotRenderer.baseLink);state.robotTransforms=state.robotPosePreview.sample(performance.now());};
+window.alignGodotModeledWorkspace = alignGodotModeledWorkspace;
+window.editGodotWorkspace = (target) => {
+  if(!state.baseViewer||!state.canvas||target!=='table')return false;
+  if(state.workspaceEditor?.geometry?.planar&&state.workspaceEditor.active)return false;
+  state.workspaceEditor ||= new WorkspaceEditor({getSettings:()=>state.settings,
+    getCoverage:()=>({cameras:state.cameras,table:modeledWorkspace(state.settings)}),
+    onChange:(settings,phase)=>{
+      setGodotHybridViewSettings(settings);
+      window.dispatchEvent(new CustomEvent('workspace-edit-change',{detail:{settings,phase}}));
+    },onFinish:(_commit,target)=>window.dispatchEvent(new CustomEvent('workspace-edit-finish',{detail:{target}})),
+    onWheel:event=>state.pointerNavigation?.wheel(event),
+    onFrame:(box)=>{
+      state.focusWorld=box.center.slice();state.focusPicked=true;state.manualPan=[0,0,0];
+      const fov=Number(state.settings.fov||55)*Math.PI/180;
+      const aspect=Math.min(1,state.canvas.clientWidth/Math.max(1,state.canvas.clientHeight));
+      const radius=Math.hypot(...box.half)/Math.sin(Math.atan(Math.tan(fov/2)*aspect))*1.12;
+      const height=Number(state.settings.focus_vertical_offset||0);
+      state.manualDolly=Math.sqrt(Math.max(.01,radius*radius-height*height))-Number(state.settings.orbit_distance||.65);
+    }});
+  state.workspaceEditor.begin(target);return true;
+};
+
+// Robot modules supply the pose and transaction; the shared viewer supplies
+// only the same scene-space handles used by the workspace editor.
+window.editGodotPlanarPose = (options) => {
+  if(!state.baseViewer||!state.canvas||state.settings.display_mode==='rgb_camera'||state.workspaceEditor?.active)return null;
+  state.workspaceEditor?.dispose();
+  const geometry={planar:true,verticalTranslation:options.verticalTranslation===true,title:options.title,saveLabel:options.saveLabel,
+    getBox:()=>{const pose=options.getPose();return orientedBox(pose.origin,[.12,.012,.12],[0,pose.yaw,0]);},
+    toSettings:box=>({origin:box.center.slice(),yaw:box.rotation[1]}),
+    readout:options.readout,onReset:options.onReset,
+  };
+  const editor=new WorkspaceEditor({getSettings:()=>({}),geometry,
+    onChange:options.onChange,onRequestFinish:options.onRequestFinish,
+    onFinish:commit=>{state.workspaceEditor=null;editor.dispose();options.onFinish?.(commit);},
+    onWheel:event=>state.pointerNavigation?.wheel(event),
+    onFrame:box=>{state.focusWorld=box.center.slice();state.focusPicked=true;state.manualPan=[0,0,0];},
+  });
+  state.workspaceEditor=editor;editor.begin('pose');return editor;
+};

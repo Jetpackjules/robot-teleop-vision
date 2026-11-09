@@ -43,6 +43,9 @@ const WRIST_CAPTURE_PATH := "user://so101_wrist_roll_capture.json"
 const WRIST_RESULT_PATH := "user://so101_wrist_roll_fit.json"
 const SAVED_REGISTRATION_PATH := "user://so101_robot_registration.json"
 const BASE_AXIS_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_base_axis.py"
+const REGISTRATION_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_registration.py"
+const REGISTRATION_CAPTURE_PATH := "user://so101_whole_arm_capture.json"
+const REGISTRATION_RESULT_PATH := "user://so101_whole_arm_fit.json"
 const STAGED_JOINT_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_staged_joints.py"
 const CLAW_VISUAL_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_claw_visual.py"
 const CLAW_RGB_TIP_SOLVER_PATH := "res://robot_modules/so101/tools/solve_so101_claw_rgb_tips.py"
@@ -158,6 +161,8 @@ var _started_msec := 0
 var _started_unix_ms := 0.0
 var _next_sample_msec := 0
 var _last_status_send_msec := 0
+var _last_overlay_publish_msec := 0
+const OVERLAY_PUBLISH_INTERVAL_MSEC := 33
 var _solve_thread := Thread.new()
 var _checked_solver_python: String = ""
 var _status_udp := PacketPeerUDP.new()
@@ -184,6 +189,7 @@ var _editor_status_until_msec := 0
 var _baseline_capsules := PackedVector4Array()
 var _baseline_joint_frames: Array = []
 var _capture_mode := "base"
+var _registration_token := ""
 var _last_solution: Dictionary = {}
 var _automation_active := false
 var _automation_stage := ""
@@ -268,6 +274,8 @@ func _exit_tree() -> void:
 
 
 func _process(_delta: float) -> void:
+	# Measured link poses are animation data, independent of calibration status.
+	_publish_robot_overlay_pose()
 	if _editor_sweep_due_msec > 0 and Time.get_ticks_msec() >= _editor_sweep_due_msec:
 		_update_editor_sweep_preflight()
 	if _state == "capturing":
@@ -429,7 +437,7 @@ func start_arm_position_calibration(
 ) -> void:
 	if _state in ["capturing", "solving"]:
 		return
-	_capture_mode = capture_mode if capture_mode in ["base", "joints", "axis", "wrist", "claw"] else "base"
+	_capture_mode = capture_mode if capture_mode in ["base", "joints", "axis", "wrist", "claw", "registration"] else "base"
 	var auto_move := force_editor_auto_move or (Engine.is_editor_hint() and editor_auto_move_follower)
 	var overlay := get_node_or_null(OVERLAY_PATH)
 	if overlay == null or not overlay.has_method("get_pose_capsules_local"):
@@ -456,6 +464,7 @@ func start_arm_position_calibration(
 				and registration_source != "staged_attachment_safe_joint_refinement"
 				and registration_source != "full_automated_motion_axis_calibration"
 				and registration_source != "partial_automated_motion_axis_calibration"
+				and registration_source != "fixed_kinematics_whole_arm_registration"
 				and base_registration_source != "settled_shoulder_pan_revolute_axis"
 			):
 				_fail(
@@ -530,7 +539,7 @@ func start_arm_position_calibration(
 				if _capture_mode == "claw"
 				else (
 					"Capturing settled clouds for the shoulder-pan base-axis sweep."
-					if _capture_mode == "axis"
+					if _capture_mode in ["axis", "registration"]
 					else "Capturing a depth baseline before the bounded automatic base-registration sweep."
 				)
 			),
@@ -547,6 +556,23 @@ func start_joint_alignment_calibration(force_editor_auto_move: bool = false) -> 
 
 func start_base_axis_capture(force_editor_auto_move: bool = false) -> void:
 	start_arm_position_calibration(force_editor_auto_move, "axis")
+
+
+## Locate the already-configured arm as one rigid object. The measured sweep
+## provides viewpoints; no joint sign, zero, linkage or claw fit is performed.
+func start_arm_registration(force_editor_auto_move: bool = false) -> void:
+	if _state in ["capturing", "solving"] or _automation_active:
+		return
+	var overlay := get_node_or_null(OVERLAY_PATH)
+	if overlay == null or not overlay.has_method("get_alignment_token"):
+		_fail("The robot model cannot provide fixed-kinematics alignment data.")
+		return
+	var manual: Dictionary = overlay.call("get_manual_claw_calibration_state")
+	if bool(manual.get("enabled", false)) or bool(manual.get("base_adjustment", {}).get("enabled", false)) or absf(float(overlay.get("wrist_roll_alignment_preview_degrees"))) > 0.001:
+		_fail("Save or cancel the manual preview before aligning the arm.")
+		return
+	_registration_token = str(overlay.call("get_alignment_token"))
+	start_arm_position_calibration(force_editor_auto_move, "registration")
 
 
 func start_claw_visual_calibration(force_editor_auto_move: bool = false) -> void:
@@ -702,7 +728,7 @@ func _sweep_command_type() -> String:
 		return "arm_wrist_calibration_sweep"
 	if _capture_mode == "joints":
 		return "arm_joint_calibration_sweep"
-	if _capture_mode == "axis":
+	if _capture_mode in ["axis", "registration"]:
 		return "arm_base_axis_sweep"
 	return "arm_calibration_sweep"
 
@@ -1063,9 +1089,11 @@ func _update_capture() -> void:
 	if now >= _next_sample_msec and (not _editor_sweep_requested or _editor_sweep_acknowledged):
 		_next_sample_msec = now + int(sample_interval_seconds * 1000.0)
 		_capture_frame()
+		if _state != "capturing":
+			return
 	var excitation := _pose_excitation()
 	var axis_ready := (
-		_capture_mode == "axis"
+		_capture_mode in ["axis", "registration"]
 		and _frames.size() >= 5
 		and float(excitation.get("pan_range", 0.0)) >= MINIMUM_BASE_PAN_COVERAGE_DEGREES
 	)
@@ -1258,7 +1286,7 @@ func _update_capture() -> void:
 	elif elapsed >= maximum_capture_seconds:
 		_fail(
 			"Not enough distinct shoulder-pan poses were observed."
-			if _capture_mode == "axis"
+			if _capture_mode in ["axis", "registration"]
 			else "Lowered D455 wrist-roll coverage was incomplete (%s)." % [
 				str(wrist_coverage.get("summary", "unknown"))
 			]
@@ -1275,6 +1303,9 @@ func _capture_frame() -> void:
 	var overlay := get_node_or_null(OVERLAY_PATH)
 	if overlay == null:
 		_capture_diagnostic = "Robot overlay is unavailable."
+		return
+	if _capture_mode == "registration" and str(overlay.call("get_alignment_token")) != _registration_token:
+		_fail("Robot placement or joint settings changed during alignment; previous calibration retained.")
 		return
 	var telemetry: Dictionary = overlay.call("get_latest_status")
 	if _auto_move_this_capture and not bool(telemetry.get("calibration_pose_settled", false)):
@@ -1388,7 +1419,7 @@ func _capture_frame() -> void:
 	for renderer in renderers:
 		var camera_points := _limit_points(_moving_points_for_renderer(renderer), maximum_points_per_frame)
 		points_by_camera.append({"name": _depth_renderer_name(renderer), "points": camera_points})
-		if _capture_mode in ["axis", "joints", "wrist", "claw"]:
+		if _capture_mode in ["axis", "joints", "wrist", "claw", "registration"]:
 			full_points_by_camera.append({
 				"name": _depth_renderer_name(renderer),
 				"points": _limit_points(
@@ -1426,7 +1457,10 @@ func _capture_frame() -> void:
 		return
 	var mesh_points := {}
 	if overlay.has_method("get_pose_mesh_points_local"):
-		mesh_points = overlay.call("get_pose_mesh_points_local", pose, 140)
+		mesh_points = overlay.call("get_pose_mesh_points_local", pose, 220 if _capture_mode == "registration" else 140)
+	var link_visual_transforms := {}
+	if _capture_mode == "registration" and overlay.has_method("get_pose_link_visual_transforms_local"):
+		link_visual_transforms = overlay.call("get_pose_link_visual_transforms_local", pose)
 	var calibration_joint_index := int(telemetry.get("calibration_joint_index", -1))
 	var claw_metadata: Dictionary = {}
 	if overlay.has_method("get_pose_claw_calibration_metadata_local"):
@@ -1458,6 +1492,7 @@ func _capture_frame() -> void:
 		"observed_robust_center": _points_coordinate_median(points),
 		"model_centroid": _capsules_centroid(capsules),
 		"mesh_points": mesh_points,
+		"link_visual_transforms": link_visual_transforms,
 		"model_transform": overlay.global_transform,
 		"claw_metadata": claw_metadata,
 		"depth_snapshots": depth_snapshots,
@@ -2292,7 +2327,7 @@ func _full_points_for_renderer(renderer: Node3D) -> PackedVector3Array:
 
 func _renderer_capture_limits(
 	renderer: Node,
-	ignore_workspace_crop: bool = false,
+	ignore_image_crop: bool = false,
 ) -> Dictionary:
 	var crop := Vector4(0.0, 0.0, 1.0, 1.0)
 	var maximum_depth := 8.0
@@ -2302,8 +2337,8 @@ func _renderer_capture_limits(
 			if bool(current.get("max_depth_enabled")):
 				maximum_depth = clampf(float(current.get("max_depth_m")), 0.25, 8.0)
 			if (
-				not ignore_workspace_crop
-				and bool(current.get("workspace_crop_enabled"))
+				not ignore_image_crop
+				and bool(current.get("image_crop_enabled"))
 			):
 				crop = Vector4(
 					clampf(float(current.get("crop_left_percent")) * 0.01, 0.0, 0.45),
@@ -2424,6 +2459,7 @@ func _start_solver() -> void:
 	# unsolvable.
 	var preserve_all_axis_frames := (
 		_capture_mode in ["wrist", "claw"]
+		or _capture_mode == "registration"
 		or (diagnostic_only and _capture_mode in ["axis", "joints"])
 	)
 	var solve_frames := (
@@ -2431,6 +2467,17 @@ func _start_solver() -> void:
 		if preserve_all_axis_frames
 		else _select_solve_frames(_frames, MAX_SOLVE_FRAMES)
 	)
+	if _capture_mode == "registration":
+		if not _save_debug_capture(solve_frames, REGISTRATION_CAPTURE_PATH):
+			_fail("Could not save fresh alignment evidence; previous calibration retained.")
+			return
+		_state = "solving"
+		_set_status("solving", "Aligning the configured whole arm across measured poses and camera views; joint settings stay fixed.", 1.0, 0.0)
+		var registration_arguments := PackedStringArray([ProjectSettings.globalize_path(REGISTRATION_CAPTURE_PATH), "--output", ProjectSettings.globalize_path(REGISTRATION_RESULT_PATH)])
+		var registration_error := _solve_thread.start(_execute_external_json_solver.bind(ProjectSettings.globalize_path(REGISTRATION_SOLVER_PATH), registration_arguments, ProjectSettings.globalize_path(REGISTRATION_RESULT_PATH), "whole_arm_registration"))
+		if registration_error != OK:
+			_fail("Could not start whole-arm alignment; previous calibration retained.")
+		return
 	if not debug_capture_path.is_empty():
 		_save_debug_capture(solve_frames)
 	if _capture_mode in ["axis", "joints"] and diagnostic_only:
@@ -2514,7 +2561,8 @@ func _start_solver() -> void:
 		_fail("Could not start the arm-position solver thread.")
 
 
-func _save_debug_capture(frames: Array) -> void:
+func _save_debug_capture(frames: Array, destination: String = "") -> bool:
+	var capture_path := debug_capture_path if destination.is_empty() else destination
 	var serialized_frames: Array = []
 	for frame in frames:
 		var serialized_points: Array = []
@@ -2551,6 +2599,9 @@ func _save_debug_capture(frames: Array) -> void:
 				"axis": _vector3_to_array(joint_frame.get("axis", Vector3.UP)),
 			})
 		var serialized_mesh_points := {}
+		var serialized_link_visual_transforms := {}
+		for link_name in frame.get("link_visual_transforms", {}):
+			serialized_link_visual_transforms[str(link_name)] = _transform_to_external_dictionary(frame["link_visual_transforms"][link_name])
 		for link_name in frame.get("mesh_points", {}):
 			var link_points: Array = []
 			for point in frame["mesh_points"][link_name]:
@@ -2595,6 +2646,16 @@ func _save_debug_capture(frames: Array) -> void:
 		var serialized_claw_tips: Array = []
 		for tip in frame.get("claw_tip_positions_local", PackedVector3Array()):
 			serialized_claw_tips.append(_vector3_to_array(tip))
+		var serialized_depth_snapshots: Array = []
+		if _capture_mode == "registration":
+			for snapshot in frame.get("depth_snapshots", []):
+				var intrinsics: Vector4 = snapshot.intrinsics
+				serialized_depth_snapshots.append({
+					"name": snapshot.name, "depths": Array(snapshot.depths), "valid": Array(snapshot.valid),
+					"cols": snapshot.cols, "rows": snapshot.rows, "sample_step": snapshot.sample_step,
+					"grid_stride": snapshot.grid_stride, "intrinsics": [intrinsics.x, intrinsics.y, intrinsics.z, intrinsics.w],
+					"camera_inverse": _transform_to_external_dictionary(snapshot.camera_inverse),
+				})
 		serialized_frames.append({
 			"pose": frame["pose"],
 			"points": serialized_points,
@@ -2603,11 +2664,14 @@ func _save_debug_capture(frames: Array) -> void:
 			"camera_points": serialized_cameras,
 			"full_camera_points": serialized_full_cameras,
 			"mesh_points": serialized_mesh_points,
+			"mesh_sampling": "link_visual_only_v1",
+			"link_visual_transforms": serialized_link_visual_transforms,
 			"model_transform": _transform_to_external_dictionary(
 				frame.get("model_transform", Transform3D.IDENTITY)
 			),
 			"claw_metadata": serialized_claw_metadata,
 			"rgb_snapshots": serialized_rgb_snapshots,
+			"depth_snapshots": serialized_depth_snapshots,
 			"claw_tip_positions_local": serialized_claw_tips,
 			"observed_centroid": _vector3_to_array(frame["observed_centroid"]),
 			"model_centroid": _vector3_to_array(frame["model_centroid"]),
@@ -2616,18 +2680,24 @@ func _save_debug_capture(frames: Array) -> void:
 			"joint_frames": serialized_joint_frames,
 			"baseline_joint_frames": serialized_baseline_joint_frames,
 		})
-	var file := FileAccess.open(debug_capture_path, FileAccess.WRITE)
+	var file := FileAccess.open(capture_path, FileAccess.WRITE)
 	if file == null:
-		push_warning("Could not save SO-101 motion capture: %s" % debug_capture_path)
-		return
+		push_warning("Could not save SO-101 motion capture: %s" % capture_path)
+		return false
 	file.store_string(JSON.stringify({
 		"type": "so101_motion_capture",
 		"calibration_mode": _capture_mode,
 		"capture_started_unix_ms": _started_unix_ms,
+		"kinematics_token": _registration_token if _capture_mode == "registration" else "",
 		"reference_camera": _reference_camera_for_frames(frames),
 		"frames": serialized_frames,
 	}))
-	print("SO101_MOTION_CAPTURE_SAVED ", ProjectSettings.globalize_path(debug_capture_path))
+	var write_error := file.get_error()
+	file.close()
+	if write_error != OK:
+		return false
+	print("SO101_MOTION_CAPTURE_SAVED ", ProjectSettings.globalize_path(capture_path))
+	return true
 
 
 func _reference_camera_for_frames(frames: Array) -> String:
@@ -5239,6 +5309,22 @@ func _finish_solution(result: Dictionary) -> void:
 	if not bool(result.get("ok", false)):
 		_fail(str(result.get("status", "Arm motion fit was not confident enough.")), float(result.get("confidence", 0.0)))
 		return
+	if _capture_mode == "registration":
+		var alignment_overlay := get_node_or_null(OVERLAY_PATH)
+		var alignment_preview = result.get("preview_transform")
+		if alignment_overlay == null or not alignment_preview is Dictionary or str(result.get("kinematics_token", "")) != _registration_token or absf(float(result.get("capture_started_unix_ms", 0.0)) - _started_unix_ms) > 1.0:
+			_fail("Whole-arm alignment returned an invalid or superseded model; previous calibration retained.")
+			return
+		var accepted := bool(alignment_overlay.call("apply_rigid_registration", _transform_from_external_preview(alignment_preview), float(result.get("confidence", 0.0)), _started_unix_ms, result.get("metrics", {}), _registration_token))
+		if not accepted:
+			var reason := "The model changed or the file could not be written."
+			if alignment_overlay.has_method("get_last_rigid_registration_error"):
+				reason = str(alignment_overlay.call("get_last_rigid_registration_error"))
+			_fail("Alignment was not saved: %s Previous calibration retained." % reason)
+			return
+		_state = "complete"
+		_set_status("complete", "Whole arm aligned and saved. Joint settings and claw geometry preserved.", 1.0, float(result.get("confidence", 0.0)))
+		return
 	if _capture_mode == "wrist":
 		var wrist_metrics = result.get("wrist_roll_zero", null)
 		var fitted_directions = result.get("fitted_directions", null)
@@ -5417,11 +5503,42 @@ func _fail(message: String, confidence: float = 0.0) -> void:
 
 func _emit_status(force: bool) -> void:
 	var now := Time.get_ticks_msec()
-	var overlay := get_node_or_null(OVERLAY_PATH)
-	var manual_active := overlay != null and bool(overlay.get("manual_claw_calibration_enabled"))
-	if Engine.is_editor_hint() and not manual_active and _state not in ["capturing", "solving"] and now > _editor_status_until_msec:
-		return
+	var gateway := get_parent().get_node_or_null("RemoteControlGateway")
+	if gateway != null and gateway.has_method("owns_robot_control") and not bool(gateway.call("owns_robot_control")): return
 	if not force and now - _last_status_send_msec < 200:
 		return
 	_last_status_send_msec = now
-	_status_udp.put_packet(JSON.stringify(get_calibration_status()).to_utf8_buffer())
+	var status := get_calibration_status()
+	_status_udp.put_packet(JSON.stringify(status).to_utf8_buffer())
+	var mirror := {"status": status, "updated": Time.get_unix_time_from_system(), "project_root": ProjectSettings.globalize_path("res://")}
+	_write_runtime_mirror("user://so101_runtime_calibration_status.json", mirror)
+
+
+func _publish_robot_overlay_pose() -> void:
+	var now := Time.get_ticks_msec()
+	if now - _last_overlay_publish_msec < OVERLAY_PUBLISH_INTERVAL_MSEC:
+		return
+	var gateway := get_parent().get_node_or_null("RemoteControlGateway")
+	if gateway != null and gateway.has_method("owns_robot_control") and not bool(gateway.call("owns_robot_control")):
+		return
+	_last_overlay_publish_msec = now
+	# Capture has no robot telemetry connection. Publish the existing measured
+	# world-space poses at animation cadence, without changing calibration.
+	var robot := {"available": false}
+	var overlay := get_node_or_null(OVERLAY_PATH)
+	if overlay != null and overlay.has_method("get_hybrid_render_state"):
+		robot = overlay.call("get_hybrid_render_state")
+	_write_runtime_mirror("user://robot_overlay_render_state.json", {
+		"updated": Time.get_unix_time_from_system(),
+		"project_root": ProjectSettings.globalize_path("res://"),
+		"robot": robot,
+	})
+
+
+func _write_runtime_mirror(file_path: String, payload: Dictionary) -> void:
+	var path := ProjectSettings.globalize_path(file_path)
+	var file := FileAccess.open(path + ".tmp", FileAccess.WRITE)
+	if file != null:
+		file.store_string(JSON.stringify(payload))
+		file.close()
+		DirAccess.rename_absolute(path + ".tmp", path)

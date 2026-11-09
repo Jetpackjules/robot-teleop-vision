@@ -95,5 +95,9 @@ def test_public_image_levels_exclude_private_or_nonfinite_values(monkeypatch):
     handler.server=SimpleNamespace(stream_host='127.0.0.1',capture_port=8781)
     results=[];handler.serve_json=results.append
     handler.serve_camera_list()
-    assert results == [{'cameras': [{'id':'1234','name':'D435 A','model':'D435',
-        'image_levels':{'mean_luma':25.0,'dark_percent':40.0,'auto_white_balance':1,'white_balance_state':'ready'}}]}]
+    assert results == [{
+        'cameras': [{'id':'1234','name':'D435 A','model':'D435',
+            'image_levels':{'mean_luma':25.0,'dark_percent':40.0,'auto_white_balance':1,'white_balance_state':'ready'}}],
+        'independent_native_preview': True,
+        'independent_native_preview_lanes': 2,
+    }]

@@ -9,8 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 class ProbeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path == "/":
-            content = (ROOT / "tests/browser_rgbd_stream_probe.html").read_bytes()
+        if path in ("/", "/rgb-visibility"):
+            page = "browser_rgb_visibility_probe.html" if path == "/rgb-visibility" else "browser_rgbd_stream_probe.html"
+            content = (ROOT / "tests" / page).read_bytes()
             mime = "text/html; charset=utf-8"
         elif path == "/renderer.js":
             content = (ROOT / "web/hybrid_rgbd_renderer.js").read_bytes() + (

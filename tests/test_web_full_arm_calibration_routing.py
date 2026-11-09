@@ -1,18 +1,20 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_web_full_arm_button_uses_progressive_automated_pipeline() -> None:
+def test_main_alignment_preserves_joint_mapping_and_refinement_is_separate() -> None:
     source = (
         ROOT / "robot_modules" / "so101" / "godot" / "so101_module.gd"
     ).read_text(encoding="utf-8")
     marker = "func start_full_calibration(from_editor: bool = false) -> void:"
     block = source.split(marker, 1)[1].split("func refine_calibration", 1)[0]
 
-    assert '"start_automated_arm_calibration"' in block
+    assert '"start_arm_registration"' in block
+    assert '"start_automated_arm_calibration"' not in block
     assert '"start_arm_position_calibration"' not in block
+    refinement = source.split("func refine_calibration", 1)[1].split("\nfunc ", 1)[0]
+    assert '"start_joint_alignment_calibration"' in refinement
 
 
 def test_distal_disagreement_triggers_alternate_d455_recapture() -> None:

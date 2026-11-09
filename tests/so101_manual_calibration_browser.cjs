@@ -17,10 +17,10 @@ import {createRobotModule} from '/module.js';
 const module = createRobotModule({});
 await module.mount(Object.fromEntries(['settings','setup','view','status','floating'].map(id=>[id+'Root',document.getElementById(id)])));
 window.calibration = {state:'failed',manual_calibration:{supported:true,registered:true,enabled:false,reply:{}}};
-window.getSo101ArmStatus = () => ({state:'hold',serverConnected:true,followerConnected:true,status:{robot_calibration:window.calibration}});
+window.getSo101ArmStatus = () => ({state:'hold',serverConnected:true,followerConnected:true,status:{measured_feedback_fresh:true,robot_calibration:window.calibration}});
 window.sent=[]; window.failSave=false; window.failImport=false; window.connected=true;
 window.fixture={type:'so101_visual_calibration',schema_version:1,robot:'so101',registration:{joint_angle_offsets_degrees:[40,80,0,-70,0,0]}};
-module.bind({sendViewSettings(payload){
+function sendFixtureSettings(payload=module.extendViewSettings({})){
   if(!window.connected)return false;
   window.sent.push(payload);
   const a=payload.robot_visual_calibration_action;
@@ -34,7 +34,9 @@ module.bind({sendViewSettings(payload){
     module.renderStatus();
   },50);
   return true;
-},updateStatus(){module.renderStatus();}});
+}
+window.so101ArmController={requestViewSettings(payload){return sendFixtureSettings(payload)?Promise.resolve(true):Promise.reject(new Error('Robot server disconnected'));}};
+module.bind({sendViewSettings:sendFixtureSettings,updateStatus(){module.renderStatus();}});
 setInterval(()=>module.renderStatus(),100);
 module.renderStatus(); window.testModule=module;
 </script>`;
@@ -42,7 +44,9 @@ const server = http.createServer((req, res) => {
   if(req.url==='/module.js') {
     res.setHeader('Content-Type','text/javascript');
     res.end(readFileSync(resolve(root,'robot_modules/so101/web/module.js')));
-  } else if(req.url.endsWith('.js')) {
+  } else if(req.url.split('?')[0]==='/safeguard_toasts.js') {
+    res.setHeader('Content-Type','text/javascript');res.end(readFileSync(resolve(root,'robot_modules/so101/web/safeguard_toasts.js')));
+  } else if(req.url.split('?')[0].endsWith('.js')) {
     // Disable WebSerial and auxiliary camera startup in this test-only page.
     res.setHeader('Content-Type','text/javascript'); res.end('export {};');
   } else {res.setHeader('Content-Type','text/html');res.end(html);}
@@ -54,11 +58,27 @@ const server = http.createServer((req, res) => {
     const page=await browser.newPage({viewport:{width:1280,height:900}});
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}`);
-    await page.waitForFunction(()=>window.testModule);
+    await page.waitForFunction(()=>window.testModule,{},{timeout:10000}).catch(e=>{console.error(errors);throw e;});
+    await page.locator('#so101-overlay-scope').selectOption('claw');
+    assert(await page.locator('#so101-overlay-occlusion-enabled').isDisabled(),'claw-only keeps the scanned arm visible');
+    assert.equal(await page.evaluate(()=>testModule.extendViewSettings({}).robot_overlay_scope),'claw');
+    await page.evaluate(()=>testModule.restoreViewSettings({robot_overlay_scope:'full'}));
+    assert.equal(await page.locator('#so101-overlay-scope').inputValue(),'full');
+    assert(await page.locator('#so101-overlay-occlusion-enabled').isEnabled(),'full-arm masking remains accessible');
     await page.getByText('Recovery tools',{exact:true}).click();
     await page.getByRole('button',{name:'Manual Joint Tuning',exact:true}).click();
     const panel=page.locator('#so101-manual-workspace');
     await panel.waitFor({state:'visible'});
+    await page.getByRole('spinbutton',{name:'Claw X translation in millimetres',exact:true}).fill('2.5');
+    await page.waitForFunction(()=>window.sent.some(p=>Math.abs(p.manual_tool_x-.0025)<1e-9));
+    assert.equal(await page.locator('[data-manual-key="manual_shoulder_lift_trim_degrees"]').inputValue(),'0');
+    const continuous=await page.evaluate(async()=>{
+      const input=document.querySelector('[data-manual-key="manual_elbow_flex_trim_degrees"]');
+      const before=sent.filter(p=>p.robot_visual_calibration_action?.operation==='preview').length;
+      for(let i=0;i<24;i++){input.value=String(i);input.dispatchEvent(new Event('input',{bubbles:true}));await new Promise(r=>setTimeout(r,16));}
+      return sent.filter(p=>p.robot_visual_calibration_action?.operation==='preview').length-before;
+    });
+    assert(continuous>=5,'continuous slider input must send previews before the drag stops');
     const shoulder=page.getByRole('spinbutton',{name:'Shoulder lift (J2) offset in degrees',exact:true});
     await shoulder.fill('12.5');
     await page.waitForFunction(()=>window.sent.some(p=>p.manual_shoulder_lift_trim_degrees===12.5));
@@ -113,7 +133,7 @@ const server = http.createServer((req, res) => {
     await panel.waitFor({state:'hidden'});
     await page.evaluate(()=>window.connected=false);
     await page.getByRole('button',{name:'Manual Joint Tuning',exact:true}).click();
-    await page.waitForFunction(()=>document.getElementById('so101-calibration-file-status').textContent.includes('Connect the controller'));
+    await page.waitForFunction(()=>document.getElementById('so101-calibration-file-status').textContent.includes('Robot server disconnected'));
     assert.equal(await panel.isVisible(),false,'offline begin cannot show working preview');
     assert.deepEqual(errors,[]);
     console.log('Manual calibration browser checks passed: preview, numeric/slider sync, save failure/success, JSON download/upload, base opt-in, reset/cancel, disconnected state, desktop/mobile layout.');

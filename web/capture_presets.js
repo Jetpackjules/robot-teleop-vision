@@ -3,6 +3,83 @@ export function nativeStreamPreset(preset) {
   return {width:3840,fps,contextFps:fps,detailFps:fps,quality:95,splatFill:1.32,exactDepth:true};
 }
 
+// Workspace filtering must also work when head tracking and WebRTC are off.
+// Only viewing bounds enter this reconnect queue, never robot/calibration actions.
+const WORKSPACE_KEYS = ['point_cleanup_enabled', 'point_cleanup_support', 'point_cleanup_radius_mm',
+  'workspace_stream_crop_enabled', 'display_mode', 'point_preview_enabled', 'point_preview_budget',
+  'point_preview_visible_only', 'modeled_workspace_enabled',
+  'modeled_workspace_center', 'modeled_workspace_width', 'modeled_workspace_depth',
+  'modeled_workspace_height', 'modeled_workspace_heading', 'modeled_workspace_clearance'];
+
+export class WorkspaceStreamControl {
+  constructor(url) { this.url = url; this.socket = null; this.latest = null; this.retry = null; this.connectTimer = null; this.closed = false; }
+
+  update(settings) {
+    if (this.closed || !/^[A-Za-z0-9_-]{1,64}$/.test(settings.rgbd_client_id || '')) return false;
+    // A point-detail update may arrive before the bounds socket opens. Keep
+    // earlier bounds in that same client's queued packet instead of replacing
+    // them with a partial update. Only whitelisted viewing keys enter it.
+    const previous=this.latest?JSON.parse(this.latest):null;
+    const payload = {...(previous?.rgbd_client_id===settings.rgbd_client_id?previous:{}),
+      type: 'view_settings', rgbd_client_id: settings.rgbd_client_id};
+    for (const key of WORKSPACE_KEYS) if (Object.hasOwn(settings, key)) payload[key] = settings[key];
+    const latest = JSON.stringify(payload);
+    if (latest === this.latest) return true;
+    this.latest = latest;
+    this.flush();
+    return true;
+  }
+
+  schedule(delay = 500) {
+    if (this.closed || this.retry !== null) return;
+    this.retry = setTimeout(() => { this.retry = null; this.flush(); }, delay);
+  }
+
+  flush() {
+    if (this.closed || !this.latest) return;
+    if (this.socket?.readyState === 1) {
+      if (this.socket.bufferedAmount > 16384) { this.schedule(); return; }
+      try { this.socket.send(this.latest); }
+      catch (_) { this.socket.close(); this.schedule(); }
+      // The authenticated control socket has a two-second idle timeout.
+      // Refresh viewing bounds only; never replay head poses or robot actions.
+      this.schedule(1000);
+      return;
+    }
+    if (this.socket?.readyState === 0) return;
+    clearTimeout(this.retry); this.retry = null;
+    const socket = new WebSocket(this.url);
+    this.socket = socket;
+    socket.onopen = () => {
+      if (this.socket !== socket) return;
+      clearTimeout(this.connectTimer); this.connectTimer = null;
+      this.flush();
+    };
+    const lost = () => {
+      if (this.socket !== socket) return;
+      clearTimeout(this.connectTimer); this.connectTimer = null;
+      clearTimeout(this.retry); this.retry = null;
+      this.socket = null;
+      socket.onopen = socket.onclose = socket.onerror = null;
+      socket.close();
+      this.schedule();
+    };
+    socket.onclose = socket.onerror = lost;
+    this.connectTimer = setTimeout(lost,5000);
+  }
+
+  close() {
+    this.closed = true;
+    clearTimeout(this.retry); this.retry = null;
+    clearTimeout(this.connectTimer); this.connectTimer = null;
+    if (this.socket) {
+      this.socket.onopen = this.socket.onclose = this.socket.onerror = null;
+      this.socket.close(); this.socket = null;
+    }
+    this.latest = null;
+  }
+}
+
 // Reuse the authenticated view-settings protocol without depending on head
 // tracking being enabled. Only one bounded mode request can be pending.
 export class CapturePresetControl {

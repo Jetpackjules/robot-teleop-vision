@@ -3,6 +3,8 @@
 #include "rgbd_pixel_pack.h"
 
 #include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
@@ -763,10 +765,11 @@ void RealSenseDirectFrameSource::reset_post_processing_filters() {
 }
 
 void RealSenseDirectFrameSource::clear_raw_color() {
+    rgb_frame_freshness.reset();
     std::lock_guard<std::mutex> lock(raw_color_mutex);
     raw_color_image.unref();
     raw_color_size = Vector2i();
-    raw_color_pixels.clear();
+    raw_color_pixels.reset();
     raw_color_bpp = raw_color_pitch = 0;
 }
 
@@ -815,8 +818,10 @@ void RealSenseDirectFrameSource::restore_color_auto_white_balance() {
 }
 
 void RealSenseDirectFrameSource::update_color_state(const rs2::video_frame &p_frame) {
-    if (!p_frame || p_frame.get_bytes_per_pixel() != 3) return;
+    if (!p_frame) return;
     const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    rgb_frame_freshness.observe(p_frame.get_frame_number(), p_frame.get_timestamp(), now);
+    if (p_frame.get_bytes_per_pixel() != 3) return;
     if (color_first_frame_sec == 0.0) color_first_frame_sec = now;
     // D435 can retain bad automatic WB gains when switching sensor modes.
     // A bare auto off/on does not clear them. Seed the existing temperature
@@ -893,10 +898,37 @@ void RealSenseDirectFrameSource::apply_sensor_options() {
     }
     try {
         rs2::device device = pipeline_profile.get_device();
+        // Explicit per-camera choices survive SDK mode changes and reconnects.
+        // Cameras without a saved choice keep their existing manual/auto mode.
+        Variant white_balance_mode;
+        const String policy_path = "user://camera_color_policy.json";
+        if (FileAccess::file_exists(policy_path)) {
+            Variant decoded = JSON::parse_string(FileAccess::get_file_as_string(policy_path));
+            if (decoded.get_type() == Variant::DICTIONARY) {
+                const Dictionary policy = decoded;
+                if (int(policy.get("schema_version", 0)) == 1) {
+                    const Variant camera_map = policy.get("cameras", Dictionary());
+                    if (camera_map.get_type() == Variant::DICTIONARY) {
+                        const Dictionary cameras = camera_map;
+                        const Variant entry = cameras.get(device_serial, Dictionary());
+                        if (entry.get_type() == Variant::DICTIONARY) {
+                            const Dictionary settings = entry;
+                            white_balance_mode = settings.get("auto_white_balance", Variant());
+                        }
+                    }
+                }
+            }
+        }
         bool emitter_supported = false;
         bool laser_supported = false;
         float applied_laser = 0.0f;
         for (rs2::sensor sensor : device.query_sensors()) {
+            if (white_balance_mode.get_type() == Variant::BOOL && sensor.supports(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE)) {
+                const float desired = bool(white_balance_mode) ? 1.0f : 0.0f;
+                if (sensor.get_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE) != desired) {
+                    sensor.set_option(RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE, desired);
+                }
+            }
             if (sensor.supports(RS2_OPTION_EMITTER_ENABLED)) {
                 sensor.set_option(RS2_OPTION_EMITTER_ENABLED, emitter_enabled ? 1.0f : 0.0f);
                 emitter_supported = true;
@@ -1442,7 +1474,7 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
         const bool full_crop = crop_rect == Vector4(0.0f,0.0f,1.0f,1.0f);
 
         if (color_output_enabled) {
-            // Copy native BGR bytes into reusable storage, then release the
+            // Copy native BGR bytes into owned storage, then release the
             // SDK buffer promptly. Holding a UVC frame here can starve its
             // small capture pool. RGBA conversion is needed only by RGB view
             // or calibration, never by a mesh-only viewer.
@@ -1451,8 +1483,11 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
                 raw_color_size = Vector2i(raw_color_frame.get_width(),raw_color_frame.get_height());
                 raw_color_bpp = raw_color_frame.get_bytes_per_pixel();
                 raw_color_pitch = raw_color_frame.get_stride_in_bytes();
-                raw_color_pixels.resize(raw_color_frame.get_data_size());
-                std::memcpy(raw_color_pixels.data(),raw_color_frame.get_data(),raw_color_pixels.size());
+                if (!raw_color_pixels || !raw_color_pixels.unique()) {
+                    raw_color_pixels = std::make_shared<std::vector<uint8_t>>();
+                }
+                raw_color_pixels->resize(raw_color_frame.get_data_size());
+                std::memcpy(raw_color_pixels->data(),raw_color_frame.get_data(),raw_color_pixels->size());
                 raw_color_image.unref();
             }
             raw_color_intrinsics = Vector4(raw_rs_intrinsics.fx, raw_rs_intrinsics.fy, raw_rs_intrinsics.ppx, raw_rs_intrinsics.ppy);
@@ -1898,6 +1933,10 @@ bool RealSenseDirectFrameSource::poll_fast_foundation() {
         rs2::video_frame left_frame = frames.get_infrared_frame(1);
         rs2::video_frame right_frame = frames.get_infrared_frame(2);
         rs2::video_frame color_frame = frames.get_color_frame();
+        if (color_output_enabled && color_frame) {
+            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            rgb_frame_freshness.observe(color_frame.get_frame_number(), color_frame.get_timestamp(), now);
+        }
         if (!left_frame || !right_frame) {
             return false;
         }
@@ -2164,7 +2203,16 @@ uint64_t RealSenseDirectFrameSource::get_frame_id() const { return frame_id; }
 double RealSenseDirectFrameSource::get_capture_fps() const { return capture_fps; }
 Vector4 RealSenseDirectFrameSource::get_capture_stage_ms() const { return capture_stage_ms; }
 Vector4 RealSenseDirectFrameSource::get_sensor_rates() const { return sensor_rates; }
-Dictionary RealSenseDirectFrameSource::get_color_diagnostics() const { return color_diagnostics; }
+Dictionary RealSenseDirectFrameSource::get_color_diagnostics() const {
+    Dictionary result = color_diagnostics.duplicate();
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    result["rgb_enabled"] = color_output_enabled;
+    result["rgb_frame_number"] = int64_t(rgb_frame_freshness.number);
+    result["rgb_sensor_timestamp_ms"] = rgb_frame_freshness.sensor_timestamp_ms;
+    result["rgb_frame_age_ms"] = rgb_frame_freshness.age_ms(now);
+    result["rgb_frame_advances"] = int64_t(rgb_frame_freshness.advances);
+    return result;
+}
 int RealSenseDirectFrameSource::get_width() const { return width; }
 int RealSenseDirectFrameSource::get_height() const { return height; }
 int RealSenseDirectFrameSource::get_source_width() const { return source_width; }
@@ -2174,10 +2222,10 @@ Ref<Image> RealSenseDirectFrameSource::get_depth_image() const { return depth_im
 Ref<Image> RealSenseDirectFrameSource::get_color_image() const { return color_image; }
 Ref<Image> RealSenseDirectFrameSource::get_raw_color_image() const {
     std::lock_guard<std::mutex> lock(raw_color_mutex);
-    if (raw_color_image.is_null() && !raw_color_pixels.empty()) {
+    if (raw_color_image.is_null() && raw_color_pixels && !raw_color_pixels->empty()) {
         const int w=raw_color_size.x,h=raw_color_size.y;
         const int bpp=raw_color_bpp,pitch=raw_color_pitch;
-        const uint8_t *source=raw_color_pixels.data();
+        const uint8_t *source=raw_color_pixels->data();
         PackedByteArray rgba;rgba.resize(w*h*4);
         uint8_t *out=rgba.ptrw();
         for (int y=0;y<h;++y) {
@@ -2194,6 +2242,10 @@ Ref<Image> RealSenseDirectFrameSource::get_raw_color_image() const {
         raw_color_image=Image::create_from_data(w,h,false,Image::FORMAT_RGBA8,rgba);
     }
     return raw_color_image;
+}
+NativeColorSnapshot RealSenseDirectFrameSource::get_raw_color_snapshot() const {
+    std::lock_guard<std::mutex> lock(raw_color_mutex);
+    return {raw_color_pixels, raw_color_size.x, raw_color_size.y, raw_color_bpp, raw_color_pitch};
 }
 Vector2i RealSenseDirectFrameSource::get_raw_color_size() const {
     std::lock_guard<std::mutex> lock(raw_color_mutex);

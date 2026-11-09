@@ -111,3 +111,40 @@ def test_structured_visual_actions_are_bounded_and_module_owned():
         with pytest.raises(ValueError):
             operator.structured_view_settings({key: invalid})
     assert load_robot_operator("disabled").structured_view_settings({key: action}) == {}
+
+
+def test_manual_base_placement_save_cancel_and_reload(tmp_path):
+    godot = find_godot(os.environ.get("ROBOT_TELEOP_TEST_GODOT", ""))
+    if godot is None:
+        pytest.skip("Set ROBOT_TELEOP_TEST_GODOT for executable GDScript tests")
+    scripts = tmp_path / "robot_modules/so101/godot"
+    scripts.mkdir(parents=True)
+    for source in (ROOT / "robot_modules/so101/godot").glob("*.gd"):
+        shutil.copy2(source, scripts / source.name)
+    shutil.copy2(ROOT / "tests/godot/so101_base_placement_probe.gd", tmp_path / "probe.gd")
+    (tmp_path / "project.godot").write_text('config_version=5\n[application]\nconfig/name="Base Placement Test"\n', encoding="utf-8")
+    result = subprocess.run(
+        [str(godot_console_executable(godot)), "--headless", "--path", str(tmp_path), "--script", "res://probe.gd", "--quit-after", "60"],
+        env={**os.environ, "APPDATA": str(tmp_path / "appdata"), "XDG_DATA_HOME": str(tmp_path / "data")},
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0 and "SCRIPT ERROR" not in output, output
+    assert "SO101_BASE_PROBE checks=" in output and "failures=0" in output, output
+
+
+def test_structured_base_adjustments_are_scoped_and_bounded():
+    operator = load_robot_operator("so101")
+    key = "robot_visual_calibration_action"
+    action = {"operation": "base_save", "request_id": "save", "session_id": "edit", "offset_x": 0.02, "offset_z": -0.04, "yaw_degrees": 15}
+    assert operator.structured_view_settings({key: action})[key] == {**action, "offset_y": 0.0}
+    assert operator.structured_view_settings({key: {**action, "offset_y": 0.03}})[key]["offset_y"] == 0.03
+    for value in (None, True, float("nan"), float("inf"), 2.001):
+        with pytest.raises(ValueError):
+            operator.structured_view_settings({key: {**action, "offset_x": value}})
+        with pytest.raises(ValueError):
+            operator.structured_view_settings({key: {**action, "offset_y": value}})
+    with pytest.raises(ValueError):
+        operator.structured_view_settings({key: {**action, "session_id": ""}})
+    with pytest.raises(ValueError):
+        operator.structured_view_settings({key: {**action, "yaw_degrees": 181}})

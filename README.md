@@ -1,8 +1,12 @@
-# Robot Teleop Vision
+# FreeLook
 
-A reusable RealSense-to-browser teleoperation stack with a Godot 3D runtime. The shared application discovers one or more RealSense cameras, streams an optimized RGB-D point cloud, arbitrates a single operator, and loads an optional robot module. Robot geometry, controls, hardware transport, calibration, and extra camera views live outside the core.
+FreeLook lets a robot operator change their 3D viewpoint by moving their head in front of a webcam. The browser renders a live scene from RealSense RGB-D cameras and lets the operator switch between fixed RGB, mouse-controlled 3D, and head-tracked 3D views. The CoRL demo uses an SO-101 leader and follower.
+
+The Godot host handles capture and calibration. The browser estimates head position from face landmarks and maps it to the virtual camera. The [local alignment demo](docs/ALIGNMENT_DEMO.md) lets you try viewpoint control with a virtual SO-101 and no robot hardware.
 
 The browser is the single operator interface. Its compact **Controller** panel contains the selected view and daily robot controls; **Advanced Setup** contains installation defaults, calibration, diagnostics, and tuning. The Godot dock is intentionally limited to setup, diagnostics, launch, and safe shutdown. A clean clone starts in vision-only mode, with physical motion disabled.
+
+For host-side RGB/state/action demonstrations, see [Demonstration recording](docs/RECORDING.md). The browser controls episode capture; the robot host saves the data and the official LeRobot writer exports it for training.
 
 ## First run
 
@@ -11,7 +15,6 @@ Requirements:
 - Python 3.10–3.12
 - Godot 4.6 or newer
 - Intel RealSense SDK/runtime for local RealSense capture
-- `cloudflared` for the default free temporary public URL (or explicitly select local-only mode)
 
 ```bash
 git clone https://github.com/Jetpackjules/robot-teleop-vision.git
@@ -24,8 +27,9 @@ robot-teleop init --example vision_only
 godot --headless --editor --path . --quit
 robot-teleop doctor
 robot-teleop modules
-robot-teleop start
 ```
+
+For a laptop-only run, add `host = "127.0.0.1"` and set `public_mode = "off"` under `[stack]` in `config/local.toml`, then run `robot-teleop start`. The default example leaves robot motion disabled.
 
 The one-time headless editor import registers the bundled RealSense GDExtension in a clean source checkout. On Windows, [`scripts/windows_setup.ps1`](scripts/windows_setup.ps1) performs this import and verifies the extension index automatically. `RealSenseSharedMemoryPointCloud native extension is unavailable` is not a benign USB or camera warning: the point-cloud view cannot operate until setup and Doctor both pass.
 
@@ -43,7 +47,7 @@ For an unattended Linux host reached over SSH, follow [Headless Linux and remote
 
 ## Robot modules
 
-The base application contains no SO-101 commands, meshes, calibration solvers, or UI. Each integration is a self-contained directory:
+Robot modules define their command spaces, geometry, controls, and calibration. The SO-101 module also powers the built-in study and demo workflow. Each module uses this directory layout.
 
 ```text
 robot_modules/<robot>/

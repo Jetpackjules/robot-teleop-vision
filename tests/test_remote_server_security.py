@@ -19,6 +19,19 @@ from lan_remote_view_server import LanRemoteHandler, LanRemoteServer, ensure_cer
 from robot_teleop.operator import load_robot_operator
 
 
+def test_guarded_restart_retains_only_a_valid_controller_session_cookie(monkeypatch):
+    from lan_remote_view_server import controller_session_cookie
+    monkeypatch.delenv("GODOT_REMOTE_SESSION_COOKIE", raising=False)
+    value = controller_session_cookie()
+    assert len(value) == 43 and controller_session_cookie() != value
+    monkeypatch.setenv("GODOT_REMOTE_SESSION_COOKIE", value)
+    assert controller_session_cookie() == value
+    for invalid in ("short", "x" * 44, "!" * 43):
+        monkeypatch.setenv("GODOT_REMOTE_SESSION_COOKIE", invalid)
+        with pytest.raises(ValueError):
+            controller_session_cookie()
+
+
 def bare_handler(headers=None, server=None):
     handler = object.__new__(LanRemoteHandler)
     handler.headers = headers or {}
@@ -65,7 +78,7 @@ def test_desktop_video_is_behind_existing_login_gate():
     assert redirected == [True]
 
 
-@pytest.mark.parametrize("path", ["/camera-rgb?w=3840&q=95", "/camera-rgb-stream?w=3840&q=95", "/api/v1/cameras"])
+@pytest.mark.parametrize("path", ["/camera-rgb?w=3840&q=95", "/camera-rgb-stream?w=3840&q=95", "/camera-preview-stream?w=3840", "/api/v1/cameras"])
 def test_original_camera_rgb_is_behind_existing_login_gate(path):
     handler = bare_handler()
     handler.path = path
@@ -94,7 +107,7 @@ def test_camera_list_uses_only_trusted_capture_endpoint(monkeypatch):
     handler.serve_json=results.append
     handler.serve_camera_list()
     assert calls==[('GET','/cameras')]
-    assert results==[{'cameras':[{'id':'1234','name':'D435 A','model':'D435'}]}]
+    assert results==[{'cameras':[{'id':'1234','name':'D435 A','model':'D435'}], 'independent_native_preview': True, 'independent_native_preview_lanes': 2}]
 
 
 def test_original_rgb_proxy_uses_fixed_endpoint_and_bounded_options(monkeypatch):
@@ -179,12 +192,43 @@ def test_original_rgb_websocket_relays_latest_frame_from_capture_port(monkeypatc
     assert stopped.is_set() and handler.server.rgbd_http_slots.acquire(blocking=False)
 
 
-def test_camera_locations_setting_is_typed_and_can_be_saved():
+@pytest.mark.parametrize("setting", ["camera_locations_enabled", "depth_only_enabled", "modeled_workspace_enabled"])
+def test_camera_display_setting_is_typed_and_can_be_saved(setting):
     handler = bare_handler()
-    assert handler.validate_view_settings({"camera_locations_enabled": True})["camera_locations_enabled"] is True
-    assert handler.validate_site_settings({"camera_locations_enabled": False})["camera_locations_enabled"] is False
+    assert handler.validate_view_settings({setting: True})[setting] is True
+    assert handler.validate_site_settings({setting: False})[setting] is False
     with pytest.raises(ValueError, match="boolean"):
-        handler.validate_view_settings({"camera_locations_enabled": "yes"})
+        handler.validate_view_settings({setting: "yes"})
+
+
+def test_retired_workspace_settings_are_ignored():
+    handler = bare_handler()
+    legacy = {"workspace_crop_enabled": True, "workspace_crop_min": [-.1, -.2, -1],
+              "workspace_crop_max": [.1, .2, 0], "workspace_crop_rotation": [0, 19, 0],
+              "workspace_crop_show_box": True, "workspace_surface_enabled": True,
+              "workspace_boundary_enabled": True, "workspace_surface_offset": .1,
+              "workspace_surface_size": 2, "workspace_surface_opacity": .5}
+    assert set(handler.validate_view_settings(legacy)) == {"type"}
+    assert set(handler.validate_site_settings(legacy)) == {"settings_version"}
+
+
+def test_modeled_workspace_settings_are_typed_and_persisted():
+    handler = bare_handler()
+    settings = {"modeled_workspace_enabled": True, "modeled_workspace_center": [.12, -.3, -1.2],
+                "modeled_workspace_width": .9, "modeled_workspace_depth": .6,
+                "modeled_workspace_heading": 35, "modeled_workspace_clearance": .006,
+                "modeled_workspace_height": .8, "modeled_workspace_light_angle": -40}
+    saved = handler.validate_site_settings(settings)
+    assert all(saved[k] == v for k, v in settings.items())
+    for bad in ([0, 1], [False, 0, 1], ["0", 0, 1], [float("nan"), 0, 1], [21, 0, 1]):
+        with pytest.raises(ValueError, match="three finite"):
+            handler.validate_view_settings({"modeled_workspace_center": bad})
+    for key in ("width", "depth", "heading", "clearance", "height", "light_angle"):
+        with pytest.raises(ValueError, match="finite"):
+            handler.validate_view_settings({f"modeled_workspace_{key}": float("inf")})
+    bounded = handler.validate_view_settings({"modeled_workspace_clearance": -1, "modeled_workspace_width": 100})
+    assert bounded["modeled_workspace_clearance"] == 0
+    assert bounded["modeled_workspace_width"] == 4
 
 
 def test_websocket_origin_must_match_request_host():
@@ -286,10 +330,13 @@ def test_arm_transport_jitter_drops_one_packet_without_forcing_hold(tmp_path):
         assert accepted
         assert age_ms == 0
 
-        delayed = {"sent_unix_ms": 9_600}
+        within_timeout = {"sent_unix_ms": 9_450}
+        assert server.normalize_browser_robot_timing(within_timeout, 10_000) == (True, 450)
+
+        delayed = {"sent_unix_ms": 9_300}
         accepted, age_ms = server.normalize_browser_robot_timing(delayed, 10_000)
         assert not accepted
-        assert age_ms == 300
+        assert age_ms == 600
         assert server.robot_stale_command_drop_count == 1
 
         fresh = {"sent_unix_ms": 9_966}
@@ -319,7 +366,7 @@ def test_arm_transport_rebases_after_stable_latency_path_shift(tmp_path):
             {"sent_unix_ms": 9_900},
             10_000,
         )[0]
-        offsets = (405, 399, 408, 402)
+        offsets = (705, 699, 708, 702)
         decisions = []
         for index, offset in enumerate(offsets):
             bridge_ms = 10_100 + index * 33
@@ -328,7 +375,7 @@ def test_arm_transport_rebases_after_stable_latency_path_shift(tmp_path):
                 server.normalize_browser_robot_timing(message, bridge_ms)[0]
             )
         assert decisions == [False, False, False, True]
-        assert server.robot_browser_clock_offset_ms == pytest.approx(404, abs=1)
+        assert server.robot_browser_clock_offset_ms == pytest.approx(704, abs=1)
     finally:
         server.server_close()
 
@@ -539,11 +586,6 @@ def test_remote_view_settings_are_typed_and_clamped():
             "arm_d455_visual_correction_enabled": False,
             "white_background_enabled": True,
             "head_tracking_enabled": False,
-            "workspace_surface_enabled": True,
-            "workspace_boundary_enabled": False,
-            "workspace_surface_offset": -99,
-            "workspace_surface_size": 99,
-            "workspace_surface_opacity": 0.001,
             "display_mode": "rgb_camera",
             "stream_preset": "latency",
             "calibrate_robot_position": True,
@@ -555,23 +597,24 @@ def test_remote_view_settings_are_typed_and_clamped():
     assert result["orbit_distance"] == 0.1
     assert result["dolly_enabled"] is False
     assert result["robot_overlay_style"] == "alignment"
+    assert handler.validate_view_settings({"robot_overlay_style": "realistic"})["robot_overlay_style"] == "realistic"
+    assert handler.validate_view_settings({"robot_overlay_scope": "claw"})["robot_overlay_scope"] == "claw"
+    assert handler.validate_site_settings({"settings_version": 1, "robot_overlay_scope": "claw"})["robot_overlay_scope"] == "claw"
+    for scope in [True, "fingers", [], None]:
+        with pytest.raises(ValueError, match="full or claw"):
+            handler.validate_view_settings({"robot_overlay_scope": scope})
     assert result["calibrate_robot_position"] is True
     assert result["arm_measured_feedback_enabled"] is True
     assert result["arm_target_ghost_enabled"] is False
     assert result["white_background_enabled"] is True
     assert result["head_tracking_enabled"] is False
-    assert result["workspace_surface_enabled"] is True
-    assert result["workspace_boundary_enabled"] is False
-    assert result["workspace_surface_offset"] == -1.0
-    assert result["workspace_surface_size"] == 10.0
-    assert result["workspace_surface_opacity"] == 0.01
     assert result["display_mode"] == "rgb_camera"
     assert result["stream_preset"] == "latency"
     assert result["focus_pick_uv"] == [1.0, 0.0]
     assert result["focus_pick_sent_unix_ms"] == 123456
     with pytest.raises(ValueError, match="boolean"):
         handler.validate_view_settings({"inspect_enabled": "yes"})
-    with pytest.raises(ValueError, match="alignment or solid"):
+    with pytest.raises(ValueError, match="alignment, solid or realistic"):
         handler.validate_view_settings({"robot_overlay_style": "wireframe"})
     with pytest.raises(ValueError, match="quality or latency"):
         handler.validate_view_settings({"stream_preset": "automatic"})
@@ -588,7 +631,6 @@ def test_site_settings_persist_only_stable_setup_and_clamp_navigation():
             "display_mode": "point_cloud",
             "stream_preset": "quality",
             "head_tracking_enabled": False,
-            "workspace_surface_offset": 0.025,
             "arm_idle_return_enabled": True,
             "calibrate_robot_position": True,
             "manual_claw_calibration_save": True,
@@ -605,7 +647,6 @@ def test_site_settings_persist_only_stable_setup_and_clamp_navigation():
     assert result["display_mode"] == "point_cloud"
     assert result["stream_preset"] == "quality"
     assert result["head_tracking_enabled"] is False
-    assert result["workspace_surface_offset"] == 0.025
     assert result["arm_idle_return_enabled"] is True
     assert "calibrate_robot_position" not in result
     assert "manual_claw_calibration_save" not in result
@@ -663,7 +704,8 @@ def test_controller_keeps_daily_controls_separate_from_advanced_setup():
     assert 'id="advanced-setup"' in page
     assert 'id="robot-settings-root"' in page
     assert 'id="robot-setup-root"' in page
-    assert page.index('id="robot-settings-root"') < page.index('id="advanced-setup"')
+    assert page.index('id="trial-hud"') < page.index('id="advanced-setup"')
+    assert page.index('id="robot-settings-root"') > page.index('id="settings-controls"')
     assert page.index('id="robot-setup-root"') > page.index('id="advanced-setup"')
     assert 'id="stream-preset"' in page
     assert '>Reconnect Video</button>' in page
@@ -672,3 +714,49 @@ def test_controller_keeps_daily_controls_separate_from_advanced_setup():
     assert 'id="inspect-enabled"' not in page
     assert 'id="head-tracking-options"' in page
     assert 'id="persistent-temporal-reference-enabled"' not in page
+
+
+def test_independent_camera_channels_keep_newest_page_ownership(tmp_path):
+    server = LanRemoteServer(("127.0.0.1", 0), LanRemoteHandler, tmp_path,
+        "127.0.0.1", 4247, "127.0.0.1", 8780, "window",
+        robot_module="disabled", robot_status_port=0, robot_calibration_status_port=0)
+    class Handler:
+        preempted = False
+        def preempt_rgbd_websocket(self): self.preempted = True
+    cameras = [Handler() for _ in range(3)]
+    replacement, newer = Handler(), Handler()
+    try:
+        for index, handler in enumerate(cameras):
+            assert server.claim_browser_client("page", f"rgbd-camera-{index}", handler)
+        assert not any(handler.preempted for handler in cameras)
+        assert server.claim_browser_client("page", "rgbd-camera-1", replacement)
+        assert cameras[1].preempted and not cameras[0].preempted and not cameras[2].preempted
+        assert server.claim_browser_client("newer", "rgbd-camera-0", newer)
+        assert cameras[0].preempted and cameras[2].preempted and replacement.preempted
+        assert not server.claim_browser_client("page", "rgbd-camera-2", Handler())
+        server.release_browser_client("page", "rgbd-camera-0", cameras[0])
+        assert server.browser_client_handlers["rgbd-camera-0"] is newer
+    finally:
+        server.server_close()
+
+
+def test_independent_native_camera_rejects_unknown_identity(monkeypatch):
+    import lan_remote_view_server as remote
+    monkeypatch.setattr(remote, "discover_native_cameras", lambda *_: [
+        ({"id": "known", "priority": 0, "_viewer": []}, None)])
+    handler = bare_handler(server=SimpleNamespace(stream_host="127.0.0.1", capture_port=8781))
+    errors = []
+    handler.send_error = lambda code, message: errors.append(code)
+    assert handler.handle_native_points_websocket({"client": ["preview"], "camera_id": ["unknown"]})
+    assert errors == [400]
+
+
+def test_native_frame_lane_parameters_are_bounded(monkeypatch):
+    import lan_remote_view_server as remote
+    monkeypatch.setattr(remote, "discover_native_cameras", lambda *_: [
+        ({"id": "known", "priority": 0, "_viewer": []}, None)])
+    for count,lane in [("4","0"),("2","2"),("1","1"),("2","-1"),("bad","0")]:
+        handler=bare_handler(server=SimpleNamespace(stream_host="127.0.0.1",capture_port=8781))
+        errors=[];handler.send_error=lambda code,message:errors.append(code)
+        assert handler.handle_native_points_websocket({"client":["preview"],"camera_id":["known"],"camera_lanes":[count],"camera_lane":[lane]})
+        assert errors==[400]

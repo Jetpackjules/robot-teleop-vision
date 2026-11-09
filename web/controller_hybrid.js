@@ -1,13 +1,117 @@
+    import { PreviewCameraControls } from "./preview_camera_controls.js";
+    import { CameraAlignmentControl } from "./camera_alignment.js";
     import { robotModuleReady } from "./robot_module_host.js";
-    import { CapturePresetControl, nativeStreamPreset } from "./capture_presets.js?v=20261020_native_modes";
+    import { EpisodeRecordingControl } from './episode_recording.js?v=20261106_recording_reconnect';
+    import { TrialController } from './trial_controller.js?v=20261107_demo_overlay_axes';
+    import { CapturePresetControl, WorkspaceStreamControl, nativeStreamPreset } from "./capture_presets.js?v=20261109_workspace_point_budget";
+    import { MODELED_WORKSPACE_DEFAULTS, modeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
+    import { renderCropStatistics } from './crop_statistics.js';
+    import { resolvePointDetail } from './point_detail_settings.js';
 
     const robotModule = await robotModuleReady;
+    const cameraAlignmentControl = new CameraAlignmentControl(document.getElementById("camera-alignment-controls"));
+    const fusionStatusTimer=setInterval(()=>{
+      const target=document.getElementById('squares-fusion-status');
+      if(!target)return;
+      const preview=window.getGodotHybridRendererStatus?.()?.pointPreview;
+      const fusion=preview?.fusion;
+      const surface=preview?.surface;
+      const label=fusion?.active?`GPU fusion active · ${fusion.cameras} cameras`:fusion?.message||'Off.';
+      const surfaceLabel = surface?.active ? ' · Surface fill on' : surface?.pending ? ' · Preparing surface fill' : surface?.message ? ' · Surface fill unavailable' : '';
+      target.textContent=label+surfaceLabel;
+    },1000);
+    window.addEventListener('pagehide',()=>clearInterval(fusionStatusTimer));
+    window.addEventListener("pagehide", () => cameraAlignmentControl.close());
+    const recordingRoot = document.getElementById('episode-recording');
+    const episodeRecording = recordingRoot ? new EpisodeRecordingControl(recordingRoot,
+      {client: window.robotTeleopPageId}) : null;
+    window.addEventListener('pagehide', () => episodeRecording?.close());
+    const workspaceStreamControl = new WorkspaceStreamControl(remoteUrl());
+    window.addEventListener('pagehide', () => workspaceStreamControl.close());
     const viewportVideo = document.getElementById("viewport-video");
     const viewportImage = document.getElementById("viewport-image");
     const hybridCanvas = document.getElementById("hybrid-canvas");
     const rgbCameraCanvas = document.getElementById("rgb-camera-canvas");
     const displayModeSelect = document.getElementById("display-mode");
     const streamPresetSelect = document.getElementById("stream-preset");
+    const pointPreviewToggle = document.getElementById('point-preview-enabled');
+    const pointPreviewActive=()=>pointPreviewToggle.value==='-1'||Number(pointPreviewToggle.value)>0;
+    const selectedPointBudget=()=>pointPreviewToggle.value==='-1'?0:Number(pointPreviewToggle.value)===40000?40000:20000;
+    const workspacePointBudget = document.getElementById('workspace-point-budget');
+    const workspacePointBudgetControls = document.getElementById('workspace-point-budget-controls');
+    workspacePointBudget.checked = localStorage.getItem('robotTeleopWorkspacePointBudget') === '1';
+    const squarePointSize=document.getElementById('square-point-size');
+    const squaresFusionEnabled=document.getElementById('squares-fusion-enabled');
+    const repairEdgeColors=document.getElementById('squares-edge-repair-enabled');
+    repairEdgeColors.checked=localStorage.getItem('robotTeleopSquaresEdgeRepair')==='true';
+    repairEdgeColors.addEventListener('change',()=>{
+      localStorage.setItem('robotTeleopSquaresEdgeRepair',String(repairEdgeColors.checked));
+      window.setGodotHybridViewSettings?.({squares_edge_repair_enabled:repairEdgeColors.checked});
+    });
+    const suppressTableFringes=document.getElementById('squares-table-fringes-enabled');
+    suppressTableFringes.checked=localStorage.getItem('robotTeleopSquaresTableFringes')==='true';
+    suppressTableFringes.addEventListener('change',()=>{
+      localStorage.setItem('robotTeleopSquaresTableFringes',String(suppressTableFringes.checked));
+      window.setGodotHybridViewSettings?.({squares_table_fringes_enabled:suppressTableFringes.checked});
+    });
+    const fillSurfaceGaps=document.getElementById('squares-fill-surface-gaps');
+    fillSurfaceGaps.checked=localStorage.getItem('robotTeleopSquaresSurfaceGaps')==='true';
+    fillSurfaceGaps.addEventListener('change',()=>{
+      localStorage.setItem('robotTeleopSquaresSurfaceGaps',String(fillSurfaceGaps.checked));
+      window.setGodotHybridViewSettings?.({squares_fill_surface_gaps:fillSurfaceGaps.checked});
+    });
+    const hideGraySquares=document.getElementById('hide-gray-squares');
+    hideGraySquares.checked=localStorage.getItem('robotTeleopHideGraySquares')==='true';
+    hideGraySquares.addEventListener('change',()=>{
+      localStorage.setItem('robotTeleopHideGraySquares',String(hideGraySquares.checked));
+      window.setGodotHybridViewSettings?.({hide_gray_squares:hideGraySquares.checked});
+    });
+    const cleanupEnabled=document.getElementById('point-cleanup-enabled');
+    const cleanupSupport=document.getElementById('point-cleanup-support');
+    const cleanupRadius=document.getElementById('point-cleanup-radius');
+    const cleanupSettings=()=>({point_cleanup_enabled:cleanupEnabled.checked,point_cleanup_support:Number(cleanupSupport.value),point_cleanup_radius_mm:Number(cleanupRadius.value)});
+    function updateCleanupControls(){
+      cleanupSupport.disabled=cleanupRadius.disabled=!cleanupEnabled.checked;
+      document.getElementById('point-cleanup-support-value').textContent=cleanupSupport.value;
+      document.getElementById('point-cleanup-radius-value').textContent=cleanupRadius.value+' mm';
+    }
+    const blendControls=document.getElementById('blendpcr-controls');
+    const blendDepth=document.getElementById('blend-depth'),blendSupport=document.getElementById('blend-support'),blendEdge=document.getElementById('blend-edge');
+    let storedBlend={};try{storedBlend=JSON.parse(localStorage.getItem('robotTeleopBlendControls')||'{}')||{};}catch{}
+    const clampBlend=(v,min,max,fallback)=>Number.isFinite(Number(v))?Math.max(min,Math.min(max,Number(v))):fallback;
+    blendDepth.value=clampBlend(storedBlend.depth,.5,6,1);
+    blendSupport.value=clampBlend(storedBlend.support,0,4,localStorage.getItem('robotTeleopTriangleFilter')==='relaxed'?1:2);
+    blendEdge.value=clampBlend(storedBlend.edge,1,1000,80);
+    const savedPointDetail=localStorage.getItem('robotTeleopPointDetail');
+    pointPreviewToggle.value=resolvePointDetail({},savedPointDetail);
+    const blendSettings=()=>({blendpcr_depth_tolerance:Number(blendDepth.value),blendpcr_support:Number(blendSupport.value),blendpcr_max_edge:Number(blendEdge.value)/1000});
+    const updateBlendLabels=()=>{
+      document.getElementById('blend-depth-value').textContent=Number(blendDepth.value).toFixed(1)+'\u00d7';
+      document.getElementById('blend-support-value').textContent=blendSupport.value;
+      document.getElementById('blend-edge-value').textContent=blendEdge.value+' mm';
+    };
+    const applyPointOptions=()=>{
+      blendControls.hidden=displayModeSelect.value!=='blendpcr'||pointPreviewActive();
+      document.getElementById('point-cleanup-controls').hidden=!pointPreviewActive() || displayModeSelect.value==='rgb_camera';
+      workspacePointBudgetControls.hidden = !pointPreviewActive() || selectedPointBudget() === 0 || displayModeSelect.value === 'rgb_camera';
+      repairEdgeColors.disabled=suppressTableFringes.disabled=fillSurfaceGaps.disabled=!squaresFusionEnabled.checked;
+      document.getElementById('squares-fusion-controls').hidden=!pointPreviewActive() || displayModeSelect.value==='rgb_camera';
+      updateCleanupControls();
+      document.getElementById('square-point-size-control').hidden=!pointPreviewActive() || displayModeSelect.value==='rgb_camera';
+      document.getElementById('square-point-size-value').textContent=Number(squarePointSize.value).toFixed(2)+'×';
+      updateBlendLabels();
+      workspaceStreamControl.update({
+        ...cleanupSettings(),
+        rgbd_client_id: window.robotTeleopPageId,
+        point_preview_enabled: pointPreviewActive(),
+        point_preview_budget: selectedPointBudget(),
+        point_preview_visible_only: workspacePointBudget.checked,
+        display_mode: displayModeSelect.value,
+      });
+      window.setGodotHybridViewSettings?.({squares_fusion_enabled:squaresFusionEnabled.checked,squares_edge_repair_enabled:repairEdgeColors.checked,squares_table_fringes_enabled:suppressTableFringes.checked,squares_fill_surface_gaps:fillSurfaceGaps.checked,hide_gray_squares:hideGraySquares.checked,square_point_scale:Number(squarePointSize.value),...cleanupSettings(),point_preview_enabled:pointPreviewActive(),mesh_preview_enabled:pointPreviewToggle.value==='-2',point_preview_budget:selectedPointBudget(),...blendSettings()});
+    };
+    squaresFusionEnabled.addEventListener('change',()=>{applyPointOptions();sendViewSettings();});
+    applyPointOptions();
     const rgbCameraControl = document.getElementById("rgb-camera-control");
     const rgbCameraSelect = document.getElementById("rgb-camera-select");
     let selectedRgbCamera = '';
@@ -28,11 +132,118 @@
     const siteSettingsStatus = document.getElementById("site-settings-status");
     const viewControlIds = [
       "orbit-span", "orbit-response", "orbit-distance", "dolly-gain", "inspect-fov",
-      "head-height", "orbit-elevation", "workspace-surface-offset", "workspace-surface-size",
-      "workspace-surface-opacity",
+      "head-height", "orbit-elevation",
     ];
     // v13 adds GPU mesh views while preserving older saved camera views.
-    const viewSettingsVersion = 14;
+    const viewSettingsVersion = 17;
+    const modeledFields = ['width','depth','table-height','heading','clearance','height','light-angle','x','y','z'];
+    let lastValidModeled = {...MODELED_WORKSPACE_DEFAULTS};
+    let modeledWorkspaceConfigured = false;
+
+    let tableDefaultsReady = false;
+    let tableDefaultsTimer = 0;
+    let tableDefaultsSaving = false;
+    let savedTableDefaults = '';
+
+    function tableDefaults(settings) {
+      return Object.fromEntries(Object.keys(MODELED_WORKSPACE_DEFAULTS)
+        .map(key => [key, settings[key] ?? MODELED_WORKSPACE_DEFAULTS[key]]));
+    }
+
+    async function saveTableDefaults() {
+      clearTimeout(tableDefaultsTimer);
+      if (!tableDefaultsReady || tableDefaultsSaving || !modeledWorkspaceConfigured
+        || document.body.classList.contains('workspace-editing')) return;
+      const table = tableDefaults(viewSettingsPayload());
+      const signature = JSON.stringify(table);
+      if (signature === savedTableDefaults) return;
+      tableDefaultsSaving = true;
+      try {
+        const saved = await fetchSiteSettings();
+        const response = await fetch('/api/v1/site-settings', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({...saved, ...table, settings_version: viewSettingsVersion}),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        savedTableDefaults = signature;
+        siteSettingsStatus.textContent = 'Last table settings saved as defaults.';
+      } catch (error) {
+        siteSettingsStatus.textContent = `Table saved in this browser; installation save failed: ${error.message}`;
+      } finally {
+        tableDefaultsSaving = false;
+        if (signature !== JSON.stringify(tableDefaults(viewSettingsPayload()))) {
+          tableDefaultsTimer = setTimeout(saveTableDefaults, 300);
+        }
+      }
+    }
+
+    function modeledViewSettings() {
+      const value = name => document.getElementById(`modeled-workspace-${name}`).valueAsNumber;
+      return {modeled_workspace_enabled: document.getElementById('modeled-workspace-enabled').checked,
+        modeled_workspace_center: ['x','y','z'].map(value),modeled_workspace_width:value('width'),
+        modeled_workspace_depth:value('depth'),modeled_workspace_table_height:value('table-height'),modeled_workspace_heading:value('heading'),
+        modeled_workspace_clearance:value('clearance')*.001,modeled_workspace_height:value('height'),
+        modeled_workspace_light_angle:value('light-angle'),
+        scene_lighting_enabled:document.getElementById('scene-lighting-enabled').checked,
+        scene_shadows_enabled:document.getElementById('scene-shadows-enabled').checked};
+    }
+
+    function restoreModeledSettings(saved = {}) {
+      const candidate = {...MODELED_WORKSPACE_DEFAULTS,...saved};
+      const valid = modeledWorkspace({...candidate,modeled_workspace_enabled:true});
+      const settings = valid ? candidate : {...MODELED_WORKSPACE_DEFAULTS};
+      document.getElementById('modeled-workspace-enabled').checked = valid && saved.modeled_workspace_enabled === true;
+      document.getElementById('scene-lighting-enabled').checked=settings.scene_lighting_enabled!==false;
+      document.getElementById('scene-shadows-enabled').checked=settings.scene_shadows_enabled!==false;
+      for (const name of modeledFields) {
+        const value = ['x','y','z'].includes(name) ? settings.modeled_workspace_center[['x','y','z'].indexOf(name)]
+          : settings[`modeled_workspace_${name.replaceAll('-','_')}`] * (name === 'clearance' ? 1000 : 1);
+        document.getElementById(`modeled-workspace-${name}`).value = String(value);
+      }
+      modeledWorkspaceConfigured = Array.isArray(saved.modeled_workspace_center);
+      lastValidModeled = modeledViewSettings();
+      updateModeledControls();
+    }
+
+    let pendingBoardTableLevel = null;
+    function applyBoardTableLevel(level) {
+      if (!tableDefaultsReady) { pendingBoardTableLevel = level; return; }
+      const current = modeledViewSettings();
+      const center = Array.isArray(level.table_center) ? level.table_center.slice() : current.modeled_workspace_center.slice();
+      if (!Array.isArray(level.table_center)) center[1] = 0;
+      restoreModeledSettings({...current, modeled_workspace_center:center});
+      sendViewSettings();
+    }
+    window.addEventListener('camera-board-world-level', event => applyBoardTableLevel(event.detail));
+
+    function updateModeledControls() {
+      const settings = modeledViewSettings(),valid = modeledWorkspace({...settings,modeled_workspace_enabled:true});
+      document.getElementById('modeled-workspace-options').hidden = !settings.modeled_workspace_enabled;
+      const cutoffLabel=document.getElementById('modeled-workspace-clearance-value');
+      if(cutoffLabel)cutoffLabel.textContent=Math.round(settings.modeled_workspace_clearance*1000)+' mm';
+      for (const name of modeledFields) {
+        const input = document.getElementById(`modeled-workspace-${name}`),n=input.valueAsNumber;
+        input.setCustomValidity(Number.isFinite(n) && n >= Number(input.min) && n <= Number(input.max)
+          ? '' : 'Enter a value within the displayed range.');
+      }
+      document.getElementById('modeled-workspace-status').textContent = !settings.modeled_workspace_enabled ? ''
+        : valid ? 'Artificial table and floor; live objects retain native detail. Server cropping is requested for this view.'
+          : 'Enter valid dimensions; the last valid placement stays active.';
+      return Boolean(valid);
+    }
+
+    function alignModeledTable(source='auto') {
+      const placement = window.alignGodotModeledWorkspace?.({source});
+      if (!placement) {
+        document.getElementById('modeled-workspace-status').textContent = source==='robot'
+          ? 'A calibrated arm base is not available. Use Edit Table in 3D or place the table at the orbit point.'
+          : 'Open a connected 3D view, then double-click the real tabletop.';
+        return false;
+      }
+      restoreModeledSettings({...modeledViewSettings(),...placement});
+      modeledWorkspaceConfigured = true;
+      return true;
+    }
 
     let peer = null;
     let capturePresetControl = null;
@@ -81,10 +292,20 @@
     transportLink.textContent = quickTunnel ? "Reload Point Cloud" : (hybridMode ? "Frame Stream Fallback" : "Hybrid RGB-D View");
 
     function viewSettingsPayload(extra = {}) {
+      const modeled = modeledViewSettings();
+      if (modeledWorkspace({...modeled,modeled_workspace_enabled:true})) lastValidModeled = modeled;
+      else Object.assign(modeled,lastValidModeled,{modeled_workspace_enabled:modeled.modeled_workspace_enabled});
       const span = Number(document.getElementById("orbit-span").value);
       const response = Number(document.getElementById("orbit-response").value);
       const orbitDistance = Number(document.getElementById("orbit-distance").value);
       const payload = {
+        rgbd_client_id:window.robotTeleopPageId,
+        point_preview_enabled:pointPreviewActive(),point_preview_budget:selectedPointBudget(),
+        square_point_scale:Number(squarePointSize.value),
+        point_preview_detail:Number(pointPreviewToggle.value),
+        squares_fusion_enabled:squaresFusionEnabled.checked,
+        ...cleanupSettings(),
+      workspace_stream_crop_enabled:!document.body.classList.contains('workspace-editing'),
         // Mouse navigation and click-to-focus are always available. Head
         // tracking layers onto this orbit rather than selecting another mode.
         inspect_enabled: true,
@@ -98,20 +319,17 @@
         orbit_pitch_offset: Number(document.getElementById("orbit-elevation").value),
         dolly_enabled: document.getElementById("dolly-enabled").checked,
         dolly_gain: Number(document.getElementById("dolly-gain").value),
-        min_distance: 0.2,
+        min_distance: 0.125,
         max_distance: 3.0,
         fov: Number(document.getElementById("inspect-fov").value),
         white_background_enabled: document.getElementById("white-background-enabled").checked,
+        depth_only_enabled: document.getElementById("depth-only-enabled").checked,
         // Retire the old live-view default, including previously saved true values.
         persistent_temporal_reference_enabled: false,
         full_rgb_frame_updates_enabled: true,
         camera_locations_enabled: document.getElementById("camera-locations-enabled").checked,
         head_tracking_enabled: document.getElementById("head-tracking-enabled").checked,
-        workspace_surface_enabled: document.getElementById("workspace-surface-enabled").checked,
-        workspace_boundary_enabled: document.getElementById("workspace-boundary-enabled").checked,
-        workspace_surface_offset: Number(document.getElementById("workspace-surface-offset").value),
-        workspace_surface_size: Number(document.getElementById("workspace-surface-size").value),
-        workspace_surface_opacity: Number(document.getElementById("workspace-surface-opacity").value),
+        ...modeled,
         display_mode: displayModeSelect.value,
         stream_preset: streamPresetSelect.value,
         settings_version: viewSettingsVersion,
@@ -123,14 +341,11 @@
     function updateViewLabels() {
       document.getElementById("orbit-span-value").textContent = `${document.getElementById("orbit-span").value} deg`;
       document.getElementById("orbit-response-value").textContent = document.getElementById("orbit-response").value;
-      document.getElementById("orbit-distance-value").textContent = `${Number(document.getElementById("orbit-distance").value).toFixed(2)} m`;
+      document.getElementById("orbit-distance-value").textContent = `${Number(document.getElementById("orbit-distance").value).toFixed(3)} m`;
       document.getElementById("dolly-gain-value").textContent = `${Number(document.getElementById("dolly-gain").value).toFixed(3)} m/cm`;
       document.getElementById("inspect-fov-value").textContent = `${document.getElementById("inspect-fov").value} deg`;
       document.getElementById("head-height-value").textContent = `${Number(document.getElementById("head-height").value).toFixed(2)} m`;
       document.getElementById("orbit-elevation-value").textContent = `${Number(document.getElementById("orbit-elevation").value).toFixed(0)} deg`;
-      document.getElementById("workspace-surface-offset-value").textContent = `${Math.round(Number(document.getElementById("workspace-surface-offset").value) * 1000)} mm`;
-      document.getElementById("workspace-surface-size-value").textContent = `${Number(document.getElementById("workspace-surface-size").value).toFixed(2)} m`;
-      document.getElementById("workspace-surface-opacity-value").textContent = `${Math.round(Number(document.getElementById("workspace-surface-opacity").value) * 100)}%`;
     }
 
     function updateHeadTrackingOptions() {
@@ -143,24 +358,49 @@
     function sendViewSettings(extra = {}) {
       updateViewLabels();
       const payload = viewSettingsPayload(extra);
+      workspaceStreamControl.update(payload);
       // Calibration actions and uploaded files are transient, never startup defaults.
       localStorage.setItem("robotTeleopViewSettings", JSON.stringify(viewSettingsPayload()));
+      clearTimeout(tableDefaultsTimer);
+      tableDefaultsTimer = setTimeout(saveTableDefaults, 300);
       window.setGodotHybridViewSettings && window.setGodotHybridViewSettings(payload);
-      return window.sendGodotViewSettings && window.sendGodotViewSettings(payload);
+      const remotePayload = {...payload};
+      // The dedicated socket owns page crop state, avoiding reordering with
+      // the optional tracking/WebRTC transport.
+      delete remotePayload.rgbd_client_id;
+      // Cleanup belongs only to this preview until the explicit host Save.
+      for(const key of ['squares_fusion_enabled','point_cleanup_enabled','point_cleanup_support','point_cleanup_radius_mm']) delete remotePayload[key];
+      return window.sendGodotViewSettings && window.sendGodotViewSettings(remotePayload);
+    }
+
+    function activeViewSettings(settings) {
+      return settings && Object.fromEntries(Object.entries(settings).filter(([key]) =>
+        !/^(workspace_crop_|workspace_surface_|workspace_boundary_)/.test(key)));
     }
 
     function localSavedViewSettings() {
       try {
-        return JSON.parse(localStorage.getItem("robotTeleopViewSettings") || localStorage.getItem("digitalWindowViewSettings") || "null");
+        return activeViewSettings(JSON.parse(localStorage.getItem("robotTeleopViewSettings") || localStorage.getItem("digitalWindowViewSettings") || "null"));
       } catch (_) {
         return null;
       }
     }
 
-    function restoreViewSettings(savedInput = null) {
+    function restoreViewSettings(savedInput = null, {preferLastTable = false} = {}) {
       const localSaved = localSavedViewSettings();
       const saved = savedInput && Object.keys(savedInput).length ? { ...localSaved, ...savedInput } : localSaved;
-      if (!saved || ![6, 7, 8, 9, 10, 11, 12, 13, viewSettingsVersion].includes(saved.settings_version)) {
+      squaresFusionEnabled.checked = saved.squares_fusion_enabled !== false;
+      cleanupEnabled.checked=saved.point_cleanup_enabled===true;
+      cleanupSupport.value=Number.isInteger(saved.point_cleanup_support)&&saved.point_cleanup_support>0?Math.min(16,saved.point_cleanup_support):3;
+      squarePointSize.value=Number.isFinite(saved.square_point_scale)?Math.max(.25,Math.min(4,saved.square_point_scale)):1;
+      cleanupRadius.value=Math.max(1,Math.min(100,Number(saved.point_cleanup_radius_mm)||15));
+      const pointDefault = JSON.stringify([saved?.settings_version,saved?.point_preview_detail]);
+      const samePointDefault = localStorage.getItem('robotTeleopPointDetailHostDefault') === pointDefault;
+      pointPreviewToggle.value=resolvePointDetail(saved,localStorage.getItem('robotTeleopPointDetail'),preferLastTable && samePointDefault);
+      localStorage.setItem('robotTeleopPointDetailHostDefault',pointDefault);
+      localStorage.setItem('robotTeleopPointDetail',pointPreviewToggle.value);
+      // Installation defaults may use a newer version or a legacy timestamp.
+      if (!saved || !Number.isFinite(saved.settings_version) || saved.settings_version < 6) {
         updateHeadTrackingOptions();
         return updateViewLabels();
       }
@@ -171,15 +411,14 @@
       document.getElementById("dolly-gain").value = String(saved.dolly_gain ?? 0.008);
       document.getElementById("inspect-fov").value = String(Math.round(saved.fov || 55));
       document.getElementById("white-background-enabled").checked = saved.white_background_enabled === true;
+      document.getElementById("depth-only-enabled").checked = saved.depth_only_enabled === true;
       document.getElementById("head-height").value = String(saved.focus_vertical_offset ?? 0.35);
       document.getElementById("orbit-elevation").value = String(saved.orbit_pitch_offset ?? 0);
       document.getElementById("head-tracking-enabled").checked = saved.head_tracking_enabled !== false;
       document.getElementById("camera-locations-enabled").checked = saved.camera_locations_enabled === true;
-      document.getElementById("workspace-surface-enabled").checked = saved.workspace_surface_enabled === true;
-      document.getElementById("workspace-boundary-enabled").checked = saved.workspace_boundary_enabled === true;
-      document.getElementById("workspace-surface-offset").value = String(saved.workspace_surface_offset ?? 0);
-      document.getElementById("workspace-surface-size").value = String(saved.workspace_surface_size ?? 1.2);
-      document.getElementById("workspace-surface-opacity").value = String(saved.workspace_surface_opacity ?? 0.18);
+      const table = preferLastTable && Array.isArray(localSaved?.modeled_workspace_center)
+        ? {...saved, ...tableDefaults(localSaved)} : saved;
+      if ('modeled_workspace_enabled' in table || 'modeled_workspace_center' in table) restoreModeledSettings(table);
       displayModeSelect.value = displayModes.includes(saved.display_mode) ? saved.display_mode : defaultDisplayMode;
       streamPresetSelect.value = saved.stream_preset === "latency" ? "latency" : "quality";
       startupNavigation = saved.default_navigation || null;
@@ -192,14 +431,14 @@
     async function fetchSiteSettings() {
       const response = await fetch("/api/v1/site-settings", { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return await response.json();
+      return activeViewSettings(await response.json());
     }
 
     async function loadSiteSettings({ apply = false } = {}) {
       try {
         const saved = await fetchSiteSettings();
         if (apply) {
-          restoreViewSettings(saved);
+          restoreViewSettings(saved, {preferLastTable: false});
           sendViewSettings();
           if (startupNavigationPending && window.setGodotHybridNavigationState) {
             window.setGodotHybridNavigationState(startupNavigation);
@@ -371,6 +610,7 @@
     function applyDisplayMode() {
       if (activeViewportMode !== "hybrid") return;
       const showRgb = displayModeSelect.value === "rgb_camera";
+      pointPreviewToggle.disabled=showRgb;applyPointOptions();
       hybridCanvas.hidden = showRgb;
       rgbCameraCanvas.hidden = !showRgb;
       viewportVideo.hidden = true;
@@ -393,7 +633,7 @@
         if (signature !== rgbCameraListSignature) {
           rgbCameraListSignature = signature;
           rgbCameraSelect.replaceChildren(...cameras.map(camera => new Option(
-            `${camera.name || camera.model || 'Camera'} · ${camera.id.slice(-4)}`, camera.id)));
+            `${camera.name || camera.model || 'Camera'} \u00b7 ${camera.id.slice(-4)}`, camera.id)));
           if (!cameras.some(camera => camera.id === selectedRgbCamera)) selectedRgbCamera = cameras[0]?.id || '';
           rgbCameraSelect.value = selectedRgbCamera;
           window.setGodotHybridRgbCamera?.(selectedRgbCamera);
@@ -401,7 +641,7 @@
         rgbCameraListUpdated = Date.now();
         const levelsDisplay = document.getElementById('camera-image-levels');
         if (levelsDisplay) levelsDisplay.textContent = cameras.map(camera => {
-          const name = `${camera.name || camera.model || 'Camera'} · ${camera.id.slice(-4)}`;
+          const name = `${camera.name || camera.model || 'Camera'} \u00b7 ${camera.id.slice(-4)}`;
           const levels = camera.image_levels;
           if (!levels || !Number.isFinite(levels.mean_luma)) return `${name}: image levels unavailable`;
           const age = Date.now() - levels.sample_unix_ms;
@@ -575,9 +815,17 @@
       }
     }
 
-    async function startHybridControlPeer(rgbdPreset = null) {
+    async function loadRtcIceServers(){
+      try{
+        const response=await fetch('/api/v1/ice-servers',{cache:'no-store',signal:AbortSignal.timeout(3000)});
+        if(response.ok){const data=await response.json();if(Array.isArray(data.iceServers)&&data.iceServers.length)return data.iceServers;}
+      }catch(_){}
+      return [{urls:'stun:stun.l.google.com:19302'}];
+    }
+
+    async function startHybridControlPeer(rgbdPreset = null, iceServers = [{ urls: "stun:stun.l.google.com:19302" }]) {
       if (!window.RTCPeerConnection) return false;
-      const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+      const pc = new RTCPeerConnection({ iceServers,iceTransportPolicy:new URLSearchParams(location.search).get('rtc_relay')==='1'?'relay':'all' });
       peer = pc;
       configureControlDataChannels(pc);
       if (rgbdPreset) {
@@ -585,6 +833,7 @@
           ordered: false,
           maxRetransmits: 0,
         });
+        rgbdDataChannel.nativePointStream=Boolean(rgbdPreset.pointBudget);
       }
       pc.onconnectionstatechange = () => {
         window.refreshGodotRemoteHeadTrackingTransport && window.refreshGodotRemoteHeadTrackingTransport();
@@ -600,7 +849,9 @@
           body: JSON.stringify({
             sdp: pc.localDescription.sdp,
             type: pc.localDescription.type,
-            source: rgbdPreset ? "rgbd_data" : "control_only",
+            source: rgbdPreset ? (rgbdPreset.pointBudget?"native_points":"rgbd_data") : "control_only",
+            pointBudget: rgbdPreset?.pointBudget||0,
+            client:window.robotTeleopPageId,
             width: rgbdPreset ? rgbdPreset.width : undefined,
             fps: rgbdPreset ? rgbdPreset.fps : undefined,
             contextFps: rgbdPreset ? rgbdPreset.contextFps : undefined,
@@ -644,6 +895,7 @@
       // Both profiles preserve full native samples. The capture owner selects
       // each device's largest jointly supported depth/RGB pair at this cadence.
       const hybridPreset = nativeStreamPreset(streamPresetSelect.value);
+      workspaceStreamControl.update(viewSettingsPayload());
       window.setGodotHybridViewSettings && window.setGodotHybridViewSettings(viewSettingsPayload({
         splat_fill: hybridPreset.splatFill,
         mesh_depth_delta: 0.05,
@@ -655,8 +907,13 @@
       // RGB-D over the public latest-frame endpoint. This lets a local browser
       // exercise the same Cloudflare path used when direct peer connectivity
       // is unavailable on a remote network.
+      const rtcIceServers=await loadRtcIceServers();
+      if(generation!==viewportGeneration)return;
       const peerPromise = startHybridControlPeer(
-        forceRelayedRgbd ? null : hybridPreset
+        forceRelayedRgbd||['-2','-1'].includes(pointPreviewToggle.value) ? null : pointPreviewActive()
+          ? (new URLSearchParams(location.search).get('native_point_webrtc')==='1'
+            ? {...hybridPreset,pointBudget:selectedPointBudget()}:null)
+          : hybridPreset,rtcIceServers
       );
       await Promise.all([
         window.startGodotHybridRenderer({
@@ -695,18 +952,14 @@
       return selectedViewportMode() === "hybrid" ? startHybridViewport() : startWebRtcViewport();
     }
 
-    function recenterWhenTrackingStarts() {
+    function frameWhenTrackingStarts() {
       const generation = ++startupRecenterGeneration;
       const deadline = performance.now() + 5000;
       const attempt = () => {
         if (generation !== startupRecenterGeneration) return;
-        const latest = window.godotWebcamTrackerLatest || {};
-        if (latest.active === true) {
-          window.recenterGodotWebcamTracker && window.recenterGodotWebcamTracker();
-          window.recenterGodotHybridRenderer && window.recenterGodotHybridRenderer();
-          window.setTimeout(() => sendViewSettings({ recenter: true }), 120);
-          return;
-        }
+        // Scene framing is available even before a face is detected.
+        // Never turn the current head pose into the reference zero.
+        if (window.frameGodotHeadTrackingView?.()) return;
         if (performance.now() < deadline) window.setTimeout(attempt, 100);
       };
       attempt();
@@ -813,25 +1066,29 @@
       viewportImage.src = `${streamBaseUrl()}&t=${Date.now()}`;
     }
 
+    let trackingRequest = 0;
     async function startTracking() {
+      const request = ++trackingRequest;
       const enabled = document.getElementById("head-tracking-enabled").checked;
       if (!enabled) {
         startupRecenterGeneration += 1;
         window.stopGodotWebcamTracker && window.stopGodotWebcamTracker();
-        trackingState = "off · mouse navigation enabled";
+        trackingState = "off \u00b7 mouse navigation enabled";
         updateStatus();
         return true;
       }
       trackingState = "starting";
       updateStatus();
-      if (!await waitForBridge()) throw new Error("tracker bridge did not load");
-      await window.startGodotWebcamTracker({
+      const bridgeReady = await waitForBridge();
+      if (request !== trackingRequest) return false;
+      if (!bridgeReady) throw new Error("tracker bridge did not load");
+      const started = await window.startGodotWebcamTracker({
         ...trackingPreset,
         neutralZCm: 35,
         xScale: -1,
         zScale: 1,
         maxZM: 5,
-        smoothing: 0.35,
+        smoothing: 0, // Absolute head position maps to a deterministic view.
         preview: false,
         debug: false,
         showVideo: false,
@@ -844,17 +1101,31 @@
         remoteUrl: remoteUrl(),
         remoteMaxHz: 90,
       });
+      if (request !== trackingRequest || !started) return false;
       trackingState = "tracking";
-      window.setTimeout(() => sendViewSettings(), 150);
-      recenterWhenTrackingStarts();
+      window.setTimeout(() => {
+        if (request === trackingRequest) sendViewSettings();
+      }, 150);
+      frameWhenTrackingStarts();
       updateStatus();
+    }
+
+    function startTrackingForView() {
+      const starting = startTracking();
+      if (document.getElementById("trial-task-kind").value !== "mug_challenge") return starting;
+      const request = trackingRequest;
+      starting.catch(error => {
+        if (request !== trackingRequest) return;
+        trackingState = `needs start: ${error.message || error}`;
+        updateStatus();
+      });
     }
 
     async function startController() {
       userStarted = true;
       startOverlay.hidden = true;
       try {
-        await Promise.all([startSelectedViewport(), startTracking()]);
+        await Promise.all([startSelectedViewport(), startTrackingForView()]);
       } catch (err) {
         trackingState = `needs start: ${err && err.message ? err.message : err}`;
         startMessage.textContent = err?.message || "Could not start the viewer. Please retry.";
@@ -1019,13 +1290,13 @@
       context.fillText("0", 3, height - 3);
 
       if (hybrid.stalled) {
-        rgbdLatencyValue.textContent = `STALLED · packet ${Math.round(hybrid.packetAgeMs)}ms`;
+        rgbdLatencyValue.textContent = `STALLED \u00b7 packet ${Math.round(hybrid.packetAgeMs)}ms`;
         rgbdLatencyValue.style.color = "#ff6b6b";
       } else if (hybrid.captureAgeMs != null && hybrid.captureAgeMs >= 0) {
-        rgbdLatencyValue.textContent = `${Math.round(hybrid.captureAgeMs)}ms · packet ${Math.round(Math.max(0, hybrid.packetAgeMs || 0))}ms`;
+        rgbdLatencyValue.textContent = `${Math.round(hybrid.captureAgeMs)}ms \u00b7 packet ${Math.round(Math.max(0, hybrid.packetAgeMs || 0))}ms`;
         rgbdLatencyValue.style.color = "";
       } else {
-        rgbdLatencyValue.textContent = "—";
+        rgbdLatencyValue.textContent = "â€”";
         rgbdLatencyValue.style.color = "";
       }
     }
@@ -1037,11 +1308,17 @@
       const av1Connected = av1Socket && av1Socket.readyState === WebSocket.OPEN && viewportVideo.currentTime > 0;
       const hybrid = window.getGodotHybridRendererStatus ? window.getGodotHybridRendererStatus() : {};
       const connected = activeViewportMode === "hybrid" ? hybrid.connected === true : (peer && peer.connectionState === "connected") || av1Connected;
+      if(modeledWorkspace(modeledViewSettings()))renderCropStatistics(document.getElementById('modeled-workspace-status'),hybrid,{
+        is3D:activeViewportMode==='hybrid'&&displayModeSelect.value!=='rgb_camera'&&hybrid.displaySource!=='original_rgb',
+      });
+      const cleanup=hybrid.pointPreview?.cleanup;
+      document.getElementById('point-cleanup-stats').textContent=!cleanupEnabled.checked?'Cleanup off (bypassed).'
+        : !cleanup?.matches||!cleanup.input?'Applying cleanup to selected points...'
+        : `Removed ${cleanup.removed.toLocaleString()} of ${cleanup.input.toLocaleString()} selected points.`;
       const hybridStalled = activeViewportMode === "hybrid" && hybrid.stalled === true;
       const headTrackingEnabled = document.getElementById("head-tracking-enabled").checked;
-      const navigationReady = active || !headTrackingEnabled;
-      statusDot.className = "dot " + (hybridStalled ? "bad" : connected && navigationReady ? "ok" : connected ? "" : "bad");
-      statusTitle.textContent = hybridStalled ? "Stream stalled" : connected && navigationReady ? "Connected" : connected ? "Stream connected" : "Connecting";
+      statusDot.className = "dot " + (hybridStalled ? "bad" : connected ? "ok" : "bad");
+      statusTitle.textContent = hybridStalled ? "Stream stalled" : connected ? "Connected" : "Connecting";
       const size = activeViewportMode === "hybrid"
         ? (hybrid.width > 0 ? `${hybrid.width}x${hybrid.height}` : "--")
         : (viewportVideo.videoWidth > 0 ? `${viewportVideo.videoWidth}x${viewportVideo.videoHeight}` : "--");
@@ -1052,7 +1329,7 @@
       const cameraRates = Object.values(hybrid.cameraFps || {}).map(Number).filter(Number.isFinite);
       if (activeViewportMode === "hybrid" && hybrid.displaySource !== "original_rgb" && cameraRates.length) {
         const minimum = Math.round(Math.min(...cameraRates)), maximum = Math.round(Math.max(...cameraRates));
-        fps = `${minimum === maximum ? minimum : `${minimum}-${maximum}`} fps/camera`;
+        fps = `${minimum === maximum ? minimum : `${minimum}-${maximum}`} updates/s/camera`;
       }
       const bitrate = hasStreamMeasurement ? `${Math.round(Math.max(0, stats.bitrateKbps || 0))} kbps` : "-- kbps";
       networkStats.textContent = [
@@ -1071,15 +1348,26 @@
             `Worker ${Number(hybrid.workerMs || 0).toFixed(1)}ms | return scheduling ${Number(hybrid.dispatchMs || 0).toFixed(1)}ms`,
           ]),
           `Decode+upload ${hybrid.decodeMs ? `${hybrid.decodeMs.toFixed(1)}ms` : "--"} | render ${hybrid.renderFps ? `${Math.round(hybrid.renderFps)} fps` : "--"}`,
+          ...(hybrid.pointPreview ? [`${hybrid.pointPreview.budget===0?'All native points':`${hybrid.pointPreview.budget/1000}k preview`} ${Object.entries(hybrid.pointPreview.counts).map(([id,n])=>`${id.slice(-4)}:${n.toLocaleString()}`).join(' | ')} submitted points | selection/upload ${hybrid.pointPreview.selectionMs.toFixed(1)}ms`] : []),
+          ...(hybrid.robotModelsExpected ? [`Arm overlay ${hybrid.robotModelsLoaded || 0}/${hybrid.robotModelsExpected} model links${hybrid.robotLoadError ? ` | ${hybrid.robotLoadError}` : ''}`] : []),
           ...(hybrid.decodeErrors ? [`Decode errors ${hybrid.decodeErrors} | ${hybrid.status}`] : []),
           `Camera FPS  ${Object.entries(hybrid.cameraFps || {}).map(([id, rate]) => `${id.slice(-4)}:${Math.round(rate)}`).join("  ") || "--"}`,
           `Camera frames ${Object.entries(hybrid.cameraFrames || {}).map(([id, count]) => `${id.slice(-4)}:${count}`).join("  ") || "--"}`,
+          ...(hybrid.workspaceCrop?.enabled && hybrid.workspaceCrop.sourceCells ? [
+            `Table region: ${Math.round(100 * (1 - hybrid.workspaceCrop.submittedCells / hybrid.workspaceCrop.sourceCells))}% of source geometry skipped; ${hybrid.meshPreview?'compressed':'native'} detail inside`,
+          ] : []),
         ] : []),
       ].join("\n");
+      const available=hybrid.pointCounts||{};document.getElementById('point-counts').textContent=`Full available after crop: ${Number(hybrid.pointCountTotal||0).toLocaleString()} points total (${Object.entries(available).map(([id,n])=>`${id.slice(-4)}: ${n.toLocaleString()}`).join(' | ')}). ${hybrid.pointPreview?`Selected: ${hybrid.pointPreview.total.toLocaleString()} points total.`:hybrid.meshPreview?'Balanced mesh selected: one-quarter of the depth grid, compressed RGB.':'Full detail selected; mesh filtering can reject further samples.'}`;
       statusLines.textContent = [
         `Stream ${hybrid.displaySource === "original_rgb" ? `${currentPreset().label} RGB` : streamMode} | ${size} | ${fps} | ${bitrate}`,
+        ...(activeViewportMode === 'hybrid' && hybrid.displaySource !== 'original_rgb' && hasStreamMeasurement
+          ? [`Viewer drawing ${Math.round(hybrid.renderFps || 0)} fps`] : []),
         !connected ? streamState : "",
         activeViewportMode === "hybrid" ? hybrid.renderWarning : "",
+        activeViewportMode === "hybrid" ? hybrid.robotModelWarning : "",
+        ...(activeViewportMode==='hybrid'&&hybrid.pointPreview ? [`${hybrid.pointPreview.budget===0?'All native points':`${hybrid.pointPreview.budget/1000}k sparse preview`} (${hybrid.pointPreview.transport||'local'}) | ${hybrid.pointPreview.total.toLocaleString()} points total`] : []),
+        ...(activeViewportMode==='hybrid'&&hybrid.meshPreview ? ['Balanced mesh preview | \u00bc depth samples | compressed RGB'] : []),
         headTrackingEnabled
           ? `Tracking ${latest.status || trackingState} | ${remote.connected ? "bridge on" : "bridge ..."}`
           : "Tracking off | mouse orbit/pan/zoom enabled",
@@ -1090,6 +1378,8 @@
     }
 
     streamPresetSelect.addEventListener("change", () => {
+      // Stop cached velocity before potentially blocking graphics work.
+      window.so101ArmController?.clearKeyboardMotion?.();
       sendViewSettings();
       if (userStarted) startSelectedViewport().catch(error => {
         streamState = error?.message || "Camera mode change failed";
@@ -1099,10 +1389,44 @@
       updateStatus();
     });
     displayModeSelect.addEventListener("change", () => {
+      // Stop cached velocity before potentially blocking graphics work.
+      window.so101ArmController?.clearKeyboardMotion?.();
       applyDisplayMode();
       sendViewSettings();
       displayModeSelect.blur();
     });
+    // This experiment is local to the current tab; never save it as site,
+    // recording, camera or robot defaults, and do not reconnect the stream.
+    pointPreviewToggle.addEventListener('change',()=>{
+      localStorage.setItem('robotTeleopPointDetail',pointPreviewToggle.value);applyPointOptions();
+      if(new URLSearchParams(location.search).get('native_point_webrtc')==='1'&&activeViewportMode==='hybrid'
+          &&Boolean(rgbdDataChannel?.nativePointStream)!==(pointPreviewActive()))startHybridViewport();
+      pointPreviewToggle.blur();updateStatus();
+    });
+    squarePointSize.addEventListener('input',()=>{applyPointOptions();});
+    workspacePointBudget.addEventListener('change', () => {
+      localStorage.setItem('robotTeleopWorkspacePointBudget', workspacePointBudget.checked ? '1' : '0');
+      applyPointOptions();
+    });
+    let cleanupTimer=0;
+    const applyCleanup=()=>{clearTimeout(cleanupTimer);applyPointOptions();sendViewSettings();};
+    cleanupEnabled.addEventListener('change',applyCleanup);
+    for(const slider of [cleanupSupport,cleanupRadius]){
+      slider.addEventListener('input',()=>{updateCleanupControls();clearTimeout(cleanupTimer);cleanupTimer=setTimeout(applyCleanup,150);});
+      slider.addEventListener('change',applyCleanup);
+    }
+    let blendTimer=0;
+    const saveBlendControls=()=>{
+      clearTimeout(blendTimer);blendTimer=0;updateBlendLabels();
+      localStorage.setItem('robotTeleopBlendControls',JSON.stringify({depth:Number(blendDepth.value),support:Number(blendSupport.value),edge:Number(blendEdge.value)}));
+      window.setGodotHybridViewSettings?.(blendSettings());
+    };
+    for(const slider of [blendDepth,blendSupport,blendEdge]){
+      slider.addEventListener('input',()=>{updateBlendLabels();if(!blendTimer)blendTimer=setTimeout(saveBlendControls,75);});
+      slider.addEventListener('change',saveBlendControls);
+    }
+    window.addEventListener('pagehide',()=>{if(blendTimer)saveBlendControls();});
+    document.getElementById('blend-reset').addEventListener('click',()=>{blendDepth.value=1;blendSupport.value=2;blendEdge.value=80;saveBlendControls();});
     rgbCameraSelect.addEventListener('change', () => {
       selectedRgbCamera = rgbCameraSelect.value;
       window.setGodotHybridRgbCamera?.(selectedRgbCamera);
@@ -1120,14 +1444,31 @@
       control.addEventListener("change", () => control.blur());
     }
     for (const id of [
-      "dolly-enabled", "white-background-enabled",
-      "workspace-surface-enabled", "workspace-boundary-enabled",
+      "dolly-enabled", "white-background-enabled", "depth-only-enabled",
       "camera-locations-enabled",
+      "scene-lighting-enabled", "scene-shadows-enabled",
     ]) {
       const control = document.getElementById(id);
       control.addEventListener("change", () => {
         sendViewSettings();
         control.blur();
+      });
+    }
+    document.getElementById('modeled-workspace-enabled').addEventListener('change', event => {
+      if (event.currentTarget.checked && !modeledWorkspaceConfigured && !alignModeledTable()) {
+        event.currentTarget.checked = false;
+        return;
+      }
+      updateModeledControls();sendViewSettings();
+    });
+    document.getElementById('modeled-workspace-align').addEventListener('click', () => {
+      if (alignModeledTable('robot')) sendViewSettings();
+    });
+    document.getElementById('modeled-workspace-orbit').addEventListener('click',()=>{if(alignModeledTable('orbit'))sendViewSettings();});
+    for (const name of modeledFields) {
+      const input = document.getElementById(`modeled-workspace-${name}`);
+      input.addEventListener(['light-angle','clearance'].includes(name) ? 'input' : 'change', () => {
+        if (updateModeledControls()) {modeledWorkspaceConfigured=true;sendViewSettings();}
       });
     }
     document.getElementById("head-tracking-enabled").addEventListener("change", async (event) => {
@@ -1136,7 +1477,7 @@
       sendViewSettings();
       if (userStarted) {
         try {
-          await startTracking();
+          await startTrackingForView();
         } catch (error) {
           trackingState = `needs start: ${error && error.message ? error.message : error}`;
           startMessage.textContent = "Camera permission needs a tap.";
@@ -1146,21 +1487,37 @@
       control.blur();
       updateStatus();
     });
-    document.getElementById("open-advanced").addEventListener("click", () => {
-      advancedSetup.hidden = false;
-      refreshRgbCameras();
-      document.getElementById("close-advanced").focus();
+    let workspaceEditTimer=0;
+    const flushWorkspaceEdit=()=>{clearTimeout(workspaceEditTimer);workspaceEditTimer=0;sendViewSettings();};
+    window.addEventListener('workspace-edit-change',event=>{
+      const {settings,phase}=event.detail;
+      if('modeled_workspace_center' in settings)restoreModeledSettings({...modeledViewSettings(),...settings});
+      if(phase==='preview') {if(!workspaceEditTimer)workspaceEditTimer=setTimeout(flushWorkspaceEdit,100);}
+      else flushWorkspaceEdit();
     });
-    document.getElementById("close-advanced").addEventListener("click", () => {
-      advancedSetup.hidden = true;
-      document.getElementById("open-advanced").focus();
+    window.addEventListener('workspace-edit-finish',event=>{
+      document.body.classList.remove('workspace-editing');
+      sendViewSettings();
+      document.getElementById('open-advanced').focus({preventScroll:true});
     });
-    advancedSetup.addEventListener("click", (event) => {
-      if (event.target === advancedSetup) advancedSetup.hidden = true;
+    document.getElementById('modeled-workspace-edit').addEventListener('click',()=>{
+      if(displayModeSelect.value==='rgb_camera') {displayModeSelect.value='independent_mesh';applyDisplayMode();sendViewSettings();}
+      if(window.editGodotWorkspace?.('table')) {advancedSetup.hidden=true;document.body.classList.add('workspace-editing');sendViewSettings();}
+      else document.getElementById('modeled-workspace-status').textContent='Open a connected 3D view to edit this workspace.';
     });
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !advancedSetup.hidden) advancedSetup.hidden = true;
-    });
+    function handleDepthOnlyShortcut(event) {
+      if (event.key !== "Backspace" || event.defaultPrevented || event.isComposing
+        || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+      const target = event.target;
+      if (target?.isContentEditable || target?.closest?.("input, textarea, select, [role='textbox']")) return;
+      if (!hybridMode || displayModeSelect.value === "rgb_camera") return;
+      event.preventDefault();
+      if (event.repeat) return;
+      const control = document.getElementById("depth-only-enabled");
+      control.checked = !control.checked;
+      sendViewSettings();
+    }
+    document.addEventListener("keydown", handleDepthOnlyShortcut);
     document.getElementById("save-site-defaults").addEventListener("click", saveSiteSettings);
     document.getElementById("reload-site-defaults").addEventListener("click", async () => {
       await loadSiteSettings({ apply: true });
@@ -1186,7 +1543,38 @@
     }, 500);
 
     const installationSettings = await loadSiteSettings();
+    savedTableDefaults = JSON.stringify(tableDefaults(installationSettings));
     restoreViewSettings(installationSettings);
+    tableDefaultsReady = true;
+    const previewCameraControls = new PreviewCameraControls(document.getElementById('preview-camera-controls'), () => window.setGodotHybridViewSettings?.({preview_excluded_cameras:previewCameraControls.excluded}));
+    window.addEventListener('pagehide',()=>previewCameraControls.close());
+    if (pendingBoardTableLevel) { applyBoardTableLevel(pendingBoardTableLevel); pendingBoardTableLevel = null; }
+    tableDefaultsTimer = setTimeout(saveTableDefaults, 300);
     robotModule.bind?.({ sendViewSettings, updateStatus });
     robotModule.start?.({ sendViewSettings, updateStatus });
-    startController();
+    const trialController = new TrialController({recording: episodeRecording,
+      prepareSession: () => robotModule.prepareSession?.(),
+      prepareTrial: options => robotModule.prepareTrial?.(options),
+      sessionConnected: () => robotModule.sessionConnected?.() ?? true,
+      pauseRobot: typeof robotModule.pauseTrial === 'function' ? () => robotModule.pauseTrial() : null,
+      resumeRobot: typeof robotModule.resumeTrial === 'function' ? () => robotModule.resumeTrial() : null,
+      finishRobotPause: () => robotModule.finishTrialPause?.(),
+      applyCondition: async (condition, renderer) => {
+        const mode = condition === 'fixed_rgb' ? 'rgb_camera' : renderer;
+        displayModeSelect.value = displayModes.includes(mode) ? mode : defaultDisplayMode;
+        document.getElementById('head-tracking-enabled').checked = condition === 'head_3d';
+        updateHeadTrackingOptions();
+        applyDisplayMode();
+        sendViewSettings();
+        if (userStarted) await startTrackingForView();
+      },
+      resetView: () => {retainedNavigation = null; window.recenterGodotHybridRenderer?.();},
+      resetTracking: () => window.recenterGodotWebcamTracker?.(),
+      viewReady: () => {
+        if (activeViewportMode !== 'hybrid') return viewportVideo.currentTime > 0;
+        const view = window.getGodotHybridRendererStatus?.();
+        return view?.connected === true && view.stalled !== true && Number(view.decoded) > 0;
+      },
+    });
+    await trialController.initialize();
+    applyPointOptions();startController();

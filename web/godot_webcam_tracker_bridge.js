@@ -11,6 +11,12 @@ const state = {
   backend: "mediapipe",
   mediapipeModule: null,
   landmarker: null,
+  landmarkerDelegate: null,
+  landmarkerPending: null,
+  mediapipeWorker: null,
+  mediapipeWorkerFailed: false,
+  trackingSession: 0,
+  starting: null,
   mediapipeDelegate: "CPU",
   mediapipeNoFaceSinceMs: 0,
   mediapipeRecoveryAttempted: false,
@@ -47,6 +53,7 @@ const state = {
   preview: null,
   overlay: null,
   neutral: null,
+  observationMissing: true,
   smoothed: { x: 0, y: 0, z: 0 },
   options: {
     neutralZCm: 35,
@@ -131,7 +138,11 @@ function ensureOverlayElement(parent) {
 }
 
 function ensurePreviewElement() {
-  if (!state.options.preview) return null;
+  if (!state.options.preview || !state.options.debug) {
+    state.preview?.remove();
+    state.preview = null;
+    return null;
+  }
   if (state.preview) return state.preview;
   const preview = document.createElement("div");
   preview.style.cssText = [
@@ -251,14 +262,16 @@ function emit(active, pose, status) {
   const now = Date.now();
   const debugInfo = buildDebugInfo(now);
   if (!active || !pose) {
+    state.observationMissing = true;
     window.godotWebcamTrackerLatest = {
       type: "tracking",
       source: `browser_${state.backend}`,
       active: false,
       status,
-      x: 0,
-      y: 0,
-      z: 0,
+      neutral_z_cm: state.options.neutralZCm,
+      x: state.smoothed.x,
+      y: state.smoothed.y,
+      z: state.smoothed.z,
       debug: debugInfo,
       sent_unix_ms: now,
     };
@@ -268,7 +281,7 @@ function emit(active, pose, status) {
   state.lastPose = pose;
   state.lastPoseMs = now;
   if (!state.neutral) {
-    state.neutral = pose;
+    state.neutral = {x: 0, y: 0, z: state.options.neutralZCm};
   }
   const raw = {
     x: (pose.x - state.neutral.x) * state.options.xScale,
@@ -276,7 +289,8 @@ function emit(active, pose, status) {
     z: ((pose.z - state.neutral.z) * state.options.zScale) + state.options.neutralZCm,
   };
   raw.z = Math.min(raw.z, Math.max(state.options.neutralZCm, state.options.maxZM * 100.0));
-  const a = Math.min(Math.max(state.options.smoothing, 0), 0.98);
+  const a = state.observationMissing ? 0 : Math.min(Math.max(state.options.smoothing, 0), 0.98);
+  state.observationMissing = false;
   state.smoothed.x = state.smoothed.x * a + raw.x * (1 - a);
   state.smoothed.y = state.smoothed.y * a + raw.y * (1 - a);
   state.smoothed.z = state.smoothed.z * a + raw.z * (1 - a);
@@ -285,6 +299,7 @@ function emit(active, pose, status) {
     source: `browser_${state.backend}`,
     active: true,
     status,
+    neutral_z_cm: state.options.neutralZCm,
     x: state.smoothed.x,
     y: state.smoothed.y,
     z: state.smoothed.z,
@@ -463,31 +478,55 @@ function sendRemoteTrackingPacket(packet) {
 }
 
 function emitHeldOrSearching(status) {
-  const now = Date.now();
-  if (state.lastPose && now - state.lastPoseMs <= state.options.holdLastPoseMs) {
-    emit(true, state.lastPose, `${status} holding`);
-  } else {
-    emit(false, null, `${status} searching`);
-  }
+  // Detection loss is real, but the viewer retains the last valid position.
+  // Do not feed cached poses back as new observations or reset their age.
+  emit(false, null, `${status} searching`);
 }
 
-async function initLandmarker() {
-  if (state.landmarker) return state.landmarker;
-  const webgl = getWebGlInfo();
-  window.godotWebcamTrackerLatest.status = webgl.webgl1 ? "loading mediapipe" : "mediapipe blocked: no webgl";
-  if (!webgl.webgl1) {
-    throw new Error("MediaPipe browser FaceLandmarker needs WebGL, but this browser could not create a WebGL context.");
+function createMediaPipeWorker() {
+  const worker = new Worker(new URL("./head_tracker_worker.js?v=20261109_background_startup", import.meta.url));
+  const pending = new Map();
+  let serial = 0;
+  let failure = null;
+
+  function close(error = new Error("MediaPipe worker stopped")) {
+    failure = error;
+    worker.terminate();
+    for (const request of pending.values()) request.reject(error);
+    pending.clear();
   }
-  if (!state.mediapipeModule) {
-    state.mediapipeModule = await import(MEDIAPIPE_URL);
-  }
-  const { FaceLandmarker, FilesetResolver } = state.mediapipeModule;
-  const fileset = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_URL);
-  state.landmarker = await FaceLandmarker.createFromOptions(fileset, {
-    baseOptions: {
-      modelAssetPath: MODEL_URL,
-      delegate: state.mediapipeDelegate,
+
+  worker.addEventListener("message", ({ data }) => {
+    const request = pending.get(data.id);
+    if (!request) return;
+    pending.delete(data.id);
+    if (data.error) request.reject(new Error(data.error));
+    else request.resolve(data.value);
+  });
+  worker.addEventListener("error", event => close(new Error(event.message || "MediaPipe worker failed")));
+  worker.addEventListener("messageerror", () => close(new Error("MediaPipe worker returned an unreadable result")));
+
+  return {
+    request(type, payload, transfer = []) {
+      if (failure) return Promise.reject(failure);
+      const id = ++serial;
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        try {
+          worker.postMessage({ id, type, ...payload }, transfer);
+        } catch (error) {
+          pending.delete(id);
+          reject(error);
+        }
+      });
     },
+    close,
+  };
+}
+
+async function createLandmarker(delegate) {
+  const options = {
+    baseOptions: { modelAssetPath: MODEL_URL, delegate },
     runningMode: "VIDEO",
     numFaces: 1,
     outputFaceBlendshapes: false,
@@ -495,8 +534,58 @@ async function initLandmarker() {
     minFaceDetectionConfidence: 0.2,
     minFacePresenceConfidence: 0.2,
     minTrackingConfidence: 0.2,
-  });
-  return state.landmarker;
+  };
+  if (!state.mediapipeWorkerFailed && typeof Worker === "function"
+      && typeof OffscreenCanvas === "function" && typeof createImageBitmap === "function") {
+    try {
+      const worker = state.mediapipeWorker ??= createMediaPipeWorker();
+      await worker.request("initialize", { moduleUrl: MEDIAPIPE_URL, wasmUrl: MEDIAPIPE_WASM_URL, options });
+      return {
+        async detectForVideo(video, timestamp) {
+          const frame = await createImageBitmap(video);
+          try {
+            return await worker.request("detect", { frame, timestamp }, [frame]);
+          } finally {
+            frame.close();
+          }
+        },
+      };
+    } catch (error) {
+      state.mediapipeWorker?.close();
+      state.mediapipeWorker = null;
+      state.mediapipeWorkerFailed = true;
+      console.warn("MediaPipe worker unavailable; using the page tracker:", error);
+    }
+  }
+
+  if (!getWebGlInfo().webgl1) {
+    throw new Error("MediaPipe browser FaceLandmarker needs WebGL, but this browser could not create a WebGL context.");
+  }
+  state.mediapipeModule ??= await import(MEDIAPIPE_URL);
+  const { FaceLandmarker, FilesetResolver } = state.mediapipeModule;
+  const fileset = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_URL);
+  return FaceLandmarker.createFromOptions(fileset, options);
+}
+
+async function initLandmarker() {
+  const delegate = state.mediapipeDelegate;
+  if (state.landmarker && state.landmarkerDelegate === delegate) return state.landmarker;
+  if (state.landmarkerPending) {
+    if (state.landmarkerPending.delegate === delegate) return state.landmarkerPending.promise;
+    await state.landmarkerPending.promise.catch(() => {});
+    return initLandmarker();
+  }
+  state.landmarker?.close?.();
+  state.landmarker = null;
+  const promise = createLandmarker(delegate);
+  state.landmarkerPending = { delegate, promise };
+  try {
+    state.landmarker = await promise;
+    state.landmarkerDelegate = delegate;
+    return state.landmarker;
+  } finally {
+    state.landmarkerPending = null;
+  }
 }
 
 async function loadScriptOnce(url) {
@@ -716,11 +805,7 @@ function shouldFallbackToOpenCv(err) {
 function updatePreview() {
   const preview = ensurePreviewElement();
   if (!preview) return;
-  const p = window.godotWebcamTrackerLatest;
-  const lines = [
-    p.status,
-    `x=${p.x.toFixed(1)}cm y=${p.y.toFixed(1)}cm z=${p.z.toFixed(1)}cm`,
-  ];
+  const lines = [];
   if (state.options.debug) {
     const ageMs = state.lastFaceRectMs ? Date.now() - state.lastFaceRectMs : -1;
     const rect = state.lastFaceRect;
@@ -756,13 +841,14 @@ function updateFaceOverlay() {
   state.overlay.appendChild(box);
 }
 
-async function loop() {
-  if (!state.running) return;
+async function loop(session) {
+  if (!state.running || session !== state.trackingSession) return;
   try {
     const video = state.video;
     if (video && video.readyState >= 2) {
       if (state.backend === "opencv") {
         await initOpenCvTracker();
+        if (session !== state.trackingSession) return;
         const pose = detectOpenCvPose(video);
         if (pose) {
           emit(true, pose, "opencv tracking");
@@ -773,11 +859,12 @@ async function loop() {
         const detectNow = performance.now();
         const detectInterval = 1000 / Math.max(1, state.options.trackingFps || 20);
         if (state.mediapipeLastDetectMs && detectNow - state.mediapipeLastDetectMs < detectInterval) {
-          requestAnimationFrame(loop);
+          requestAnimationFrame(() => loop(session));
           return;
         }
         state.mediapipeLastDetectMs = detectNow;
-        const result = state.landmarker.detectForVideo(video, detectNow);
+        const result = await state.landmarker.detectForVideo(video, detectNow);
+        if (session !== state.trackingSession) return;
 	        const landmarks = result.faceLandmarks && result.faceLandmarks[0];
 	        rememberTrackingRun(Boolean(landmarks), result.faceLandmarks ? result.faceLandmarks.length : 0);
 	        if (landmarks) {
@@ -792,8 +879,6 @@ async function loop() {
             if (!state.mediapipeRecoveryAttempted && getWebGlInfo().webgl2) {
               state.mediapipeRecoveryAttempted = true;
               state.mediapipeDelegate = "GPU";
-              if (state.landmarker && typeof state.landmarker.close === "function") state.landmarker.close();
-              state.landmarker = null;
               state.mediapipeNoFaceSinceMs = now;
               emit(false, null, "mediapipe CPU found no face; retrying GPU");
               await initLandmarker();
@@ -809,12 +894,13 @@ async function loop() {
       updateFaceOverlay();
     }
   } catch (err) {
+    if (session !== state.trackingSession) return;
     console.warn("Browser MediaPipe tracker failed:", err);
     const detail = err && err.message ? err.message : String(err);
     emit(false, null, `mediapipe error: ${detail}`.slice(0, 180));
     state.running = false;
   }
-  requestAnimationFrame(loop);
+  if (state.running && session === state.trackingSession) requestAnimationFrame(() => loop(session));
 }
 
 window.startGodotWebcamTracker = async function startGodotWebcamTracker(options = {}) {
@@ -826,15 +912,36 @@ window.startGodotWebcamTracker = async function startGodotWebcamTracker(options 
     });
   }
   if (state.running) return true;
+  if (state.starting) return state.starting;
+  const session = ++state.trackingSession;
+  const starting = startTrackingSession(session);
+  state.starting = starting;
+  try {
+    return await starting;
+  } catch (error) {
+    if (session !== state.trackingSession) return false;
+    closeWebcam();
+    throw error;
+  } finally {
+    if (state.starting === starting) state.starting = null;
+  }
+};
+
+async function startTrackingSession(session) {
   state.lastPose = null;
   state.lastPoseMs = 0;
+  state.observationMissing = true;
   state.mediapipeNoFaceSinceMs = 0;
   state.mediapipeRecoveryAttempted = false;
   state.mediapipeLastDetectMs = 0;
   state.mediapipeDelegate = "CPU";
+  state.backend = state.options.backend === "auto" ? "mediapipe" : state.options.backend;
+  const model = state.backend === "mediapipe" ? initLandmarker() : null;
+  model?.catch(() => {});
   const video = placeVideoElement();
   window.godotWebcamTrackerLatest.status = "requesting camera";
   let devices = await listVideoDevices();
+  if (session !== state.trackingSession) return false;
   let deviceId = chooseVideoDevice(devices);
   const openCamera = async (selectedDeviceId) => {
     const videoConstraints = {
@@ -851,17 +958,25 @@ window.startGodotWebcamTracker = async function startGodotWebcamTracker(options 
       audio: false,
     });
   };
+  let stream;
   try {
-    video.srcObject = await openCamera(deviceId);
+    stream = await openCamera(deviceId);
   } catch (err) {
-    if (state.options.deviceId) throw err;
+    if (state.options.deviceId || session !== state.trackingSession) throw err;
     devices = await listVideoDevices();
+    if (session !== state.trackingSession) return false;
     deviceId = chooseVideoDevice(devices);
     if (!deviceId) throw err;
-    video.srcObject = await openCamera(deviceId);
+    stream = await openCamera(deviceId);
   }
+  if (session !== state.trackingSession) {
+    for (const track of stream.getTracks()) track.stop();
+    return false;
+  }
+  video.srcObject = stream;
   window.godotWebcamTrackerLatest.status = `camera: ${describeVideoDevice(devices, deviceId)}`;
   await video.play();
+  if (session !== state.trackingSession) return false;
   if (state.trackingTask && typeof state.trackingTask.stop === "function") {
     state.trackingTask.stop();
     state.trackingTask = null;
@@ -870,26 +985,25 @@ window.startGodotWebcamTracker = async function startGodotWebcamTracker(options 
     window.cancelAnimationFrame(state.trackingRaf);
     state.trackingRaf = 0;
   }
-  state.backend = state.options.backend;
-  if (state.backend === "auto") {
-    state.backend = "mediapipe";
-  }
   if (state.backend === "opencv") {
     await initOpenCvTracker();
+    if (session !== state.trackingSession) return false;
     state.running = true;
     state.neutral = null;
     state.smoothed = { x: 0, y: 0, z: state.options.neutralZCm };
-    loop();
+    loop(session);
   } else if (state.backend === "mediapipe") {
     try {
-      await initLandmarker();
+      if (!state.landmarker) window.godotWebcamTrackerLatest.status = "loading mediapipe";
+      await model;
+      if (session !== state.trackingSession) return false;
       state.running = true;
       state.neutral = null;
       state.smoothed = { x: 0, y: 0, z: state.options.neutralZCm };
-      loop();
+      loop(session);
     } catch (err) {
+      if (session !== state.trackingSession) return false;
       console.warn("MediaPipe initialization failed:", err);
-      state.landmarker = null;
       const detail = err && err.message ? err.message : String(err);
       emit(false, null, `mediapipe init error: ${detail}`.slice(0, 180));
       throw err;
@@ -902,9 +1016,18 @@ window.startGodotWebcamTracker = async function startGodotWebcamTracker(options 
     await initTrackingJsTracker(video);
   }
   return true;
-};
+}
+
+function closeWebcam() {
+  if (!state.video?.srcObject) return;
+  for (const track of state.video.srcObject.getTracks()) track.stop();
+  state.video.srcObject = null;
+  state.video.pause();
+}
 
 window.stopGodotWebcamTracker = function stopGodotWebcamTracker() {
+  state.trackingSession += 1;
+  state.starting = null;
   state.running = false;
   if (state.trackingTask && typeof state.trackingTask.stop === "function") {
     state.trackingTask.stop();
@@ -914,11 +1037,7 @@ window.stopGodotWebcamTracker = function stopGodotWebcamTracker() {
     window.cancelAnimationFrame(state.trackingRaf);
     state.trackingRaf = 0;
   }
-  if (state.video?.srcObject) {
-    for (const track of state.video.srcObject.getTracks()) track.stop();
-    state.video.srcObject = null;
-    state.video.pause();
-  }
+  closeWebcam();
   disconnectRemoteHeadTracking();
   state.lastPose = null;
   state.lastPoseMs = 0;
@@ -962,7 +1081,8 @@ window.getGodotRemoteHeadTrackingStatus = function getGodotRemoteHeadTrackingSta
 };
 
 window.recenterGodotWebcamTracker = function recenterGodotWebcamTracker() {
-  state.neutral = null;
+  state.neutral = {x: 0, y: 0, z: state.options.neutralZCm};
+  state.observationMissing = true;
   state.smoothed = { x: 0, y: 0, z: state.options.neutralZCm };
 };
 

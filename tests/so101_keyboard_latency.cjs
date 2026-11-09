@@ -1,0 +1,58 @@
+// Real event handler, simulated transport only. No robot connection.
+const assert = require('node:assert/strict');
+const {readFileSync} = require('node:fs');
+const {resolve} = require('node:path');
+(async () => {
+  global.window = {so101ArmController: {}, addEventListener() {}};
+  global.HTMLElement = class {};
+  const source = readFileSync(resolve(__dirname, '../robot_modules/so101/web/so101_web_serial.js'), 'utf8');
+  const {So101ArmController} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+  const arm = Object.create(So101ArmController.prototype), sent = [];
+  Object.assign(arm, {latest: {keyboardConnected: true}, keyboardKeys: new Set(),
+    keyboardKeyOrder: new Map(), keyboardKeySequence: 0, seq: 0, emitStatus() {},
+    send(packet) {sent.push(packet);return true;}});
+  const event = code => ({code, preventDefault() {}, stopPropagation() {}, stopImmediatePropagation() {}});
+  arm.handleKeyboardEvent(event('KeyW'), true);
+  assert.equal(sent.length, 1, 'press sends before returning from event handler');
+  assert.equal(sent[0].linear[1], 1);
+  arm.handleKeyboardEvent({...event('KeyW'), repeat: true}, true);
+  assert.equal(sent.length, 1, 'OS repeat must not flood commands');
+  arm.handleKeyboardEvent(event('KeyW'), false);
+  assert.equal(sent.length, 2, 'release immediately sends zero velocity');
+  assert.deepEqual(sent[1].linear, [0, 0, 0]);
+  arm.trialSuspended = true;
+  arm.handleKeyboardEvent(event('KeyW'), true);
+  assert.equal(sent.length, 2, 'paused trial cannot send input');
+  arm.trialSuspended = false;
+  arm.keyboardModalOpen = true;
+  arm.handleKeyboardEvent(event('KeyW'), true);
+  assert.equal(sent.at(-1).deadman, false, 'confirmation blocks keyboard motion');
+  arm.keyboardInputActive = true;
+  arm.sendKeyboardIntent();
+  assert.equal(sent.at(-1).deadman, false, 'confirmation also blocks timer motion');
+  arm.keyboardModalOpen = false;
+  sent.length = 2;
+  const input = new HTMLElement();input.tagName = 'INPUT';input.type = 'text';
+  arm.handleKeyboardEvent({...event('KeyW'), target: input}, true);
+  assert.equal(sent.length, 2, 'typing must never command hardware');
+  global.document = {hidden: false, hasFocus: () => true};
+  arm.clearKeyboardMotion();
+  assert.equal(sent.at(-1).deadman, false, 'blur disables motion immediately');
+  arm.sendKeyboardIntent();
+  assert.equal(sent.at(-1).deadman, false, 'timer cannot re-enable motion after blur');
+  arm.handleKeyboardEvent(event('KeyW'), true);
+  assert.equal(sent.at(-1).deadman, true, 'a new keypress restores focused input');
+  document.hidden = true;
+  arm.sendKeyboardIntent();
+  assert.equal(sent.at(-1).deadman, false, 'hidden page cannot send movement');
+  assert.deepEqual(sent.at(-1).linear, [0, 0, 0]);
+  assert.equal(arm.latest.keyboardTiming.hidden, true);
+  arm.lastKeyboardIntentAt = performance.now() - 1000;
+  arm.keyboardLongTaskMs = 350;
+  arm.sendKeyboardIntent();
+  assert.ok(arm.latest.keyboardTiming.gapMs >= 999);
+  assert.equal(arm.latest.keyboardTiming.longTaskMs, 350);
+  assert.ok(arm.latest.keyboardTiming.delayedCount >= 1);
+  console.log('PASS immediate key transitions, repeat suppression, Pause and editing isolation');
+  console.log('PASS background heartbeat keeps motion disabled; scheduling diagnostics retain delayed ticks');
+})().catch(error => {console.error(error);process.exitCode = 1;});

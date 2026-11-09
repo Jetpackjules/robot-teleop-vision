@@ -1,0 +1,408 @@
+"""Per-viewer native RGB-D cropping, after capture and before WAN transport.
+
+No camera settings or calibration files are changed. Source packets are immutable.
+The small retained image halo supports native triangles and confidence filters.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import math
+import struct
+import threading
+import time
+import zlib
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, wait
+
+import av
+import cv2
+import numpy as np
+from tools.workspace_stream_crop_native import bounds_bytes, clip_plane, compress_depth, crop_cells, decode_predictive, decompress_depth, retain_cells, retain_depth
+
+_CROP_WORKERS = ThreadPoolExecutor(max_workers=3, thread_name_prefix='workspace-crop')
+
+DEPTH_ENCODINGS = {"u16_mm_deflate", "u16_mm_vpredict_shuffle_deflate"}
+STREAM_SETTING_KEYS = frozenset({
+    'point_cleanup_enabled', 'point_cleanup_support', 'point_cleanup_radius_mm',
+    'point_preview_visible_only',
+    "workspace_stream_crop_enabled", "display_mode", "point_preview_enabled", "point_preview_budget",
+    "modeled_workspace_enabled", "modeled_workspace_center", "modeled_workspace_width",
+    "modeled_workspace_depth", "modeled_workspace_height", "modeled_workspace_heading",
+    "modeled_workspace_clearance",
+})
+
+
+def _vector(value, length):
+    if not isinstance(value, (list, tuple)) or len(value) != length:
+        raise ValueError("invalid crop vector")
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in value):
+        raise ValueError("nonfinite crop vector")
+    return np.asarray(value, dtype=np.float64)
+
+
+def _rotation(degrees):
+    x, y, z = np.radians(_vector(degrees, 3))
+    cx, sx, cy, sy, cz, sz = math.cos(x), math.sin(x), math.cos(y), math.sin(y), math.cos(z), math.sin(z)
+    return np.array([[cz*cy, cz*sy*sx-sz*cx, cz*sy*cx+sz*sx],
+                     [sz*cy, sz*sy*sx+cz*cx, sz*sy*cx-cz*sx], [-sy, cy*sx, cy*cx]])
+
+
+def crop_volumes(settings):
+    if settings.get("workspace_stream_crop_enabled") is not True or settings.get("display_mode") == "rgb_camera":
+        return []
+    volumes = []
+    if settings.get("modeled_workspace_enabled") is True:
+        center = _vector(settings.get("modeled_workspace_center"), 3)
+        width, depth, height, clearance, heading = [settings.get("modeled_workspace_"+name, default) for name, default in
+            [("width", 1.2), ("depth", .8), ("height", .8), ("clearance", .006), ("heading", 0)]]
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in [width, depth, height, clearance, heading]):
+            raise ValueError("invalid table volume")
+        if not (.1 <= width <= 4 and .1 <= depth <= 4 and 0 <= clearance <= .03 and clearance < height <= 3 and abs(heading) <= 180 and np.all(np.abs(center) <= 20)):
+            raise ValueError("invalid table volume")
+        center[1] += (height+clearance)/2
+        volumes.append((center, _rotation([0, heading, 0]).T, np.array([width/2, (height-clearance)/2, depth/2])))
+    return volumes
+
+
+def _decode_depth(data, camera):
+    width, height = int(camera["width"]), int(camera["height"])
+    if width < 1 or height < 1 or width*height > 16*1024*1024:
+        raise ValueError("invalid source dimensions")
+    raw = decompress_depth(data, width*height*2)
+    if raw is None:
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(data, width*height*2+1)
+        if len(raw) != width*height*2 or not decoder.eof or decoder.unconsumed_tail:
+            raise ValueError("invalid source depth")
+    if camera["depth_encoding"] == "u16_mm_deflate":
+        return np.frombuffer(raw, dtype="<u2").reshape(height, width)
+    native = decode_predictive(raw, width, height)
+    if native is not None:
+        return native
+    shuffled = np.frombuffer(raw, dtype=np.uint8)
+    count = width*height
+    zigzag = shuffled[:count].astype(np.uint16) | (shuffled[count:].astype(np.uint16) << 8)
+    delta = ((zigzag >> 1).astype(np.int32) ^ -(zigzag & 1).astype(np.int32)).reshape(height, width)
+    return np.cumsum(delta, axis=0, dtype=np.int32).astype(np.uint16)
+
+
+def _depth_clip_planes(shape, camera, volumes):
+    """Cache integer-depth clipping thresholds for each volume half-plane."""
+    height, width = shape
+    k = _vector(camera.get("intrinsics"), 4).astype(np.float32)
+    if k[0] <= 0 or k[1] <= 0:
+        raise ValueError("invalid source intrinsics")
+    model = _vector(camera.get("transform"), 16).reshape(4, 4, order="F")
+    if not np.allclose(model[3], [0, 0, 0, 1], atol=1e-6):
+        raise ValueError("invalid camera transform")
+    x = np.arange(width, dtype=np.float32)
+    y = np.arange(height, dtype=np.float32)
+    x, y = ((x-k[2])/k[0])[None,:], (-(y-k[3])/k[1])[:,None]
+    result = []
+    for center, inverse, half in volumes:
+        basis = (inverse @ model[:3, :3]).astype(np.float32)
+        origin = (inverse @ (model[:3, 3]-center)).astype(np.float32)
+        planes = []
+        for axis in range(3):
+            direction = basis[axis,0]*x+basis[axis,1]*y-basis[axis,2]
+            for coefficient,limit in [(direction,half[axis]+1e-5-origin[axis]),
+                                      (-direction,half[axis]+1e-5+origin[axis])]:
+                native = clip_plane(coefficient, limit)
+                if native is not None:
+                    planes.append(native)
+                    continue
+                ratio = np.divide(limit*1000,coefficient,out=np.zeros_like(coefficient),where=coefficient!=0)
+                kind = np.where(coefficient>0,1,np.where(coefficient<0,2,0)).astype(np.uint8)
+                kind[((coefficient>0)&(ratio<0))|((coefficient<0)&(ratio>65535))|((coefficient==0)&(limit<0))] = 3
+                kind[((coefficient>0)&(ratio>=65535))|((coefficient<0)&(ratio<=0))] = 0
+                threshold = np.where(coefficient>0,np.floor(ratio),np.ceil(ratio))
+                planes.append((np.clip(threshold,0,65535).astype(np.uint16),kind))
+        result.append(planes)
+    return result
+
+
+def retained_depth(depth, camera, volumes, bounds=None):
+    bounds = bounds if bounds is not None else _depth_clip_planes(depth.shape,camera,volumes)
+    native = retain_depth(depth,bounds)
+    if native is not None:
+        return native
+    cells = crop_cells(depth, bounds)
+    if cells is None:
+        cells = np.ones(depth.shape,dtype=np.uint8)
+        for planes in bounds:
+            outcode = np.zeros(depth.shape,dtype=np.uint8)
+            for index,(threshold,kind) in enumerate(planes):
+                outside = ((kind==1)&(depth>threshold))|((kind==2)&(depth<threshold))|(kind==3)
+                np.bitwise_or(outcode,np.uint8(1<<index),out=outcode,where=outside)
+            outcode[depth==0] = 255
+            # Retain crossing triangles, including those without an inside vertex.
+            quad = outcode.copy()
+            quad[:-1] &= outcode[1:]
+            quad[:,:-1] &= quad[:,1:]
+            cells &= quad==0
+    native = retain_cells(depth, cells)
+    if native is not None:
+        return native
+    tiles = cv2.dilate(cells,np.ones((8,16),np.uint8),anchor=(0,0),
+                      borderType=cv2.BORDER_CONSTANT,borderValue=0)[::8,::16]
+    mask = np.repeat(np.repeat(tiles,8,axis=0),16,axis=1)[:depth.shape[0],:depth.shape[1]]
+    mask = cv2.dilate(mask,np.ones((5,5),np.uint8),borderType=cv2.BORDER_CONSTANT,borderValue=0)
+    return np.where(mask, depth, 0).astype(np.uint16)
+
+
+def _rectangle(mask, quantum=32):
+    y = np.flatnonzero(np.any(mask,axis=1))
+    x = np.flatnonzero(np.any(mask,axis=0))
+    if not len(x):
+        return 0, 0, min(2, mask.shape[1]), min(2, mask.shape[0])
+    x0, y0 = int(x.min())//quantum*quantum, int(y.min())//quantum*quantum
+    x1 = min(mask.shape[1], (int(x.max())//quantum+1)*quantum)
+    y1 = min(mask.shape[0], (int(y.max())//quantum+1)*quantum)
+    return x0, y0, x1, y1
+
+
+class WorkspaceStreamCropper:
+    """Bounded codecs and one immutable-packet cache per browser page."""
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.cache_lock = threading.RLock()
+        self.decoders = OrderedDict()
+        self.encoders = OrderedDict()
+        self.previous = None
+        self.bounds = OrderedDict()
+        self.bounds_bytes = 0
+
+    def _bounds(self, depth, camera, volumes, *, point_only=False):
+        with self.cache_lock:
+            return self._cached_bounds(depth, camera, volumes, point_only=point_only)
+
+    def _cached_bounds(self, depth, camera, volumes, *, point_only=False):
+        key = (depth.shape,tuple(camera['intrinsics']),tuple(camera['transform']),
+               tuple((tuple(center),tuple(inverse.flat),tuple(half)) for center,inverse,half in volumes),
+               point_only)
+        if key in self.bounds:
+            self.bounds.move_to_end(key)
+            return self.bounds[key][0]
+        bounds = _depth_clip_planes(depth.shape,camera,volumes)
+        if point_only:
+            # The modeled workspace is convex. Its intersection with each
+            # camera ray is an interval, cached until the bounds or camera move.
+            lower = np.ones(depth.shape, dtype=np.uint16)
+            upper = np.full(depth.shape, 65535, dtype=np.uint16)
+            for planes in bounds:
+                for threshold, kind in planes:
+                    np.maximum(lower, threshold, out=lower, where=kind == 2)
+                    np.minimum(upper, threshold, out=upper, where=kind == 1)
+                    upper[kind == 3] = 0
+            bounds = lower, upper
+            size = lower.nbytes + upper.nbytes
+        else:
+            size = bounds_bytes(bounds)
+        while self.bounds and self.bounds_bytes+size>128*1024*1024:
+            _, (_, old_size) = self.bounds.popitem(last=False)
+            self.bounds_bytes -= old_size
+        if size<=128*1024*1024:
+            self.bounds[key] = bounds, size
+            self.bounds_bytes += size
+        return bounds
+
+    def point_depth(self, depth, camera, volumes, *, visible_only=False):
+        if not volumes:
+            return depth
+        bounds = self._bounds(depth, camera, volumes, point_only=visible_only)
+        if visible_only:
+            lower, upper = bounds
+            return np.where((depth >= lower) & (depth <= upper), depth, 0)
+        return retained_depth(depth, camera, volumes, bounds)
+
+    def _rgb(self, color, key):
+        with self.cache_lock:
+            codec = self.decoders.get(key)
+            if codec is None:
+                codec = av.CodecContext.create("mjpeg", "r")
+                self.decoders[key] = codec
+                if len(self.decoders) > 32:
+                    self.decoders.popitem(last=False)
+        frames = codec.decode(av.Packet(color))
+        if not frames:
+            raise ValueError("invalid source JPEG")
+        return frames[-1].to_ndarray(format="rgb24")
+
+    def _png(self, rgb, camera_id=''):
+        height, width = rgb.shape[:2]
+        key = (camera_id, width, height)
+        with self.cache_lock:
+            codec = self.encoders.get(key)
+            if codec is None:
+                codec = av.CodecContext.create("png", "w")
+                codec.width, codec.height, codec.pix_fmt = width, height, "rgb24"
+                codec.options = {"compression_level": "1"}
+                codec.open()
+                self.encoders[key] = codec
+                if len(self.encoders) > 32:
+                    self.encoders.popitem(last=False)
+        return b"".join(bytes(p) for p in codec.encode(av.VideoFrame.from_ndarray(np.ascontiguousarray(rgb), format="rgb24")))
+
+    def _camera(self, camera, color, encoded_depth, volumes):
+        original_color=color
+        original = copy.deepcopy(camera)
+        depth = _decode_depth(encoded_depth, camera)
+        kept = retained_depth(depth, camera, volumes,self._bounds(depth,camera,volumes))
+        box = _rectangle(kept != 0)
+        x0, y0, x1, y1 = box
+        original_rgb = camera.get("color_space") == "original_rgb"
+        pixels = None
+        color_box = box
+        if original_rgb:
+            p = camera.get("color_projection", {})
+            if p.get("model") != "pinhole":
+                raise ValueError("uncalibrated original RGB")
+            cw, ch = int(camera["color_width"]), int(camera["color_height"])
+            if [cw, ch] != p.get("size") or cw*ch > 16*1024*1024:
+                raise ValueError("invalid RGB projection dimensions")
+            k = _vector(camera["intrinsics"], 4)
+            ck, extrinsics = _vector(p.get("intrinsics"), 4), _vector(p.get("extrinsics"), 12)
+            rotation, translation = extrinsics[:9].reshape(3, 3, order="F"), extrinsics[9:]
+            valid = kept != 0
+            sample_count = int(np.count_nonzero(valid))
+            # Every retained sample lies inside this truncated depth frustum.
+            # Project its eight corners rather than millions of individual
+            # vertices. A near-plane crossing conservatively keeps full RGB.
+            if sample_count <= 65536:
+                # Small object regions can afford a tighter exact bound.
+                yy, xx = np.nonzero(kept)
+                z = kept[yy, xx].astype(np.float32)*.001
+            else:
+                zmin = float(np.min(kept, where=valid, initial=65535))*.001
+                zmax = float(np.max(kept, initial=0))*.001
+                xx, yy, z = [a.reshape(-1) for a in np.meshgrid([x0, x1-1], [y0, y1-1], [zmin, zmax], indexing='ij')]
+            local = np.array([(xx-k[2])*z/k[0], (yy-k[3])*z/k[1], z])
+            projected = rotation @ local+translation[:, None]
+            front = projected[2] > 1e-5
+            color_box = (0, 0, cw, ch)
+            if not sample_count:
+                color_box = (0, 0, min(cw, 2), min(ch, 2))
+            elif sample_count <= 65536 or np.all(front):
+                uv = projected[:2, front]/projected[2:3, front]*ck[:2, None]+ck[2:, None]
+                if sample_count <= 65536:
+                    inside = (uv[0] >= 0) & (uv[0] < cw-1) & (uv[1] >= 0) & (uv[1] < ch-1)
+                    uv = uv[:, inside]
+                if not uv.shape[1]:
+                    uv = np.zeros((2, 1))
+                color_box = (max(0, math.floor(uv[0].min()-2)//32*32), max(0, math.floor(uv[1].min()-2)//32*32),
+                             min(cw, math.ceil((uv[0].max()+3)/32)*32), min(ch, math.ceil((uv[1].max()+3)/32)*32))
+                if color_box[0] >= color_box[2] or color_box[1] >= color_box[3]:
+                    color_box = (0, 0, min(cw, 2), min(ch, 2))
+        else:
+            cw, ch = depth.shape[1], depth.shape[0]
+
+        cx0, cy0, cx1, cy1 = color_box
+        # Large noisy PNGs usually cost more than the sensor JPEG. Bound the
+        # candidate's raw area before paying for decode/encode; skipped RGB
+        # stays byte-for-byte unchanged at its original resolution.
+        candidate_bytes = (cx1-cx0)*(cy1-cy0)*3
+        if (cx0, cy0, cx1, cy1) != (0, 0, cw, ch) and (not original_rgb or candidate_bytes <= max(4096, len(color)*2)):
+            pixels = self._rgb(color, str(camera.get("id", "")))
+            if pixels.shape[:2] != (ch, cw):
+                raise ValueError("JPEG dimensions do not match calibration")
+            cropped_color = self._png(pixels[cy0:cy1, cx0:cx1],str(camera.get('id','')))
+            if len(cropped_color) < len(color) or not original_rgb:
+                color = cropped_color
+                camera["color_encoding"] = "png"
+                if original_rgb:
+                    camera["color_width"], camera["color_height"] = cx1-cx0, cy1-cy0
+                    projection = camera["color_projection"]
+                    projection["size"] = [cx1-cx0, cy1-cy0]
+                    projection["intrinsics"][2] -= cx0
+                    projection["intrinsics"][3] -= cy0
+            else:
+                color_box = (0, 0, cw, ch)
+        else:
+            color_box = (0, 0, cw, ch)
+        camera["width"], camera["height"] = x1-x0, y1-y0
+        camera["intrinsics"][2] -= x0
+        camera["intrinsics"][3] -= y0
+        camera["stream_source_size"] = [depth.shape[1], depth.shape[0]]
+        camera["stream_depth_origin"] = [x0, y0]
+        camera["depth_encoding"] = "u16_mm_deflate"
+        raw = kept[y0:y1, x0:x1].astype("<u2").tobytes()
+        packed = compress_depth(raw)
+        # For legacy aligned RGB, an expensive lossless PNG can cost more than
+        # the whole original JPEG. Keep that JPEG and the native grid instead.
+        if not original_rgb and len(color)+len(packed) >= original["color_length"]+len(encoded_depth):
+            camera.clear()
+            camera.update(original)
+            color = original_color
+            camera["depth_encoding"] = "u16_mm_deflate"
+            packed = compress_depth(kept.astype("<u2").tobytes())
+            color_box = (0, 0, cw, ch)
+        camera["color_length"], camera["depth_length"] = len(color), len(packed)
+        return color, packed, {"source_depth_pixels": depth.size, "depth_pixels": camera["width"]*camera["height"],
+            "source_color_pixels": cw*ch, "color_pixels": (color_box[2]-color_box[0])*(color_box[3]-color_box[1]),
+            "source_samples": int(np.count_nonzero(depth)), "retained_samples": int(np.count_nonzero(kept))}
+
+    def crop(self, packet, settings):
+        try:
+            volumes = crop_volumes(settings)
+        except (ValueError, TypeError, OverflowError):
+            return packet
+        if not volumes:
+            return packet
+        key = json.dumps({k: v for k, v in settings.items() if k in STREAM_SETTING_KEYS}, sort_keys=True)
+        with self.lock:
+            if self.previous is not None and self.previous[0] is packet and self.previous[1] == key:
+                return self.previous[2]
+            try:
+                result = self._packet(packet, volumes, time.perf_counter())
+            except (ValueError, TypeError, KeyError, IndexError, OverflowError, zlib.error, av.error.FFmpegError):
+                # Unsupported/corrupt local data must not blank a live viewer.
+                result = packet
+            self.previous = (packet, key, result)
+            return result
+
+    def _packet(self, packet, volumes, started):
+        if len(packet) < 9 or packet[:5] != b"RGBD1":
+            return packet
+        length = struct.unpack_from("<I", packet, 5)[0]
+        if length > 4*1024*1024 or 9+length > len(packet):
+            return packet
+        metadata = json.loads(packet[9:9+length])
+        cameras = metadata.get("cameras", [])
+        if (metadata.get("metadata_delta") or not 0 < len(cameras) <= 32
+                or len({c.get('id') for c in cameras})!=len(cameras)
+                or any(c.get("depth_encoding") not in DEPTH_ENCODINGS for c in cameras)):
+            return packet
+        offset, payloads, totals, inputs = 9+length, [], {}, []
+        for camera in cameras:
+            csize, dsize = int(camera["color_length"]), int(camera["depth_length"])
+            if csize < 0 or dsize < 0 or offset+csize+dsize > len(packet):
+                raise ValueError("truncated RGB-D source")
+            color, depth = packet[offset:offset+csize], packet[offset+csize:offset+csize+dsize]
+            offset += csize+dsize
+            inputs.append((camera,color,depth,volumes))
+        if offset != len(packet):
+            raise ValueError("unexpected RGB-D trailer")
+        if len(inputs)>1:
+            futures = [_CROP_WORKERS.submit(self._camera,*args) for args in inputs]
+            # Join every job before fail-open handling can start another frame
+            # on the same per-camera codec contexts.
+            wait(futures)
+            results = [future.result() for future in futures]
+        else:
+            results = [self._camera(*args) for args in inputs]
+        for color,depth,counts in results:
+            payloads.extend([color, depth])
+            for name, value in counts.items():
+                totals[name] = totals.get(name, 0)+value
+        metadata["stream_crop"] = {"applied": True, "input_bytes": len(packet), "output_bytes": 0, "halo_pixels": 2,
+            "processing_ms":round((time.perf_counter()-started)*1000,2), **totals}
+        result = b""
+        for _ in range(3):
+            encoded = json.dumps(metadata, separators=(",", ":")).encode()
+            result = b"RGBD1"+struct.pack("<I", len(encoded))+encoded+b"".join(payloads)
+            if metadata["stream_crop"]["output_bytes"] == len(result):
+                break
+            metadata["stream_crop"]["output_bytes"] = len(result)
+        return result

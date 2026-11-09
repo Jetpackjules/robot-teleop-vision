@@ -57,6 +57,7 @@ void fragment() {
     vec4 ray = INV_PROJECTION_MATRIX * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0);
     vec3 point = ray.xyz / ray.w;
     point *= z / max(-point.z, 0.000001);
+    vec3 world = (INV_VIEW_MATRIX * vec4(point, 1.0)).xyz;
     vec4 clip = PROJECTION_MATRIX * vec4(point, 1.0);
     float device_z = clip.z / clip.w;
     DEPTH = CLIP_SPACE_FAR < 0.0 ? device_z * 0.5 + 0.5 : device_z;

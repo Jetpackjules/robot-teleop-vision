@@ -9,6 +9,8 @@
 #include <godot_cpp/variant/string.hpp>
 #include <cstddef>
 #include <cstdint>
+#include "native_color_snapshot.h"
+#include <godot_cpp/variant/transform3d.hpp>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -87,6 +89,11 @@ public:
     bool publish(uint64_t p_frame_id, int p_stride, const godot::Vector4 &p_intrinsics,
         const godot::Ref<godot::Image> &p_depth, const godot::Ref<godot::Image> &p_color,
         double p_capture_fps, double p_capture_unix_ms);
+    bool publish_native(uint64_t frame, int stride, const godot::Vector4 &intrinsics,
+        const godot::Ref<godot::Image> &depth, const NativeColorSnapshot &color,
+        const godot::Dictionary &projection, const godot::Transform3D &transform,
+        double fps, double stamp, double max_depth, bool match,
+        const godot::Vector3 &gain, const godot::Vector3 &bias);
 private:
     static constexpr size_t CAPACITY = 16 * 1024 * 1024;
     uint8_t *view = nullptr;

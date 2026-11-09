@@ -6,7 +6,7 @@ const PRESENT_POSITION_ADDRESS = 56;
 const POSITION_BYTES = 2;
 const TARGET_HZ = 30;
 const SERIAL_RESPONSE_TIMEOUT_MS = 100;
-const MAX_LEADER_SAMPLE_AGE_MS = 250;
+const MAX_LEADER_SAMPLE_AGE_MS = 500;
 const KEYBOARD_CODES = new Set([
   "KeyW", "KeyA", "KeyS", "KeyD", "KeyR", "KeyF", "KeyQ", "KeyE",
   "KeyI", "KeyJ", "KeyK", "KeyL",
@@ -72,9 +72,13 @@ export class So101ArmController extends EventTarget {
     this.socket = null;
     this.socketReconnectTimer = 0;
     this.socketHeartbeatTimer = 0;
+    this.viewSettingsPending = new Map();
     this.serialReconnectTimer = 0;
     this.loopTimer = 0;
     this.keyboardTimer = 0;
+    this.keyboardInputActive = false;
+    this.lastKeyboardIntentAt = 0;
+    this.keyboardLongTaskMs = 0;
     this.keyboardKeys = new Set();
     this.keyboardKeyOrder = new Map();
     this.keyboardKeySequence = 0;
@@ -108,20 +112,33 @@ export class So101ArmController extends EventTarget {
     this.feedbackSettings = {
       measured_feedback_enabled: true,
       target_ghost_enabled: true,
-      following_error_safety_enabled: true,
+      following_error_safety_enabled: false,
       freeze_overlay_on_stale_enabled: true,
       d455_visual_correction_enabled: false,
     };
     this.idleReturnEnabled = false;
+    this.idleReturnTimeoutSeconds = 300;
     this.connectArmSocket();
     this.onKeyboardDown = (event) => this.handleKeyboardEvent(event, true);
     this.onKeyboardUp = (event) => this.handleKeyboardEvent(event, false);
     window.addEventListener("keydown", this.onKeyboardDown, { capture: true });
     window.addEventListener("keyup", this.onKeyboardUp, { capture: true });
     window.addEventListener("blur", () => this.clearKeyboardMotion());
+    window.addEventListener("focus", () => {
+      if (this.latest.keyboardConnected && !document.hidden) {
+        this.keyboardInputActive = true;
+        this.sendKeyboardIntent();
+      }
+    });
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) this.clearKeyboardMotion();
     });
+    if (typeof PerformanceObserver !== "undefined" && PerformanceObserver.supportedEntryTypes?.includes("longtask")) {
+      this.keyboardPerformanceObserver = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) this.keyboardLongTaskMs = Math.max(this.keyboardLongTaskMs, entry.duration);
+      });
+      this.keyboardPerformanceObserver.observe({ type: "longtask" });
+    }
     if ("serial" in navigator) {
       navigator.serial.addEventListener("connect", () => this.scheduleApprovedLeaderReconnect(150));
       navigator.serial.addEventListener("disconnect", (event) => {
@@ -171,9 +188,18 @@ export class So101ArmController extends EventTarget {
       try {
         const status = JSON.parse(event.data);
         if (status.type !== "arm_status") return;
+        this.statusRevision = (this.statusRevision || 0) + 1;
+        const reply = status.view_settings_reply;
+        const pending = reply && this.viewSettingsPending.get(reply.request_id);
+        if (pending) {
+          window.clearTimeout(pending.timer);
+          this.viewSettingsPending.delete(reply.request_id);
+          if (reply.ok === true) pending.resolve(true);
+          else pending.reject(new Error(reply.error || "Robot settings were rejected."));
+        }
         if (
           this.latest.keyboardConnected
-          && String(status.fault || "").includes("arm command transport delay is older than 250 ms")
+          && /arm command transport delay is older than \d+ ms/.test(String(status.fault || ""))
         ) {
           this.resumeKeyboardAfterTransportRecovery = true;
           this.latest.fault = "Recovering keyboard control after a transient network delay…";
@@ -248,6 +274,11 @@ export class So101ArmController extends EventTarget {
       window.clearInterval(this.socketHeartbeatTimer);
       this.socketHeartbeatTimer = 0;
       this.latest.serverConnected = false;
+      for (const pending of this.viewSettingsPending.values()) {
+        window.clearTimeout(pending.timer);
+        pending.reject(new Error("Robot connection closed. The request was not retried; check its status before retrying."));
+      }
+      this.viewSettingsPending.clear();
       this.latest.armed = false;
       this.latest.state = "disconnected";
       if (event instanceof CloseEvent && event.code === 4001) {
@@ -270,6 +301,7 @@ export class So101ArmController extends EventTarget {
   }
 
   send(message) {
+    if (this.trialSuspended && !["arm_status_request", "arm_hold"].includes(message.type)) return false;
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return false;
     if (this.socket.bufferedAmount > 32 * 1024) return false;
     this.socket.send(JSON.stringify(message));
@@ -281,6 +313,26 @@ export class So101ArmController extends EventTarget {
       if (typeof settings[key] === "boolean") this.feedbackSettings[key] = settings[key];
     }
     return this.sendFeedbackSettings();
+  }
+
+  requestViewSettings(settings) {
+    if (!this.latest.serverConnected || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("Robot server disconnected. Reconnect before changing calibration."));
+    }
+    if (this.viewSettingsPending.size >= 8) return Promise.reject(new Error("Wait for the pending robot settings."));
+    const request_id = globalThis.crypto?.randomUUID?.() || `view-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        this.viewSettingsPending.delete(request_id);
+        reject(new Error("Robot settings acknowledgement timed out. The request was not retried; check its status before retrying."));
+      }, 5000);
+      this.viewSettingsPending.set(request_id, {resolve, reject, timer});
+      if (!this.send({type:"robot_view_settings", request_id, settings})) {
+        window.clearTimeout(timer);
+        this.viewSettingsPending.delete(request_id);
+        reject(new Error("Robot settings could not be sent. Check the connection and retry."));
+      }
+    });
   }
 
   sendFeedbackSettings() {
@@ -366,6 +418,8 @@ export class So101ArmController extends EventTarget {
     this.responses.clear();
     this.lastLeaderPositions = null;
     this.lastLeaderReadTimes.clear();
+    this.lastLeaderPollCompletedMs = undefined;
+    this.leaderReadRetryPending = false;
     this.leaderReadFault = false;
     this.sendTimes = [];
     this.latest.leaderConnected = false;
@@ -471,6 +525,9 @@ export class So101ArmController extends EventTarget {
       }
       if (!current()) return;
       const sampleTime = performance.now();
+      const pollStalled = started - (this.lastLeaderPollCompletedMs ?? started) > MAX_LEADER_SAMPLE_AGE_MS
+        || sampleTime - started > MAX_LEADER_SAMPLE_AGE_MS;
+      this.lastLeaderPollCompletedMs = sampleTime;
       if (this.responses.size === MOTOR_IDS.length) {
         this.lastLeaderPositions = MOTOR_IDS.map(id => this.responses.get(id));
       }
@@ -488,6 +545,7 @@ export class So101ArmController extends EventTarget {
       if (this.responses.size >= 5 && this.lastLeaderPositions && !staleIds.length) {
         const positions = [...this.lastLeaderPositions];
         this.leaderReadFault = false;
+        this.leaderReadRetryPending = false;
         const now = Date.now();
         this.latest.leaderPositions = positions;
         this.latest.leaderState = this.responses.size === MOTOR_IDS.length
@@ -496,13 +554,27 @@ export class So101ArmController extends EventTarget {
         this.sendTimes.push(now);
         while (this.sendTimes.length && now - this.sendTimes[0] > 1000) this.sendTimes.shift();
         this.latest.leaderHz = this.sendTimes.length;
-        this.send({ type: "arm_command", seq: this.seq++, sent_unix_ms: now, positions });
+        const commandAt = performance.now();
+        const gapMs = this.lastLeaderCommandMs ? commandAt - this.lastLeaderCommandMs : 0;
+        this.latest.leaderTiming = {
+          gapMs, maxGapMs: Math.max(gapMs, this.latest.leaderTiming?.maxGapMs || 0),
+          readMs: commandAt - started,
+          sampleAgeMs: Math.max(...MOTOR_IDS.map(id => sampleTime - this.lastLeaderReadTimes.get(id))),
+          bufferedBytes: this.socket?.bufferedAmount || 0,
+          hidden: document.hidden, focused: document.hasFocus(),
+        };
+        if (this.send({ type: "arm_command", seq: this.seq++, sent_unix_ms: now, positions,
+                        input_timing: this.latest.leaderTiming })) this.lastLeaderCommandMs = commandAt;
       } else {
         if (this.lastLeaderPositions && staleIds.length) {
           this.latest.leaderState = `stale leader encoder ${staleIds.join(', ')}; waiting for fresh readings`;
-          // Leader input is ignored during calibration/rest returns. A stale
-          // background reader must not interrupt those independent actions.
-          if (!this.leaderReadFault && this.latest.armed && this.latest.controlMode === "leader") this.hold();
+          // A browser stall can age a complete sample before the next serial
+          // callback. Let the follower watchdog hold while we try one fresh poll.
+          if (!this.leaderReadFault || this.leaderReadRetryPending) {
+            const retry = !this.leaderReadFault && pollStalled;
+            this.leaderReadRetryPending = retry;
+            if (!retry && this.latest.armed && this.latest.controlMode === "leader") this.hold();
+          }
           this.leaderReadFault = true;
         } else {
           this.latest.leaderState = `partial read ${this.responses.size}/6`;
@@ -519,24 +591,172 @@ export class So101ArmController extends EventTarget {
     this.scheduleLoop(Math.max(0, period - this.lastLoopMs));
   }
 
+  leaderInputFresh() {
+    return !!this.lastLeaderPositions && !this.leaderReadFault && MOTOR_IDS.every(id => (
+      this.lastLeaderReadTimes.has(id) && performance.now() - this.lastLeaderReadTimes.get(id) <= MAX_LEADER_SAMPLE_AGE_MS
+    ));
+  }
+
+  async prepareTrialControl(options = {}) {
+    if (this.trialSuspended) throw new Error("Resume or finish the paused trial before setting up control.");
+    if (options.continuation) {
+      const revision = this.statusRevision || 0;
+      if (!this.send({type: 'arm_status_request'})) throw new Error('Arm control connection unavailable. Reconnect before starting the trial.');
+      await this.waitForTrialStatus(() => (this.statusRevision || 0) > revision);
+      const status = this.latest;
+      const source = status.leaderConnected ? 'leader' : status.keyboardConnected ? 'keyboard' : null;
+      if (!status.serverConnected || !status.followerConnected || !status.armed
+          || status.status?.measured_feedback_fresh !== true || status.fault
+          || !source || status.status?.control_source !== source || (source === 'leader' && !this.leaderInputFresh()))
+        throw new Error('Arm control is held or unavailable. Check the arm and explicitly enable it when ready.');
+      return; // Every recording start verifies the existing session; it never Enables or replaces its reference.
+    }
+    // A connected leader wins. With neither input selected, the setup click
+    // opens the USB chooser; keyboard requires its explicit control button.
+    if (this.latest.leaderConnected) return this.prepareLeaderTrial(options);
+    if (!this.latest.keyboardConnected) return this.prepareLeaderTrial(options);
+    await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected && status.keyboardConnected);
+    const before = this.statusRevision || 0;
+    if (!this.clearKeyboardMotion()) throw new Error("Could not send the idle keyboard packet. Wait for the arm connection, then retry Start practice.");
+    const idleSequence = this.lastKeyboardIntentSequence;
+    // A timeout sends Hold on the host. Do not decide whether to Enable from
+    // a cached pre-timeout 'armed' status; first acknowledge our new idle input.
+    await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected && status.keyboardConnected
+      && (this.statusRevision || 0) > before && status.status?.last_seq >= idleSequence
+      && status.status?.measured_feedback_fresh === true);
+    if (!this.latest.armed || (this.latest.status?.control_source ?? this.latest.controlMode) !== "keyboard") this.enableArm();
+    await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected && status.keyboardConnected
+      && status.status?.measured_feedback_fresh === true
+      && status.armed && (status.status?.control_source ?? status.controlMode) === "keyboard");
+  }
+
+  async prepareLeaderTrial({connect = false} = {}) {
+    if (this.trialSuspended) throw new Error("Resume or finish the paused trial before setting up control.");
+    if (!this.latest.leaderConnected) {
+      if (!connect) throw new Error("Reconnect the physical leader arm with Set up session.");
+      await this.connectLeader();
+    }
+    await this.waitForTrialStatus(status => status.serverConnected && status.followerConnected
+      && status.leaderConnected && this.leaderInputFresh());
+    if (!this.latest.armed || (this.latest.status?.control_source ?? this.latest.controlMode) !== "leader") this.enableArm();
+    await this.waitForTrialStatus(status => status.armed && (status.status?.control_source ?? status.controlMode) === "leader");
+  }
+
   enableArm() {
+    if (this.trialSuspended) return false;
     const source = this.latest.keyboardConnected ? "keyboard" : "leader";
     if (source === "leader" && !this.latest.leaderConnected) throw new Error("Connect the leader arm or enable keyboard control first");
-    if (source === "leader" && (!this.lastLeaderPositions || this.leaderReadFault || MOTOR_IDS.some(id => (
-      !this.lastLeaderReadTimes.has(id)
-      || performance.now() - this.lastLeaderReadTimes.get(id) > MAX_LEADER_SAMPLE_AGE_MS
-    )))) throw new Error("Wait for fresh readings from all six leader encoders before enabling the arm");
+    if (source === "leader" && !this.leaderInputFresh()) throw new Error("Wait for fresh readings from all six leader encoders before enabling the arm");
     if (!this.latest.serverConnected) throw new Error("Arm control server is not connected");
-    if (source === "keyboard") this.sendKeyboardIntent();
-    this.send({ type: "arm_enable", source });
+    if (source === "keyboard" && !this.sendKeyboardIntent()) throw new Error("Could not send fresh keyboard input. Wait for the connection and retry.");
+    if (!this.send({ type: "arm_enable", source })) throw new Error("Could not send Enable. Wait for the connection and retry.");
+    return source;
+  }
+
+  async enableArmAndConfirm({matchLeader = false} = {}) {
+    const revision = this.statusRevision || 0;
+    let source;
+    if (matchLeader) {
+      if (this.trialSuspended || this.latest.state !== "hold" || this.latest.status?.control_source !== "leader"
+          || !this.latest.serverConnected || !this.latest.followerConnected || !this.latest.leaderConnected
+          || !this.leaderInputFresh()) throw new Error("Slow match requires a held arm and fresh leader input.");
+      if (!this.send({type: "arm_match_leader", seq: this.seq++, sent_unix_ms: Date.now()})) {
+        throw new Error("Could not send slow match. Check the arm connection.");
+      }
+      source = "leader";
+    } else {
+      source = this.enableArm();
+      if (!source) throw new Error("Resume or finish the paused trial before enabling the arm.");
+    }
+    try {
+      await this.waitForTrialStatus(arm => (this.statusRevision || 0) > revision
+        && arm.serverConnected && arm.followerConnected && !arm.fault
+        && ((matchLeader && arm.status?.rest_return_active && arm.status.rest_return_reason === "leader_match")
+          || (arm.armed && arm.status?.control_source === source && arm.status?.measured_feedback_fresh === true)));
+    } catch (error) {
+      const reason = this.latest.fault || this.latest.status?.message;
+      throw new Error(reason ? `Enable not confirmed. ${reason}` : `Enable not confirmed. ${error.message}`);
+    }
   }
 
   hold() {
     this.keyboardKeys.clear();
     this.keyboardKeyOrder.clear();
     this.latest.keyboardDeadman = false;
-    this.send({ type: "arm_hold" });
+    const sent = this.send({ type: "arm_hold" });
     this.emitStatus();
+    return sent;
+  }
+
+  waitForTrialStatus(predicate) {
+    if (predicate(this.latest)) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      let settled = false, pollTimer = 0;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer); window.clearTimeout(pollTimer);
+        this.removeEventListener("status", check);
+        if (error) reject(error); else resolve();
+      };
+      const check = () => {
+        if (!this.latest.serverConnected) finish(new Error("Arm connection was lost. The trial remains held."));
+        else if (predicate(this.latest)) finish();
+      };
+      const timer = window.setTimeout(() => {
+        if (predicate(this.latest)) return finish();
+        const status = this.latest.status || {};
+        finish(new Error(`The arm did not confirm the trial control change. Last status: ${this.latest.state || 'unknown'} / ${status.control_source || 'none'}${status.fault ? ': '+status.fault : ''}.`));
+      }, 6000);
+      this.addEventListener("status", check);
+      // Read-only retries recover delayed/missed status delivery, never repeat
+      // Enable or a motion command. No recording begins without confirmation.
+      const poll = () => {
+        if (settled) return;
+        if (this.latest.serverConnected) this.send({type:"arm_status_request"});
+        if (!settled) pollTimer = window.setTimeout(poll,500);
+      };
+      poll();
+    });
+  }
+
+  async pauseTrial() {
+    if (!this.latest.serverConnected) throw new Error("Arm control server is not connected.");
+    if (!this.trialSuspended) {
+      this.trialWasArmed = this.latest.armed === true;
+      this.trialControlMode = this.latest.controlMode;
+      // A paused study must not trigger the optional idle return to rest.
+      this.send({type: "arm_idle_return_settings", enabled: false, timeout_seconds: this.idleReturnTimeoutSeconds || 300});
+    }
+    this.trialSuspended = true;
+    if (!this.hold()) throw new Error("Could not send Hold to the arm.");
+    await this.waitForTrialStatus(status => status.followerConnected && status.state === "hold" && !status.armed);
+  }
+
+  async resumeTrial() {
+    if (!this.trialSuspended) return;
+    if (this.trialWasArmed && this.latest.controlMode !== this.trialControlMode)
+      throw new Error("Restore the arm control mode used before Pause.");
+    this.trialSuspended = false;
+    try {
+      if (this.trialWasArmed) {
+        this.enableArm();
+        await this.waitForTrialStatus(status => status.followerConnected && status.armed === true);
+      }
+      this.trialWasArmed = false;
+      this.sendIdleReturnSettings();
+    } catch (error) {
+      this.trialSuspended = true;
+      this.hold();
+      throw error;
+    }
+  }
+
+  finishTrialPause() {
+    if (!this.trialSuspended) return;
+    this.trialSuspended = false;
+    this.trialWasArmed = false;
+    this.sendIdleReturnSettings();
   }
 
   returnToRest() {
@@ -569,7 +789,7 @@ export class So101ArmController extends EventTarget {
     }, 3000);
   }
 
-  setIdleReturn(enabled, timeoutSeconds = 600) {
+  setIdleReturn(enabled, timeoutSeconds = 300) {
     this.idleReturnEnabled = enabled === true;
     this.idleReturnTimeoutSeconds = timeoutSeconds;
     return this.sendIdleReturnSettings();
@@ -580,7 +800,7 @@ export class So101ArmController extends EventTarget {
     return this.send({
       type: "arm_idle_return_settings",
       enabled: this.idleReturnEnabled === true,
-      timeout_seconds: this.idleReturnTimeoutSeconds || 600,
+      timeout_seconds: this.idleReturnTimeoutSeconds || 300,
     });
   }
 
@@ -588,6 +808,9 @@ export class So101ArmController extends EventTarget {
     if (this.latest.leaderConnected || this.port) await this.disconnectLeader(true);
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     this.latest.keyboardConnected = true;
+    this.keyboardInputActive = !document.hidden;
+    this.lastKeyboardIntentAt = 0;
+    this.keyboardLongTaskMs = 0;
     this.latest.keyboardDeadman = true;
     this.latest.controlMode = "keyboard";
     this.latest.leaderState = "keyboard Cartesian claw control";
@@ -603,6 +826,7 @@ export class So101ArmController extends EventTarget {
     this.keyboardKeys.clear();
     this.keyboardKeyOrder.clear();
     this.latest.keyboardConnected = false;
+    this.keyboardInputActive = false;
     this.latest.keyboardDeadman = false;
     if (this.latest.controlMode === "keyboard") this.latest.controlMode = "none";
     if (sendHold) this.hold();
@@ -610,11 +834,16 @@ export class So101ArmController extends EventTarget {
   }
 
   handleKeyboardEvent(event, pressed) {
+    if (this.keyboardModalOpen) { this.clearKeyboardMotion(); return; }
+    if (typeof document !== "undefined" && document.body?.classList?.contains("workspace-editing")) { this.clearKeyboardMotion(); return; }
+    if (this.trialSuspended) return;
     if (!this.latest.keyboardConnected || !KEYBOARD_CODES.has(event.code)) return;
     if (isTextEditingTarget(event.target)) return;
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
+    this.keyboardInputActive = true;
+    const changed = this.keyboardKeys.has(event.code) !== pressed;
     if (pressed) {
       this.keyboardKeys.add(event.code);
       if (!event.repeat) this.keyboardKeyOrder.set(event.code, ++this.keyboardKeySequence);
@@ -627,6 +856,9 @@ export class So101ArmController extends EventTarget {
       }
     }
     this.latest.keyboardDeadman = true;
+    // Send transitions (including key release) immediately; retain the 30 Hz
+    // heartbeat and existing follower speed limits. OS repeats add no intent.
+    if (changed) this.sendKeyboardIntent();
     this.emitStatus();
   }
 
@@ -637,8 +869,10 @@ export class So101ArmController extends EventTarget {
     this.armContactLatched = false;
     this.gripperContactLatched = false;
     this.latest.keyboardDeadman = false;
-    this.sendKeyboardIntent(true);
+    this.keyboardInputActive = false;
+    const sent = this.sendKeyboardIntent(true);
     this.emitStatus();
+    return sent;
   }
 
   keyboardAxis(positive, negative) {
@@ -652,7 +886,24 @@ export class So101ArmController extends EventTarget {
 
   sendKeyboardIntent(forceIdle = false) {
     if (!this.latest.keyboardConnected) return false;
-    const inputEnabled = !forceIdle;
+    const now = performance.now();
+    const hidden = typeof document !== "undefined" && document.hidden === true;
+    const gap = this.lastKeyboardIntentAt ? now - this.lastKeyboardIntentAt : 0;
+    this.lastKeyboardIntentAt = now;
+    const timing = this.latest.keyboardTiming || { maxGapMs: 0, delayedCount: 0 };
+    this.latest.keyboardTiming = {
+      gapMs: gap, maxGapMs: Math.max(timing.maxGapMs, gap),
+      delayedCount: timing.delayedCount + (gap > 200 ? 1 : 0),
+      hidden, focused: typeof document === "undefined" || document.hasFocus?.() !== false,
+      longTaskMs: this.keyboardLongTaskMs || 0,
+      bufferedBytes: this.socket?.bufferedAmount || 0,
+      workTrace: (window.getRobotTeleopBrowserWorkTrace?.() || []).slice(-5)
+        .concat(window.getGodotHybridTimingTrace?.() || []),
+    };
+    this.keyboardLongTaskMs = 0;
+    // Blur/visibility clears motion once; subsequent heartbeat ticks must not
+    // silently restore deadman=true. Background timers can run only at 1 Hz.
+    const inputEnabled = !forceIdle && !hidden && !this.keyboardModalOpen && this.keyboardInputActive !== false;
     this.latest.keyboardDeadman = inputEnabled;
     const armInputEnabled = inputEnabled && !this.armContactLatched;
     const right = armInputEnabled ? this.keyboardAxis("KeyD", "KeyA") : 0;
@@ -670,9 +921,10 @@ export class So101ArmController extends EventTarget {
       precision: this.keyboardKeys.has("ShiftLeft") || this.keyboardKeys.has("ShiftRight"),
       deadman: inputEnabled,
     };
-    return this.send({
+    const sent = this.send({
       ...common,
       type: "arm_cartesian_velocity",
+      input_timing: this.latest.keyboardTiming,
       // The service captures a horizontal plane from the claw's actual radial
       // direction at enable time. This stays intuitive even when base yaw or
       // visual registration is not aligned with fixed robot X/Y.
@@ -682,6 +934,8 @@ export class So101ArmController extends EventTarget {
       wrist: [wristPitch, wristRoll],
       gripper,
     });
+    if (sent) this.lastKeyboardIntentSequence = common.seq;
+    return sent;
   }
 
   restartFollower() {
@@ -710,6 +964,7 @@ export class So101ArmController extends EventTarget {
   }
 
   shutdown() {
+    this.keyboardPerformanceObserver?.disconnect();
     window.clearTimeout(this.serialReconnectTimer);
     window.clearTimeout(this.socketReconnectTimer);
     window.clearInterval(this.socketHeartbeatTimer);

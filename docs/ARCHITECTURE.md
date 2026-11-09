@@ -26,7 +26,7 @@ Capture, encoding, requests, and client rendering are decoupled. A slow encoder 
 
 ## Module boundary
 
-Core knows only the manifest, `RobotAdapter`, `GenericRobotOperator`, `robot-teleop/v1`, browser hooks, a renderer descriptor, and the Godot `robot_module` group. It does not know motor count, link names, hardware packets, calibration stages, or UI labels.
+The shared runtime negotiates control spaces through the manifest, `RobotAdapter`, `GenericRobotOperator`, and `robot-teleop/v1`. The module owns the wire protocol and hardware writes. The study UI, claw masking, and parts of calibration and pose rendering currently reference the SO-101 directly.
 
 The manifest is both negotiation and composition: it names supported command spaces, inputs, safety actions, views, and features, then points each runtime at module-owned code. Private Python entrypoints and state filenames are never exposed to the browser.
 

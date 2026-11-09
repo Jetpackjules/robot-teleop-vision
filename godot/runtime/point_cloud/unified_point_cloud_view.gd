@@ -1,7 +1,10 @@
 @tool
 extends Node3D
 
+const BoardWorldLevel = preload("res://godot/runtime/point_cloud/board_world_level.gd")
+const LockedTopCalibration = preload("res://godot/runtime/point_cloud/locked_top_camera_calibration.gd")
 const RigCalibration = preload("res://godot/runtime/point_cloud/realsense_rig_calibration.gd")
+const JointRefinement = preload("res://godot/runtime/point_cloud/realsense_joint_refinement.gd")
 const MeshFusion = preload("res://godot/runtime/point_cloud/realsense_mesh_fusion.gd")
 const BlendPCR = preload("res://godot/runtime/point_cloud/blendpcr/blendpcr_renderer.gd")
 const CameraRigGuides = preload("res://godot/runtime/point_cloud/camera_rig_guides.gd")
@@ -277,7 +280,7 @@ const DORMANT_OAKD_PROPERTIES := [
 @export var auto_level_from_robot_base: bool = false:
 	set(value):
 		auto_level_from_robot_base = value
-		if not value and is_inside_tree():
+		if not value and is_inside_tree() and not _world_level_source.begins_with("calibration_board_"):
 			_clear_world_level(true)
 ## Re-applies world leveling from the current saved robot registration without recalibrating either camera.
 @export_tool_button("Level World From Robot") var level_world_from_robot_action: Callable = level_world_from_robot_base
@@ -601,7 +604,7 @@ const DORMANT_OAKD_PROPERTIES := [
 
 @export_group("Calibration")
 @export_subgroup("Core Actions")
-## Calibrates all enabled RealSense cameras in one run using native RGB-D matching. Keep the cameras and scene still. Saves only when the whole rig succeeds.
+## Calibrates all enabled cameras, then jointly refines RGB-D image alignment and validates fresh frames. Keep the scene still. Preserves a better saved alignment.
 @export var auto_align_realsense_without_marker_now: bool = false:
 	set(value):
 		auto_align_realsense_without_marker_now = false
@@ -844,6 +847,8 @@ var _native_realsense_calibration_mode := ""
 var _native_realsense_calibration_reference_id := ""
 var _native_realsense_calibration_target_id := ""
 var _native_realsense_rig: RigCalibration
+var _joint_realsense_refinement: JointRefinement
+var _native_realsense_registry_before := PackedByteArray()
 var _mesh_fusion := MeshFusion.new()
 var _blendpcr: Node3D
 var _mesh_quality_rig: Node
@@ -865,6 +870,9 @@ var _realsense_camera_order: Array[String] = []
 var _realsense_labels: Dictionary = {}
 var _last_realsense_scan_msec: int = -1000000
 var _realsense_scan_helper: Object = null
+var _world_level_source := ""
+var _board_world_level_token := 0.0
+var _web_level_from_board := true
 var _world_level_path: String = ""
 var _last_world_level_registration_token: float = 0.0
 
@@ -878,8 +886,11 @@ var _capture_recovery_at: Dictionary = {}
 var _capture_view_cpu_ms := 0.0
 var _remote_capture_profile := ""
 var _requested_capture_profile := ""
+var _capture_config_check_msec := -1000
+var _capture_prefix_from_config := false
 
 func _ready() -> void:
+	_sync_shared_capture_configuration(false)
 	if _capture_only():
 		if OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX").is_empty() or DisplayServer.get_name() != "headless":
 			push_error("Independent capture requires --headless and a unique ROBOT_TELEOP_CAPTURE_SHM_PREFIX.")
@@ -908,7 +919,7 @@ func _ready() -> void:
 	# Scene files can retain an editor-preview transform. Begin from the true
 	# unlevelled state, then apply only an explicitly saved world-level file.
 	_clear_world_level(false)
-	if auto_level_from_robot_base:
+	if auto_level_from_robot_base or _has_saved_board_world_level():
 		_load_world_level()
 	else:
 		_clear_world_level(true)
@@ -948,14 +959,70 @@ func _exit_tree() -> void:
 		_blendpcr.clear()
 	if _native_realsense_calibrator != null and _native_realsense_calibrator.has_method("cancel"):
 		_native_realsense_calibrator.cancel()
+	if _joint_realsense_refinement != null:
+		_joint_realsense_refinement.cancel()
 	if not Engine.is_editor_hint():
 		_clear_runtime_stream_owner()
 	if _stream_commands_active:
 		_send_all_stream_commands(false)
 	_free_debug_panel()
 
+var _web_charuco_board: Dictionary = {}
+var _web_alignment_scope := "rig"
+var _web_locked_files: Dictionary = {}
+var _web_alignment_request_id := ""
+var _web_alignment_status_msec := 0
+
+func apply_remote_camera_alignment(payload: Dictionary) -> void:
+	var request_id := str(payload.get("request_id", ""))
+	var mode := str(payload.get("mode", ""))
+	var age := Time.get_unix_time_from_system() * 1000.0 - float(payload.get("sent_unix_ms", 0.0))
+	if request_id.is_empty() or request_id == _web_alignment_request_id or age < -1000.0 or age > 5000.0:
+		return
+	if mode not in ["markerless", "refine", "aruco", "charuco"] or _realsense_cloud_alignment_running():
+		return
+	_web_alignment_scope = str(payload.get("scope","rig"))
+	if _web_alignment_scope not in ["rig","top_only"] or (_web_alignment_scope == "top_only" and mode != "charuco"):
+		return
+	_web_level_from_board = _web_alignment_scope != "top_only" and bool(payload.get("board_is_tabletop", true))
+	if mode == "charuco":
+		var board = payload.get("charuco_board")
+		if not board is Dictionary:
+			return
+		_web_charuco_board = board.duplicate(true)
+	if mode == "aruco":
+		var size_mm := float(payload.get("marker_size_mm", 0.0))
+		var marker_id := int(payload.get("marker_id", -1))
+		if not is_finite(size_mm) or size_mm < 20.0 or size_mm > 1000.0 or marker_id < 0 or marker_id > 99:
+			return
+		realsense_calibration_marker_size_m = size_mm / 1000.0
+		realsense_calibration_marker_id = marker_id
+	_web_alignment_request_id = request_id
+	_request_native_realsense_calibration(mode)
+	_publish_web_camera_alignment_status(true)
+
+func _publish_web_camera_alignment_status(force: bool = false) -> void:
+	if _runtime_stream_owner_blocks_editor():
+		return
+	var now := Time.get_ticks_msec()
+	if not force and now - _web_alignment_status_msec < 1000:
+		return
+	_web_alignment_status_msec = now
+	RigCalibration.write_atomic(ProjectSettings.globalize_path("user://camera_alignment_web_status.json"), {
+		"project_root": ProjectSettings.globalize_path("res://"),
+		"updated": Time.get_unix_time_from_system(),
+		"request_id": _web_alignment_request_id,
+		"busy": _realsense_cloud_alignment_running(),
+		"message": calibration_status if not calibration_status.is_empty() else "Camera alignment is ready.",
+		"cameras": _enabled_realsense_serials().size(),
+		"top_only_available": true,
+		"active_depth_corrections": _active_depth_correction_labels(),
+		"world_level": {"token":_board_world_level_token,"table_y":0.0,"source":_world_level_source} if _world_level_source.begins_with("calibration_board_") else {},
+	})
+
 func _process(_delta: float) -> void:
 	var started := Time.get_ticks_usec()
+	_sync_shared_capture_configuration()
 	_apply_pending_capture_profile()
 	_sync_capture_control()
 	_update_runtime_stream_owner_state()
@@ -966,6 +1033,8 @@ func _process(_delta: float) -> void:
 	_poll_camera_alignment_registry(false)
 	_update_realsense_cloud_alignment_process()
 	_update_native_realsense_calibration()
+	_update_joint_realsense_refinement()
+	_publish_web_camera_alignment_status()
 	_update_robot_position_calibration_status()
 	_update_camera_renderers()
 	_update_realsense_direct_status()
@@ -1059,10 +1128,12 @@ func _clear_robot_position_calibration() -> void:
 	var module := _active_robot_module()
 	if module != null and module.has_method("clear_calibration"):
 		module.call("clear_calibration")
-		_clear_world_level(true)
+		if not _world_level_source.begins_with("calibration_board_"):
+			_clear_world_level(true)
 		_update_robot_position_calibration_status()
 		return
-	_clear_world_level(true)
+	if not _world_level_source.begins_with("calibration_board_"):
+		_clear_world_level(true)
 	robot_position_calibration_status = "The selected robot has no clear-calibration action."
 
 func _save_robot_position_checkpoint() -> void:
@@ -1121,7 +1192,7 @@ func level_world_from_robot_base(persist: bool = true) -> bool:
 	var registration: Dictionary = {}
 	if overlay.has_method("get_registration_status"):
 		registration = overlay.call("get_registration_status")
-	if not bool(registration.get("registered", false)):
+	if not bool(registration.get("registered", false)) or bool(registration.get("base_reference_only", false)):
 		world_level_status = "Calibrate the robot position before leveling the merged point cloud."
 		return false
 	var current_up := (overlay.global_transform.basis.orthonormalized() * Vector3.UP).normalized()
@@ -1153,7 +1224,7 @@ func level_world_from_robot_base(persist: bool = true) -> bool:
 	return true
 
 func _maybe_auto_level_from_robot_registration() -> void:
-	if not auto_level_from_robot_base or not is_inside_tree():
+	if not auto_level_from_robot_base or not is_inside_tree() or _world_level_source.begins_with("calibration_board_"):
 		return
 	var overlay := get_node_or_null(ROBOT_OVERLAY_NODE)
 	if overlay == null or not overlay.has_method("get_registration_status"):
@@ -1168,12 +1239,66 @@ func _maybe_auto_level_from_robot_registration() -> void:
 		return
 	level_world_from_robot_base(true)
 
+func _saved_camera_depth_corrections() -> Dictionary:
+	var path := "user://camera_depth_pose_corrections.json"
+	if not FileAccess.file_exists(path):
+		return {}
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string(path))
+	if not parsed is Dictionary or str(parsed.get("project_root", "")) != ProjectSettings.globalize_path("res://"):
+		return {}
+	return parsed.get("cameras", {}) if parsed.get("cameras") is Dictionary else {}
+
+func _camera_depth_pose_correction(camera_id: String) -> Transform3D:
+	var entries := _saved_camera_depth_corrections()
+	var entry = entries.get(camera_id, {})
+	if entry is Dictionary and entry.get("enabled", false):
+		var transform = RigCalibration.transform_from_payload(entry)
+		if transform is Transform3D:
+			return transform
+	return Transform3D.IDENTITY
+
+func _active_depth_correction_labels() -> Array[String]:
+	var labels: Array[String] = []
+	var entries := _saved_camera_depth_corrections()
+	for camera_id in entries:
+		if not _camera_depth_pose_correction(camera_id).is_equal_approx(Transform3D.IDENTITY):
+			labels.append(_camera_label(camera_id))
+	return labels
+
+func _has_saved_board_world_level() -> bool:
+	var path := ProjectSettings.globalize_path(WORLD_LEVEL_PATH)
+	if not FileAccess.file_exists(path):
+		return false
+	var parsed = JSON.parse_string(FileAccess.get_file_as_string(path))
+	return parsed is Dictionary and str(parsed.get("source", "")).begins_with("calibration_board_")
+
+func _apply_board_world_level(solution: Dictionary, mode: String) -> bool:
+	var anchor := _world_level_anchor(false)
+	if anchor == null or not solution.get("ok", false):
+		return false
+	var correction: Transform3D = solution.transform
+	var payload := _world_level_transform_to_dictionary(correction)
+	var token := Time.get_unix_time_from_system() * 1000.0
+	payload.merge({"type":"unified_world_level","source":"calibration_board_"+mode,
+		"correction_degrees":solution.correction_degrees,"saved_unix_ms":token,"table_y":0.0,
+		"board_origin":[solution.board_origin.x,solution.board_origin.y,solution.board_origin.z],
+		"board_normal":[solution.board_normal.x,solution.board_normal.y,solution.board_normal.z]})
+	if RigCalibration.write_atomic(ProjectSettings.globalize_path(WORLD_LEVEL_PATH),payload) != OK:
+		return false
+	anchor.transform = correction
+	_world_level_source = "calibration_board_" + mode
+	_board_world_level_token = token
+	world_level_status = "World leveled from %s board; tabletop is Y=0 m." % mode
+	return true
+
 func _save_world_level(value: Transform3D, correction_degrees: float) -> bool:
 	if _world_level_path.is_empty():
 		_world_level_path = ProjectSettings.globalize_path(WORLD_LEVEL_PATH)
 	var payload := _world_level_transform_to_dictionary(value)
 	payload["type"] = "unified_world_level"
 	payload["source"] = "robot_base_up"
+	_world_level_source = "robot_base_up"
+	_board_world_level_token = 0.0
 	payload["correction_degrees"] = correction_degrees
 	payload["registration_saved_unix_ms"] = _last_world_level_registration_token
 	payload["saved_unix_ms"] = Time.get_unix_time_from_system() * 1000.0
@@ -1204,14 +1329,18 @@ func _load_world_level() -> bool:
 	if anchor == null:
 		return false
 	anchor.transform = Transform3D(loaded.basis.orthonormalized(), loaded.origin)
+	_world_level_source = str(parsed.get("source", "robot_base_up"))
+	_board_world_level_token = float(parsed.get("saved_unix_ms", 0.0)) if _world_level_source.begins_with("calibration_board_") else 0.0
 	var registration_token := float((parsed as Dictionary).get("registration_saved_unix_ms", 0.0))
 	_last_world_level_registration_token = registration_token if registration_token > 0.0 else -1.0
-	world_level_status = "Saved robot world level loaded | correction %.2f deg" % float(
+	world_level_status = "Saved world level loaded | correction %.2f deg" % float(
 		(parsed as Dictionary).get("correction_degrees", 0.0)
 	)
 	return true
 
 func _clear_world_level(remove_saved: bool) -> void:
+	_world_level_source = ""
+	_board_world_level_token = 0.0
 	var anchor := _world_level_anchor(false)
 	if anchor != null:
 		anchor.transform = Transform3D.IDENTITY
@@ -1324,7 +1453,7 @@ func _apply_close_robot_rig_defaults() -> void:
 			settings["max_depth_m"] = 1.2
 			settings["emitter_enabled"] = true
 			settings["laser_power_percent"] = 100.0
-			settings["workspace_crop_enabled"] = true
+			settings["image_crop_enabled"] = true
 			settings["crop_left_percent"] = 11.0
 			settings["crop_right_percent"] = 11.0
 			settings["crop_top_percent"] = 14.0
@@ -1335,7 +1464,7 @@ func _apply_close_robot_rig_defaults() -> void:
 			settings["max_depth_m"] = 1.5
 			settings["emitter_enabled"] = false
 			settings["laser_power_percent"] = 70.0
-			settings["workspace_crop_enabled"] = false
+			settings["image_crop_enabled"] = false
 		realsense_device_registry[serial] = settings
 		var anchor := _find_realsense_camera_anchor_existing(camera_id)
 		if anchor != null and anchor.has_method("apply_settings"):
@@ -1411,7 +1540,7 @@ func _ensure_realsense_registry_entry(serial: String, info: Dictionary) -> void:
 	var model_lower := str(settings.get("model", "")).to_lower()
 	_realsense_default_setting(settings, "emitter_enabled", not model_lower.contains("455"))
 	_realsense_default_setting(settings, "laser_power_percent", 100.0)
-	_realsense_default_setting(settings, "workspace_crop_enabled", false)
+	_realsense_default_setting(settings, "image_crop_enabled", bool(settings.get("workspace_crop_enabled", false)))
 	_realsense_default_setting(settings, "crop_left_percent", 0.0)
 	_realsense_default_setting(settings, "crop_right_percent", 0.0)
 	_realsense_default_setting(settings, "crop_top_percent", 0.0)
@@ -1550,10 +1679,12 @@ func _realsense_settings(camera_id: String) -> Dictionary:
 	return realsense_device_registry[serial] as Dictionary
 
 func _realsense_setting(camera_id: String, key: String, fallback):
+	# The startup profile is only a fallback. Once the editor supplies camera
+	# settings, its live preset must also reach the independent capture owner.
+	if _capture_publisher() and _capture_control_settings.has(camera_id):
+		return (_capture_control_settings[camera_id] as Dictionary).get(key,fallback)
 	if key == "stream_profile" and not _remote_capture_profile.is_empty():
 		return _remote_capture_profile
-	if _capture_only() and _capture_control_settings.has(camera_id):
-		return (_capture_control_settings[camera_id] as Dictionary).get(key,fallback)
 	var node_settings := _realsense_camera_node_settings(camera_id)
 	if node_settings.has(key):
 		return node_settings.get(key, fallback)
@@ -1859,12 +1990,12 @@ func _camera_uses_custom_depth_range(camera_id: String) -> bool:
 	return not is_equal_approx(camera_max, max_depth_m)
 
 func _camera_min_depth(camera_id: String) -> float:
-	if _capture_only() and _capture_control_settings.has(camera_id):
+	if _capture_publisher() and _capture_control_settings.has(camera_id):
 		return float(_capture_control_settings[camera_id].get("_capture_min_depth",min_depth_m))
 	return min_depth_m
 
 func _camera_max_depth(camera_id: String) -> float:
-	if _capture_only() and _capture_control_settings.has(camera_id):
+	if _capture_publisher() and _capture_control_settings.has(camera_id):
 		return float(_capture_control_settings[camera_id].get("_capture_max_depth",max_depth_m))
 	if _camera_uses_custom_depth_range(camera_id):
 		return maxf(float(_realsense_setting(camera_id, "max_depth_m", max_depth_m)), 0.25)
@@ -1906,6 +2037,29 @@ func _camera_shm_name(camera_id: String) -> String:
 func _capture_only() -> bool:
 	return OS.get_environment("ROBOT_TELEOP_CAPTURE_ONLY") == "1"
 
+func _capture_publisher() -> bool:
+	return _capture_only() or OS.get_environment("ROBOT_TELEOP_CAPTURE_PUBLISH") == "1"
+
+func _sync_shared_capture_configuration(restart: bool = true) -> void:
+	if _capture_only(): return
+	if not _capture_prefix_from_config and not OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX").is_empty(): return
+	var now := Time.get_ticks_msec()
+	if now - _capture_config_check_msec < 500: return
+	_capture_config_check_msec = now
+	var configuration = JSON.parse_string(FileAccess.get_file_as_string("res://.teleop/runtime_config.json")) if FileAccess.file_exists("res://.teleop/runtime_config.json") else {}
+	var capture: Dictionary = configuration.get("capture", {}) if configuration is Dictionary else {}
+	var prefix := str(capture.get("prefix", ""))
+	var pid := int(capture.get("pid", 0))
+	if not prefix.is_valid_identifier() or not _capture_lease_process_alive(pid): prefix = ""
+	var publish := "1" if pid == OS.get_process_id() and not prefix.is_empty() else ""
+	if prefix == OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX") and publish == OS.get_environment("ROBOT_TELEOP_CAPTURE_PUBLISH"): return
+	_capture_prefix_from_config = true
+	OS.set_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX", prefix)
+	OS.set_environment("ROBOT_TELEOP_CAPTURE_PUBLISH", publish)
+	if restart:
+		_restart_realsense_direct_renderers()
+		_update_camera_renderers()
+
 func apply_remote_stream_preset(preset: String) -> void:
 	if preset not in ["quality", "latency"]:
 		return
@@ -1921,12 +2075,20 @@ func _apply_pending_capture_profile() -> void:
 	_remote_capture_profile = _requested_capture_profile
 
 func get_remote_stream_preset() -> String:
-	if _remote_capture_profile == "highres30": return "quality"
-	if _remote_capture_profile == "fast60": return "latency"
+	var profile := _remote_capture_profile
+	if _capture_publisher() and not _capture_control_settings.is_empty():
+		var profiles: Array = []
+		for value in _capture_control_settings.values():
+			if value is Dictionary and value.has("stream_profile") and not profiles.has(str(value.stream_profile)):
+				profiles.append(str(value.stream_profile))
+		if profiles.size() == 1: profile = profiles[0]
+		elif profiles.size() > 1: return "custom"
+	if profile == "highres30": return "quality"
+	if profile == "fast60": return "latency"
 	return "custom"
 
 func _shared_capture_preview() -> bool:
-	return not _capture_only() and not OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX").is_empty()
+	return not _capture_publisher() and not OS.get_environment("ROBOT_TELEOP_CAPTURE_SHM_PREFIX").is_empty()
 
 func _direct_capture_enabled() -> bool:
 	return not _shared_capture_preview() and not _capture_paused
@@ -1939,7 +2101,7 @@ func _capture_lease_process_alive(pid: int) -> bool:
 	return OS.is_process_running(pid)
 
 func _sync_capture_control() -> void:
-	if not _capture_only() and not _shared_capture_preview(): return
+	if not _capture_publisher() and not _shared_capture_preview(): return
 	var now := Time.get_ticks_msec()
 	if now-_capture_control_last_check < 100: return
 	_capture_control_last_check=now
@@ -1947,6 +2109,11 @@ func _sync_capture_control() -> void:
 	if not prefix.is_valid_identifier(): return
 	var path := ProjectSettings.globalize_path("user://capture_control_%s.bin" % prefix)
 	if _shared_capture_preview():
+		if FileAccess.file_exists(path):
+			var lease_file := FileAccess.open(path, FileAccess.READ)
+			if lease_file != null and lease_file.get_length() <= 1048576:
+				var lease = lease_file.get_var(false)
+				if lease is Dictionary and bool(lease.get("paused", false)) and int(lease.get("pid", 0)) != OS.get_process_id() and _capture_lease_process_alive(int(lease.get("pid", 0))) and Time.get_unix_time_from_system() - float(lease.get("updated", 0)) < 3.0: return
 		var cameras: Dictionary={}
 		for id in _realsense_camera_ids():
 			var settings := _realsense_settings(id).duplicate(true)
@@ -1957,7 +2124,7 @@ func _sync_capture_control() -> void:
 			var renderer := _camera_nodes.get(id) as Node3D
 			if is_instance_valid(renderer): settings["_capture_transform"]=renderer.global_transform
 			cameras[id]=settings
-		var state := {"cameras":cameras,"paused":_realsense_cloud_alignment_running()}
+		var state := {"cameras":cameras,"paused":_realsense_capture_exclusive()}
 		if state==_capture_control_previous and (not bool(state.paused) or now-_capture_control_last_write<500): return
 		_capture_control_previous=state.duplicate(true)
 		_capture_control_last_write=now
@@ -2282,6 +2449,11 @@ func _native_realsense_calibration_running() -> bool:
 			and bool(_native_realsense_calibrator.is_running())
 		)
 	)
+
+func _realsense_capture_exclusive() -> bool:
+	# Joint refinement reads the existing stream. It keeps the transaction busy,
+	# while releasing the SDK pause lease so fresh frames can be validated.
+	return _realsense_cloud_alignment_running() and _joint_realsense_refinement == null
 
 func _enabled_realsense_serials() -> Array[String]:
 	var serials: Array[String] = []
@@ -2659,7 +2831,7 @@ func _native_realsense_saved_prior(reference_id: String, target_id: String) -> P
 
 func _request_native_realsense_calibration(mode: String) -> void:
 	mode = mode.strip_edges().to_lower()
-	if mode not in ["aruco", "markerless", "refine"]:
+	if mode not in ["aruco", "charuco", "markerless", "refine"]:
 		mode = "markerless"
 	if not is_inside_tree():
 		calibration_status = "Open the Unified Point Clouds scene before starting calibration."
@@ -2677,11 +2849,29 @@ func _request_native_realsense_calibration(mode: String) -> void:
 		calibration_status = "Native RealSense calibration is unavailable in this extension build."
 		return
 	var reference_id := _realsense_camera_id(realsense_cloud_alignment_reference_serial.strip_edges()) if not realsense_cloud_alignment_reference_serial.strip_edges().is_empty() else ids[0]
-	var rig := RigCalibration.new()
-	if not rig.begin(ids, reference_id, _alignment_transforms):
+	var rig: RigCalibration
+	if _web_alignment_scope == "top_only":
+		var target := _realsense_camera_id("262522074294")
+		var references: Array[String] = [_realsense_camera_id("262522075787"),_realsense_camera_id("262522076048")]
+		if target not in ids or references[0] not in ids or references[1] not in ids:
+			calibration_status = "Top-only alignment needs cameras A, B and C online. No calibration changed."
+			return
+		var locked := LockedTopCalibration.new()
+		if not locked.begin_locked(target,references,_alignment_transforms):
+			calibration_status = "Top-only alignment requires existing saved A/B/C poses."
+			return
+		rig = locked
+		_web_locked_files = {}
+		for file in ["user://so101_robot_registration.json",WORLD_LEVEL_PATH,CAMERA_ALIGNMENT_REGISTRY_PATH,REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH,"user://camera_depth_pose_corrections.json"]:
+			_web_locked_files[file] = FileAccess.get_file_as_bytes(file) if FileAccess.file_exists(file) else PackedByteArray()
+	else:
+		rig = RigCalibration.new()
+	if _web_alignment_scope != "top_only" and not rig.begin(ids, reference_id, _alignment_transforms):
 		calibration_status = "The reference camera must be enabled and discovered."
 		return
 	_native_realsense_rig = rig
+	var registry_path := ProjectSettings.globalize_path(CAMERA_ALIGNMENT_REGISTRY_PATH) if _camera_alignment_registry_path.is_empty() else _camera_alignment_registry_path
+	_native_realsense_registry_before = FileAccess.get_file_as_bytes(registry_path) if FileAccess.file_exists(registry_path) else PackedByteArray()
 	_native_realsense_calibration_mode = mode
 	_native_realsense_calibration_pending = true
 	_set_realsense_direct_renderers_enabled(false)
@@ -2725,11 +2915,17 @@ func _start_next_native_realsense_pair() -> void:
 		"model_path": ProjectSettings.globalize_path(REALSENSE_NATIVE_CALIBRATION_MODEL_PATH),
 		"marker_id": realsense_calibration_marker_id,
 		"marker_size_m": realsense_calibration_marker_size_m,
-		"capture_frames": 24 if mode == "aruco" else 48,
+		"capture_frames": 24 if mode in ["aruco", "charuco"] else 48,
 		"marker_frames": 24,
 		"min_depth_m": calibration_min_depth,
 		"max_depth_m": calibration_max_depth,
 	}
+	if mode == "charuco":
+		options["charuco_squares_x"] = int(_web_charuco_board.get("squares_x", 0))
+		options["charuco_squares_y"] = int(_web_charuco_board.get("squares_y", 0))
+		options["charuco_dictionary"] = int(_web_charuco_board.get("dictionary", -1))
+		options["charuco_square_m"] = float(_web_charuco_board.get("square_mm", 0.0)) / 1000.0
+		options["marker_size_m"] = float(_web_charuco_board.get("marker_mm", 0.0)) / 1000.0
 	if mode == "refine":
 		var reference_world: Transform3D = _native_realsense_rig.transforms[reference_id]
 		options["initial_transform"] = _packed_realsense_transform(
@@ -2754,25 +2950,61 @@ func _update_native_realsense_calibration() -> void:
 	if bool(_native_realsense_calibrator.is_running()):
 		calibration_status = "Camera rig %d/%d aligned | %s -> %s | %s" % [_native_realsense_rig.transforms.size(), _native_realsense_rig.cameras.size(), _realsense_serial(_native_realsense_calibration_target_id), _realsense_serial(_native_realsense_calibration_reference_id), str(_native_realsense_calibrator.get_status())]
 		return
-	var result: Dictionary = _native_realsense_calibrator.get_result()
+	var result: Dictionary = BoardWorldLevel.native_result(_native_realsense_calibrator.get_result())
 	result["reference_camera"] = _native_realsense_calibration_reference_id
 	result["target_camera"] = _native_realsense_calibration_target_id
 	_native_realsense_calibrator = null
+	if _web_alignment_scope == "top_only" and not bool(result.get("depth_plane_anchored",false)):
+		result["ok"] = false
+		result["status"] = "Top-only alignment requires fresh depth-plane anchoring."
+	if _native_realsense_calibration_mode in ["aruco", "charuco"] and bool(result.get("ok",false)) and not bool(result.get("depth_plane_anchored",false)):
+		result = BoardWorldLevel.correct_pose_result(result,
+			_camera_depth_pose_correction(_native_realsense_calibration_reference_id),
+			_camera_depth_pose_correction(_native_realsense_calibration_target_id))
 	_native_realsense_rig.accept(result)
 	_start_next_native_realsense_pair()
 
 func _finish_native_realsense_rig() -> void:
 	var rig := _native_realsense_rig
 	var mode := _native_realsense_calibration_mode
+	if _web_alignment_scope == "top_only":
+		_finish_locked_top_camera(rig)
+		return
+	if rig.complete() and mode == "markerless":
+		_joint_realsense_refinement = JointRefinement.new()
+		if _joint_realsense_refinement.begin(self, rig, _native_realsense_registry_before):
+			calibration_status = _joint_realsense_refinement.status
+			_native_realsense_calibration_pending = false
+			_restart_realsense_direct_renderers()
+			return
+		calibration_status = _joint_realsense_refinement.status
+		_release_native_realsense_rig()
+		return
+	var board_level: Dictionary = {}
+	if rig.complete() and mode in ["aruco", "charuco"] and _web_level_from_board:
+		board_level = BoardWorldLevel.solve(rig.transforms,rig.results)
+		if not board_level.get("ok",false):
+			calibration_status = "Camera calibration not saved: " + str(board_level.get("message", "Invalid board plane."))
+			_release_native_realsense_rig()
+			return
 	if rig.complete():
 		var status := "All %d cameras calibrated and saved (%s)." % [rig.cameras.size(), mode]
 		if not _write_camera_alignment_set(rig.transforms, rig.reference_id, "native_rig_" + mode, status):
 			calibration_status = "Camera calibration could not save the rig. Previous alignment preserved."
+		elif not board_level.is_empty() and not _apply_board_world_level(board_level,mode):
+			# Roll back the rig if the paired world placement could not be saved.
+			if _native_realsense_registry_before.is_empty():
+				DirAccess.remove_absolute(_camera_alignment_registry_path)
+			else:
+				var previous = JSON.parse_string(_native_realsense_registry_before.get_string_from_utf8())
+				if previous is Dictionary:
+					RigCalibration.write_atomic(_camera_alignment_registry_path,previous)
+			calibration_status = "Could not save board world level; previous camera alignment retained."
 		else:
 			_alignment_transforms.merge(rig.transforms, true)
 			_camera_alignment_registry_token = ""
-			calibration_status = status
-			if mode == "aruco":
+			calibration_status = status + (" Board plane is now the horizontal tabletop (Y=0 m)." if not board_level.is_empty() else "")
+			if mode in ["aruco", "charuco"]:
 				if _realsense_alignment_ground_truth_path.is_empty():
 					_realsense_alignment_ground_truth_path = ProjectSettings.globalize_path(REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH)
 				var truth := _read_camera_registry()
@@ -2781,6 +3013,47 @@ func _finish_native_realsense_rig() -> void:
 					calibration_status += " Alignment saved; ArUco benchmark file could not be written."
 	else:
 		calibration_status = "Camera rig calibration incomplete: %s could not be aligned. Previous alignment preserved. %s" % [", ".join(rig.pending_cameras()), " | ".join(rig.failures)]
+	_release_native_realsense_rig()
+
+func _finish_locked_top_camera(rig: RigCalibration) -> void:
+	if not rig.complete():
+		calibration_status = "A-only alignment not saved. B, C and arm unchanged. " + " | ".join(rig.failures)
+		_release_native_realsense_rig()
+		return
+	for file in _web_locked_files:
+		var current := FileAccess.get_file_as_bytes(file) if FileAccess.file_exists(file) else PackedByteArray()
+		if current != _web_locked_files[file]:
+			calibration_status = "Saved calibration changed during capture; A-only result discarded."
+			_release_native_realsense_rig()
+			return
+	var target := _realsense_camera_id("262522074294")
+	var status := "Top camera A calibrated against locked B/C. Arm and tabletop unchanged."
+	var registry = JSON.parse_string((_web_locked_files[CAMERA_ALIGNMENT_REGISTRY_PATH] as PackedByteArray).get_string_from_utf8())
+	var truth = JSON.parse_string((_web_locked_files[REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH] as PackedByteArray).get_string_from_utf8())
+	if not registry is Dictionary or not truth is Dictionary:
+		calibration_status = "A-only save requires valid existing camera and ground-truth registries."
+		_release_native_realsense_rig()
+		return
+	var updated := LockedTopCalibration.replace_target(registry,target,rig.transforms[target],status)
+	var updated_truth := LockedTopCalibration.replace_target(truth,target,rig.transforms[target],status)
+	if updated.is_empty() or updated_truth.is_empty():
+		calibration_status = "A-only result would move a locked camera; no calibration changed."
+	elif RigCalibration.write_atomic(ProjectSettings.globalize_path(CAMERA_ALIGNMENT_REGISTRY_PATH),updated) != OK:
+		calibration_status = "Could not save A; previous alignment retained."
+	elif RigCalibration.write_atomic(ProjectSettings.globalize_path(REALSENSE_ALIGNMENT_GROUND_TRUTH_PATH),updated_truth) != OK:
+		RigCalibration.write_atomic(ProjectSettings.globalize_path(CAMERA_ALIGNMENT_REGISTRY_PATH),registry)
+		calibration_status = "Could not save A ground truth; previous camera alignment restored."
+	else:
+		_alignment_transforms[target] = rig.transforms[target]
+		_camera_alignment_registry_token = ""
+		calibration_status = status
+	_release_native_realsense_rig()
+
+func _release_native_realsense_rig() -> void:
+	_web_alignment_scope = "rig"
+	_web_locked_files = {}
+	if _joint_realsense_refinement != null: _joint_realsense_refinement.cancel()
+	_joint_realsense_refinement = null
 	_native_realsense_rig = null
 	_native_realsense_calibration_pending = false
 	_native_realsense_calibration_mode = ""
@@ -2788,6 +3061,56 @@ func _finish_native_realsense_rig() -> void:
 	_native_realsense_calibration_target_id = ""
 	_restart_realsense_direct_renderers()
 	_update_camera_renderers()
+
+func _update_joint_realsense_refinement() -> void:
+	if _joint_realsense_refinement == null: return
+	var result = _joint_realsense_refinement.poll()
+	calibration_status = _joint_realsense_refinement.status
+	if result == null: return
+	_apply_joint_realsense_result(result)
+	_release_native_realsense_rig()
+
+func _apply_joint_realsense_result(result: Dictionary) -> bool:
+	if not bool(result.get("ok", false)):
+		calibration_status = str(result.get("status", "Joint refinement failed; previous alignment preserved."))
+		return false
+	var rig := _native_realsense_rig
+	var transforms = result.get("transforms", {})
+	if rig == null or not transforms is Dictionary or transforms.size() != rig.cameras.size() or str(result.get("reference_camera", "")) != _realsense_serial(rig.reference_id):
+		calibration_status = "Joint refinement returned an incomplete rig; previous alignment preserved."
+		return false
+	var staged: Dictionary = {}
+	for camera in rig.cameras:
+		var payload = transforms.get(_realsense_serial(camera), {})
+		var solved = RigCalibration.transform_from_payload(payload) if payload is Dictionary else null
+		if solved == null:
+			calibration_status = "Joint refinement returned an invalid camera pose; previous alignment preserved."
+			return false
+		staged[camera] = solved
+	if not (staged[rig.reference_id] as Transform3D).is_equal_approx(rig.transforms[rig.reference_id]):
+		calibration_status = "Joint refinement moved the fixed reference; previous alignment preserved."
+		return false
+	var path := ProjectSettings.globalize_path(CAMERA_ALIGNMENT_REGISTRY_PATH) if _camera_alignment_registry_path.is_empty() else _camera_alignment_registry_path
+	var latest := FileAccess.get_file_as_bytes(path) if FileAccess.file_exists(path) else PackedByteArray()
+	if latest != _native_realsense_registry_before:
+		calibration_status = "Saved camera alignment changed during calibration; newer alignment preserved."
+		return false
+	var selected := str(result.get("selected", ""))
+	if selected == "previous":
+		calibration_status = "Joint refinement checked all %d cameras; existing saved alignment fits best and was retained." % rig.cameras.size()
+		return true
+	if selected not in ["refined", "initial"] or not _joint_realsense_refinement.backup_registry():
+		calibration_status = "Joint refinement could not back up the saved rig; previous alignment preserved."
+		return false
+	var status := "All %d cameras calibrated and saved (joint RGB-D refinement; fresh-frame validation)." % rig.cameras.size()
+	if selected == "initial": status = "All %d cameras calibrated and saved (joint RGB-D check retained the initial fit)." % rig.cameras.size()
+	if not _write_camera_alignment_set(staged, rig.reference_id, "joint_rgbd_reprojection_refinement", status):
+		calibration_status = "Joint refinement could not save the rig; previous alignment preserved."
+		return false
+	_alignment_transforms.merge(staged, true)
+	_camera_alignment_registry_token = ""
+	calibration_status = status
+	return true
 
 func _read_camera_registry() -> Dictionary:
 	if _camera_alignment_registry_path.is_empty():
@@ -3363,20 +3686,31 @@ func _capture_active_after_recovery(camera_id: String, node: MeshInstance3D, act
 	if not active or _capture_paused or not node.has_method("get_display_frame_age_ms"):
 		return active
 	var now := Time.get_ticks_msec()
-	if float(node.call("get_display_frame_age_ms")) <= 5000.0 or now-int(_capture_recovery_at.get(camera_id,-5000)) < 5000:
+	var depth_stalled:=float(node.call("get_display_frame_age_ms"))>5000.0
+	var rgb_stalled:=false
+	if node.has_method("get_color_diagnostics"):
+		var color:Dictionary=node.call("get_color_diagnostics")
+		rgb_stalled=bool(color.get("rgb_enabled",false)) and float(color.get("rgb_frame_age_ms",-1.0))>5000.0
+	if (not depth_stalled and not rgb_stalled) or now-int(_capture_recovery_at.get(camera_id,-5000)) < 5000:
 		return active
 	_capture_recovery_at[camera_id]=now
 	# A silent SDK stall can leave is_open() true forever. This runs in the
 	# configuration group after all capture workers complete. Close here and
 	# reopen on the main thread next frame, as during serialized cold startup.
 	node.call("set_direct_realsense_enabled",false)
-	push_warning("Restarting stalled camera capture: %s" % camera_id)
+	if node.has_method("restart_direct_realsense"): node.call("restart_direct_realsense")
+	push_warning("Restarting stalled camera capture: %s (%s)" % [camera_id,"RGB" if rgb_stalled else "depth"])
 	return false
 
 func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) -> void:
 	node.visible = _streams_enabled() and _camera_enabled(camera_id) and _camera_diagnostic_visible(camera_id)
 	node.transform = _camera_transform(camera_id)
 	node.call("set_shared_memory_name", _camera_shm_name(camera_id))
+	if _capture_publisher() and node.has_method("set_publish_shared_memory_name"):
+		node.call("set_publish_shared_memory_name", _camera_shm_name(camera_id))
+		# Publish native buffers in the combined headless runtime as well.
+		if DisplayServer.get_name() == "headless" and node.has_method("set_capture_only"):
+			node.call("set_capture_only", true)
 	if _capture_only() and node.has_method("set_capture_only"):
 		node.call("set_capture_only", true)
 		node.call("set_publish_shared_memory_name", _camera_shm_name(camera_id))
@@ -3441,7 +3775,7 @@ func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) ->
 		if node.has_method("set_direct_realsense_laser_power_percent"):
 			node.call("set_direct_realsense_laser_power_percent", float(_realsense_setting(camera_id, "laser_power_percent", 100.0)))
 		if node.has_method("set_direct_realsense_crop_rect"):
-			var crop_enabled := bool(_realsense_setting(camera_id, "workspace_crop_enabled", false))
+			var crop_enabled := bool(_realsense_setting(camera_id, "image_crop_enabled", false))
 			var crop_rect := Vector4(0.0, 0.0, 1.0, 1.0)
 			if crop_enabled:
 				crop_rect = Vector4(
@@ -3453,7 +3787,7 @@ func _apply_camera_renderer_settings(camera_id: String, node: MeshInstance3D) ->
 			node.call("set_direct_realsense_crop_rect", crop_rect)
 		if node.has_method("set_direct_realsense_filter_config"):
 			node.call("set_direct_realsense_filter_config", _direct_realsense_filter_config(camera_id))
-		node.call("set_direct_realsense_enabled", _direct_capture_enabled() and _streams_enabled() and _camera_enabled(camera_id) and not _realsense_cloud_alignment_running() and (depth_source in ["sdk_depth", "fast_foundation_native"]))
+		node.call("set_direct_realsense_enabled", _direct_capture_enabled() and _streams_enabled() and _camera_enabled(camera_id) and not _realsense_capture_exclusive() and (depth_source in ["sdk_depth", "fast_foundation_native"]))
 		if node.has_method("get_direct_realsense_status"):
 			realsense_status = "%s: %s" % [_camera_label(camera_id), str(node.call("get_direct_realsense_status"))]
 

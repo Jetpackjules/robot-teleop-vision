@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Protocol
 
 from so101_arm_common import DEFAULT_PROFILE, ArmPairProfile, limit_step, pose_is_close
+from so101_floor_constraint import RuntimeFloorConstraint
 from so101_kinematics import (
     JOINT_DIRECTIONS,
     JOINT_LIMITS_RAD,
@@ -192,7 +193,7 @@ def _rest_segment_seconds(start: list[float], end: list[float]) -> float:
 
 
 def build_rest_return_waypoints(
-    starting_pose: list[float], rest_pose: list[float], *, pose_allowed=None,
+    starting_pose: list[float], rest_pose: list[float], *, pose_allowed=None, height_metric=None,
 ) -> list[tuple[list[float], float, str]]:
     """Plan a slow, modeled-base-safe path to an encoder-defined rest pose.
 
@@ -200,14 +201,15 @@ def build_rest_return_waypoints(
     to detect people or loose objects, which remain reasons to leave automatic
     idle return disabled.
     """
+    metric = height_metric or rest_mesh_minimum_height
     start = [float(value) for value in starting_pose]
     rest = [float(value) for value in rest_pose]
     def path_height(before, after):
         samples = max(80, math.ceil(max(abs(a - b) for a, b in zip(before, after, strict=True)) * 2))
-        return _path_min_clearance(before, after, samples, metric=rest_mesh_minimum_height)
+        return _path_min_clearance(before, after, samples, metric=metric)
 
-    start_height = rest_mesh_minimum_height(start)
-    rest_height = rest_mesh_minimum_height(rest)
+    start_height = metric(start)
+    rest_height = metric(rest)
     if min(start_height, rest_height) < REST_RETURN_MINIMUM_MODELED_HEIGHT_M:
         raise RuntimeError(
             "rest return rejected because an endpoint is below the modeled base plane "
@@ -218,10 +220,10 @@ def build_rest_return_waypoints(
         return [(rest, _rest_segment_seconds(start, rest), "moving slowly to rest")]
 
     start_raised, start_lift = _build_raised_calibration_prefix(
-        start, metric=rest_mesh_minimum_height, pose_allowed=pose_allowed,
+        start, metric=metric, pose_allowed=pose_allowed,
     )
     rest_raised, rest_lift = _build_raised_calibration_prefix(
-        rest, metric=rest_mesh_minimum_height, pose_allowed=pose_allowed,
+        rest, metric=metric, pose_allowed=pose_allowed,
     )
     if path_height(start_raised, rest_raised) < CALIBRATION_SAFE_HEIGHT_M:
         raise RuntimeError("no modeled-base-safe bridge to the saved rest pose is available")
@@ -887,11 +889,13 @@ class FollowerController:
         now=time.monotonic,
         rest_pose_path: Path | None = None,
         fault_report_path: Path | None = None,
+        floor_constraint: RuntimeFloorConstraint | None = None,
     ):
         self.profile = profile
         self.bus = bus
         self.now = now
         self.fault_report_path = fault_report_path
+        self.floor_constraint = floor_constraint or RuntimeFloorConstraint()
         self.state = "disconnected"
         self.fault = ""
         self.status_message = "Follower service is starting."
@@ -912,10 +916,16 @@ class FollowerController:
         self.follower_normalized: list[float] = [0.0] * 6
         self.command_latency_ms: float | None = None
         self.browser_transport_age_ms: float | None = None
+        self.browser_input_timing: dict = {}
         self.started_at = self.now()
         self.update_count = 0
         self.control_session = ""
         self.control_source = "none"
+        self.watchdog_holding = False
+        self.watchdog_hold_count = 0
+        self.watchdog_resume_count = 0
+        self.last_watchdog = {}
+        self.ik_clearance_limited = False
         self.latest_input_source = "none"
         self.keyboard_linear = [0.0, 0.0, 0.0]
         self.keyboard_angular = [0.0, 0.0, 0.0]
@@ -975,6 +985,7 @@ class FollowerController:
         self.rest_return_duration = 0.0
         self.rest_return_progress = 0.0
         self.rest_return_reason = ""
+        self.rest_return_leader_anchor: list[float] | None = None
         self.rest_return_request_id = ""
         self._seen_rest_return_request_ids: set[str] = set()
         self.idle_return_enabled = False
@@ -1098,9 +1109,10 @@ class FollowerController:
             self.hold("D455 wrist / claw divergence stopped motion; target rebased.")
             self.following_error_stop = True
             return
+        matching_leader = self.rest_return_active and self.rest_return_leader_anchor is not None
         if self.rest_return_active and kind in (
-            "arm_command", "arm_cartesian_velocity", "arm_joint_velocity", "arm_tool_velocity", "arm_enable"
-        ):
+            "arm_command", "arm_cartesian_velocity", "arm_joint_velocity", "arm_tool_velocity", "arm_enable", "arm_match_leader"
+        ) and not (matching_leader and kind == "arm_command"):
             return
         if self.calibration_sweep_active and kind in (
             "arm_command", "arm_cartesian_velocity", "arm_joint_velocity", "arm_tool_velocity", "arm_enable"
@@ -1135,10 +1147,38 @@ class FollowerController:
             if seq <= self.last_seq:
                 return
             self.last_seq = seq
+            self.browser_input_timing = dict(message.get("input_timing", {}))
             previous_leader = list(self.leader_normalized) if self.leader_normalized is not None else None
             self.leader_raw = [int(v) for v in message["positions"]]
             wrapped_normalized, _ = self.profile.map_leader_to_follower(self.leader_raw)
             self.leader_normalized = self._unwrap_leader(wrapped_normalized)
+            received_ms = int(time.time() * 1000)
+            self.command_latency_ms = max(0.0, received_ms - int(message.get("sent_unix_ms", received_ms)))
+            self.browser_transport_age_ms = max(0.0, float(message.get("transport_age_ms", 0.0)))
+            self.latest_input_source = "leader"
+            if self.command_latency_ms > self.profile.watchdog_ms:
+                self.last_command_at = 0.0
+                self.hold("received command is older than watchdog limit")
+                return
+            if matching_leader and self.rest_return_active:
+                self.last_command_at = self.now()
+                stationary, _ = pose_is_close(
+                    self.leader_normalized, self.rest_return_leader_anchor, (1., 1., 1., 1., 1., 2.),
+                )
+                if not stationary:
+                    self.stop_rest_return("Leader match stopped because the leader moved.")
+                return
+            if (self.watchdog_holding and self.control_source == "leader"
+                    and self.state in ("armed", "hold") and self.torque_enabled):
+                # Resume only a transient timeout in this same control session.
+                # Re-clutch the fresh leader to the retained commanded position,
+                # so movement made during the gap is not replayed as a jump.
+                self.leader_enable_normalized = list(self.leader_normalized)
+                self.follower_enable_normalized = list(self.applied_normalized)
+                self.watchdog_holding = False
+                self.watchdog_resume_count += 1
+                self.state = "armed"
+                self.status_message = "Leader input resumed at the retained holding target."
             if self.leader_enable_normalized is not None and self.follower_enable_normalized is not None:
                 self.target_normalized = [
                     follower_zero + direction * (leader_now - leader_zero)
@@ -1158,25 +1198,19 @@ class FollowerController:
             if self.state == "armed" and self.control_source == "leader":
                 self._bound_leader_target()
             self.last_command_at = self.now()
-            received_ms = int(time.time() * 1000)
-            self.command_latency_ms = max(0.0, received_ms - int(message.get("sent_unix_ms", received_ms)))
-            self.browser_transport_age_ms = max(0.0, float(message.get("transport_age_ms", 0.0)))
-            self.latest_input_source = "leader"
             if previous_leader is None or max(
                 abs(current - previous)
                 for current, previous in zip(self.leader_normalized, previous_leader, strict=True)
             ) > 0.5:
                 self.last_operator_activity_at = self.now()
                 self.idle_return_attempted = False
-            if self.command_latency_ms > self.profile.watchdog_ms:
-                self.last_command_at = 0.0
-                self.hold("received command is older than watchdog limit")
             return
         if kind == "arm_cartesian_velocity":
             seq = int(message["seq"])
             if seq <= self.last_seq:
                 return
             self.last_seq = seq
+            self.browser_input_timing = dict(message.get("input_timing", {}))
             incoming_linear = [float(value) for value in message["linear"]]
             incoming_angular = [float(value) for value in message["angular"]]
             incoming_wrist = [float(value) for value in message.get("wrist", [0.0, 0.0])]
@@ -1184,6 +1218,18 @@ class FollowerController:
                 abs(value) > 0.001
                 for value in (*incoming_linear, *incoming_angular, *incoming_wrist)
             )
+            if not arm_motion_active:
+                # Keyup is a stop, not a request to finish a smoothed velocity
+                # tail or chase the remaining Cartesian IK error. Retain the
+                # last commanded joints rather than clutching to sagged reads.
+                self.keyboard_linear_smoothed = [0.0, 0.0, 0.0]
+                self.keyboard_wrist_smoothed = [0.0, 0.0]
+                if (self.state == "armed" and self.control_source == "keyboard"
+                        and self.applied_normalized is not None and self.target_normalized is not None):
+                    self.target_normalized[:5] = self.applied_normalized[:5]
+                    held_pose = arm_pose(self.applied_normalized)
+                    self.keyboard_position_target = list(held_pose.position)
+                    self.keyboard_orientation_target = held_pose.rotation
             if arm_motion_active or abs(float(message.get("gripper", 0.0))) > 0.001:
                 self.last_operator_activity_at = self.now()
                 self.idle_return_attempted = False
@@ -1221,7 +1267,9 @@ class FollowerController:
             self.browser_transport_age_ms = max(0.0, float(message.get("transport_age_ms", 0.0)))
             if self.command_latency_ms > self.profile.watchdog_ms:
                 self.last_command_at = 0.0
-                self.hold("received keyboard command is older than watchdog limit")
+                self._pause_keyboard_input("received keyboard command is older than watchdog limit")
+            else:
+                self._resume_keyboard_input()
             return
         if kind == "arm_joint_velocity":
             seq = int(message["seq"])
@@ -1254,7 +1302,9 @@ class FollowerController:
             self.browser_transport_age_ms = max(0.0, float(message.get("transport_age_ms", 0.0)))
             if self.command_latency_ms > self.profile.watchdog_ms:
                 self.last_command_at = 0.0
-                self.hold("received keyboard command is older than watchdog limit")
+                self._pause_keyboard_input("received keyboard command is older than watchdog limit")
+            else:
+                self._resume_keyboard_input()
             return
         if kind == "arm_tool_velocity":
             seq = int(message["seq"])
@@ -1287,7 +1337,16 @@ class FollowerController:
             self.browser_transport_age_ms = max(0.0, float(message.get("transport_age_ms", 0.0)))
             if self.command_latency_ms > self.profile.watchdog_ms:
                 self.last_command_at = 0.0
-                self.hold("received keyboard command is older than watchdog limit")
+                self._pause_keyboard_input("received keyboard command is older than watchdog limit")
+            else:
+                self._resume_keyboard_input()
+            return
+        if kind == "arm_match_leader":
+            seq = int(message["seq"])
+            if seq <= self.last_seq or int(time.time() * 1000) - message["sent_unix_ms"] > self.profile.watchdog_ms:
+                return
+            self.last_seq = seq
+            self.start_leader_match()
             return
         if kind == "arm_enable":
             self.last_operator_activity_at = self.now()
@@ -1378,6 +1437,43 @@ class FollowerController:
         if self.now() - self.last_command_at > self.profile.watchdog_ms / 1000.0:
             self._reject(f"{source} data is not fresh")
             return
+        if (source == 'leader' and self.control_source == 'leader'
+                and getattr(self, '_leader_reference_session', None) == self.control_session
+                and self.leader_enable_normalized is not None and self.follower_enable_normalized is not None):
+            if self.state == 'armed':
+                return
+            if (self.state == 'hold' and self.torque_enabled and self.leader_normalized is not None
+                    and self.applied_normalized is not None and not self.following_error_stop
+                    and not self.arm_contact_latched and not self.gripper_contact_latched):
+                if self.latest_input_source != 'leader':
+                    self._reject('leader data is not fresh')
+                    return
+                # Explicit Enable establishes a new relative reference. Keep the
+                # last applied target, even if the follower sagged while held.
+                self.leader_enable_normalized = list(self.leader_normalized)
+                self.follower_enable_normalized = list(self.applied_normalized)
+                self.target_normalized = list(self.applied_normalized)
+                self.watchdog_holding = False
+                self.state = 'armed'
+                self.fault = ''
+                self.status_message = 'Leader resumed at the held follower target.'
+                return
+            self.status_message = 'Leader reference retained; explicit recovery is required before resuming.'
+            return
+        if source == "keyboard" and self.control_source == "keyboard":
+            # The bridge can send several recovery enables before its next
+            # status packet arrives. None may clutch to gravity-sagged encoders.
+            if self.state == "armed":
+                return
+            if self.state in ("armed", "hold") and self.watchdog_holding and self.torque_enabled:
+                self.watchdog_holding = False
+                self.watchdog_resume_count += 1
+                self.last_integrate_at = self.now()
+                self.state = "armed"
+                self.fault = ""
+                self.status_message = "Keyboard control resumed at the retained holding target."
+                return
+        self.watchdog_holding = False
         self.follower_raw = self._read_positions()
         self.follower_normalized = self.profile.follower_calibration.raw_to_normalized(self.follower_raw)
         self.leader_limited_joints = []
@@ -1392,6 +1488,7 @@ class FollowerController:
             self.torque_enabled = True
             self.gripper_torque_enabled = True
             self.control_source = "keyboard"
+            self.floor_constraint.reset()
             initial_pose = arm_pose(self.target_normalized)
             self.keyboard_orientation_target = initial_pose.rotation
             self.keyboard_position_target = list(initial_pose.position)
@@ -1425,6 +1522,7 @@ class FollowerController:
             return
         self.leader_enable_normalized = list(self.leader_normalized)
         self.follower_enable_normalized = list(self.follower_normalized)
+        self._leader_reference_session = self.control_session
         self.target_normalized = list(self.follower_normalized)
         self.applied_normalized = list(self.follower_normalized)
         self._write_current_pose()
@@ -1441,11 +1539,58 @@ class FollowerController:
         self.fault = ""
         self.status_message = "Leader control is armed."
 
+    def _pause_keyboard_input(self, reason: str) -> None:
+        """Expire velocity while retaining the operator's enabled session."""
+        self.hold(reason)
+        if self.watchdog_holding and self.control_source == "keyboard":
+            self.state = "armed"
+
+    def _resume_keyboard_input(self) -> None:
+        if (self.watchdog_holding and self.state == "armed"
+                and self.control_source == "keyboard" and self.torque_enabled
+                and self.command_latency_ms <= self.profile.watchdog_ms):
+            self.watchdog_holding = False
+            self.watchdog_resume_count += 1
+            self.last_integrate_at = self.now()
+            self.status_message = "Keyboard input resumed at the retained holding target."
+
     def hold(self, reason: str) -> None:
+        watchdog_hold = (
+            reason in ("command watchdog expired", "received keyboard command is older than watchdog limit",
+                       "received command is older than watchdog limit")
+            and self.control_source in ("keyboard", "leader")
+            and self.torque_enabled
+            and (self.state == "armed" or (self.state == "hold" and self.watchdog_holding))
+            and self.applied_normalized is not None
+        )
+        if watchdog_hold:
+            if not self.watchdog_holding:
+                self.watchdog_hold_count += 1
+                self.last_watchdog = {
+                    "source": self.control_source, "reason": reason,
+                    "gap_ms": max(0.0, (self.now()-self.last_command_at)*1000) if self.last_command_at else None,
+                    "command_latency_ms": self.command_latency_ms,
+                    "transport_age_ms": self.browser_transport_age_ms,
+                    "input_timing": dict(self.browser_input_timing),
+                }
+            # Freeze the last successfully commanded position, not an unreached
+            # IK goal or the lower measured pose. No velocity may survive Hold.
+            self.target_normalized = list(self.applied_normalized)
+            if self.control_source == "keyboard":
+                held_pose = arm_pose(self.applied_normalized)
+                self.keyboard_position_target = list(held_pose.position)
+                self.keyboard_orientation_target = held_pose.rotation
+        self.watchdog_holding = watchdog_hold
+        self.keyboard_wrist = [0.0, 0.0]
+        self.keyboard_linear_smoothed = [0.0, 0.0, 0.0]
+        self.keyboard_wrist_smoothed = [0.0, 0.0]
         self.leader_limited_joints = []
         if self.calibration_sweep_active or self.calibration_request_state == "planning":
             self.stop_calibration_sweep(reason)
         if self.rest_return_active:
+            if self.rest_return_leader_anchor is not None:
+                self.control_source = "leader"
+                self.rest_return_leader_anchor = None
             self.rest_return_active = False
             self.rest_return_waypoints = []
             self.rest_return_duration = 0.0
@@ -1470,6 +1615,7 @@ class FollowerController:
         self.keyboard_tool_velocity = [0.0] * 6
 
     def release_torque(self) -> None:
+        self.watchdog_holding = False
         if self.calibration_sweep_active or self.calibration_request_state == "planning":
             self.stop_calibration_sweep("operator released torque during automatic calibration")
         self.rest_return_active = False
@@ -1754,7 +1900,9 @@ class FollowerController:
                 raise RuntimeError("hardware motor limits changed since this profile was calibrated")
             # Read again now, even if the last published status looked fresh.
             raw = self._read_positions()
-            result = save_rest_pose(self.profile, raw, apply=True, path=self.rest_pose_path)
+            self.floor_constraint.refresh()
+            result = save_rest_pose(self.profile, raw, apply=True, path=self.rest_pose_path,
+                                    height_metric=self.floor_constraint.geometry.evaluate)
             self.refresh_rest_pose()
             if self.rest_pose is None:
                 raise RuntimeError(self.rest_pose_fault)
@@ -1766,13 +1914,38 @@ class FollowerController:
             self.rest_save_message = f"Rest pose was not saved: {exc}"
         self.status_message = self.rest_save_message
 
-    def start_rest_return(self, reason: str = "operator") -> None:
+    def start_leader_match(self) -> None:
+        if (self.state != "hold" or self.control_source != "leader"
+                or not self.torque_enabled or not self.gripper_torque_enabled
+                or self.following_error_stop or self.arm_contact_latched or self.gripper_contact_latched
+                or not self.control_session or getattr(self, "_leader_reference_session", None) != self.control_session
+                or self.leader_enable_normalized is None or self.follower_enable_normalized is None):
+            self.status_message = "Leader match requires a held leader session with torque and no active safety stop."
+            return
+        if (self.latest_input_source != "leader" or self.leader_normalized is None
+                or self.now() - self.last_command_at > self.profile.watchdog_ms / 1000.0):
+            self.status_message = "Leader match requires fresh readings from the leader."
+            return
+        destination = [
+            zero + direction * (current - reference)
+            for zero, direction, current, reference in zip(
+                self.follower_enable_normalized, self.profile.leader_joint_directions,
+                self.leader_normalized, self.leader_enable_normalized, strict=True,
+            )
+        ]
+        self.last_operator_activity_at = self.now()
+        self.idle_return_attempted = False
+        self.start_rest_return("leader_match", destination=destination)
+
+    def start_rest_return(self, reason: str = "operator", *, destination: list[float] | None = None) -> None:
         if self.rest_return_active:
             return  # A repeated button press must not replace an active route.
-        self.refresh_rest_pose()
-        if self.rest_pose is None:
-            self.status_message = f"Return to rest unavailable: {self.rest_pose_fault or 'no rest pose is saved'}."
-            return
+        action = "Leader match" if destination is not None else "Return to rest"
+        if destination is None:
+            self.refresh_rest_pose()
+            if self.rest_pose is None:
+                self.status_message = f"Return to rest unavailable: {self.rest_pose_fault or 'no rest pose is saved'}."
+                return
         if self.state in ("fault", "restarting", "calibrating"):
             self.status_message = f"Return to rest rejected while follower is {self.state}."
             return
@@ -1782,7 +1955,7 @@ class FollowerController:
         try:
             self.follower_raw = self._read_positions()
             self.follower_normalized = self.profile.follower_calibration.raw_to_normalized(self.follower_raw)
-            rest = list(self.rest_pose["normalized_positions"])
+            rest = list(destination if destination is not None else self.rest_pose["normalized_positions"])
             calibration = self.profile.follower_calibration
             raw_limits = self.bus.read_position_limits()
             if len(raw_limits) != 6 or any(not 0 <= low < high <= 4095 for low, high in raw_limits):
@@ -1801,7 +1974,11 @@ class FollowerController:
 
             if not pose_allowed(self.follower_normalized) or not pose_allowed(rest):
                 raise RuntimeError("rest-return endpoint exceeds hardware motor limits")
-            waypoints = build_rest_return_waypoints(self.follower_normalized, rest, pose_allowed=pose_allowed)
+            self.floor_constraint.refresh()
+            waypoints = build_rest_return_waypoints(
+                self.follower_normalized, rest, pose_allowed=pose_allowed,
+                height_metric=self.floor_constraint.geometry.evaluate,
+            )
             if not all(pose_allowed(pose) for pose, _, _ in waypoints):
                 raise RuntimeError("rest-return route exceeds hardware motor limits")
             close, _ = pose_is_close(
@@ -1809,7 +1986,7 @@ class FollowerController:
                 rest,
                 (0.8, 0.8, 0.8, 0.8, 0.8, 1.5),
             )
-            if close:
+            if close and destination is None:
                 self.target_normalized = list(rest)
                 self.applied_normalized = list(rest)
                 self.bus.reseed_position_guard(self.rest_pose["raw_positions"])
@@ -1835,7 +2012,7 @@ class FollowerController:
             self.rest_return_progress = 0.0
             self.state = "hold" if self.torque_enabled else "ready"
             self.fault = ""
-            self.status_message = f"Return to rest rejected without moving: {exc}"
+            self.status_message = f"{action} rejected without moving: {exc}"
             return
         self._clear_motion_inputs()
         self.target_normalized = list(self.follower_normalized)
@@ -1846,6 +2023,7 @@ class FollowerController:
         self.rest_return_started_at = self.now()
         self.rest_return_progress = 0.0
         self.rest_return_reason = reason
+        self.rest_return_leader_anchor = list(self.leader_normalized) if destination is not None else None
         self.rest_return_active = True
         self.torque_enabled = True
         self.gripper_torque_enabled = True
@@ -1857,16 +2035,19 @@ class FollowerController:
         self.following_error_stop = False
         self.fault = ""
         self.status_message = (
+            "Matching the leader slowly. Keep the leader still or press Hold to cancel."
+            if destination is not None else
             "Returning slowly to the saved rest pose with modeled-clearance and encoder guards."
         )
 
     def stop_rest_return(self, reason: str) -> None:
         if self.rest_return_active and self.applied_normalized is not None:
             self.target_normalized = list(self.applied_normalized)
+        self.control_source = "leader" if self.rest_return_leader_anchor is not None else "none"
         self.rest_return_active = False
+        self.rest_return_leader_anchor = None
         self.rest_return_waypoints = []
         self.rest_return_duration = 0.0
-        self.control_source = "none"
         if self.state != "fault":
             self.state = "hold" if self.torque_enabled else "ready"
             self.fault = ""
@@ -1875,6 +2056,14 @@ class FollowerController:
     def _update_rest_return(self) -> None:
         if not self.rest_return_active or self.rest_return_start is None:
             return
+        matching_leader = self.rest_return_leader_anchor is not None
+        if matching_leader and self.now() - self.last_command_at > self.profile.watchdog_ms / 1000.0:
+            self.stop_rest_return("Leader match stopped because leader input timed out.")
+            return
+        if matching_leader and self.now() - self.last_successful_read_at > 0.6:
+            self.stop_rest_return("Leader match stopped because measured servo telemetry became stale.")
+            return
+        action = "Leader match" if matching_leader else "Return to rest"
         elapsed = max(0.0, self.now() - self.rest_return_started_at)
         duration = self.rest_return_duration
         self.rest_return_progress = min(1.0, elapsed / max(0.001, duration))
@@ -1893,14 +2082,22 @@ class FollowerController:
             )
             if settled:
                 self.rest_return_progress = 1.0
-                self.stop_rest_return("Return to rest complete; follower is holding the saved encoder pose.")
+                if matching_leader:
+                    self.stop_rest_return("Leader match complete. Normal leader control resumed.")
+                    self.leader_enable_normalized = list(self.leader_normalized)
+                    self.follower_enable_normalized = list(self.applied_normalized)
+                    self._leader_reference_session = self.control_session
+                    self.state = "armed"
+                    self.armed_at = self.now()
+                else:
+                    self.stop_rest_return("Return to rest complete; follower is holding the saved encoder pose.")
             elif elapsed - duration > 4.0:
                 self.stop_rest_return(
-                    "Return to rest stopped because the measured pose did not settle "
+                    f"{action} stopped because the measured pose did not settle "
                     f"(largest error {max(errors):.1f} deg)."
                 )
             else:
-                self.status_message = "Return to rest: waiting for measured servos to settle."
+                self.status_message = f"{action}: waiting for measured servos to settle."
             return
         segment_started_at = 0.0
         segment = 0
@@ -1927,7 +2124,9 @@ class FollowerController:
         self._write_positions(
             self.profile.follower_calibration.normalized_to_raw(self.applied_normalized)
         )
-        self.status_message = f"Return to rest: {label} | {self.rest_return_progress * 100.0:.0f}%"
+        self.status_message = f"{action}: {self.rest_return_progress * 100.0:.0f}%" if matching_leader else (
+            f"Return to rest: {label} | {self.rest_return_progress * 100.0:.0f}%"
+        )
 
     def _maybe_start_idle_return(self) -> bool:
         if (
@@ -2033,6 +2232,10 @@ class FollowerController:
         if self._maybe_start_idle_return():
             self.update_count += 1
             return
+        if self.state in ("armed", "hold") and self.watchdog_holding and self.torque_enabled:
+            self._write_positions(self.profile.follower_calibration.normalized_to_raw(self.applied_normalized))
+            self.update_count += 1
+            return
         if self.state == "returning_rest":
             self._update_rest_return()
             self.update_count += 1
@@ -2043,7 +2246,16 @@ class FollowerController:
             return
         if self.state == "armed":
             if self.now() - self.last_command_at > self.profile.watchdog_ms / 1000.0:
-                self.hold("command watchdog expired")
+                motion = (*self.keyboard_linear, *self.keyboard_angular, *self.keyboard_wrist,
+                          self.keyboard_gripper, *self.keyboard_joint_velocity, *self.keyboard_tool_velocity)
+                if self.control_source == "keyboard" and not any(abs(v) > .001 for v in motion):
+                    # An idle session needs no timeout transition or warning.
+                    # Keep its already-applied position without advancing IK.
+                    self.target_normalized = list(self.applied_normalized)
+                    self._write_positions(self.profile.follower_calibration.normalized_to_raw(self.applied_normalized))
+                    self.update_count += 1
+                    return
+                self._pause_keyboard_input("command watchdog expired")
                 return
             if self.target_normalized is None or self.applied_normalized is None:
                 self.hold("missing arm target")
@@ -2066,7 +2278,9 @@ class FollowerController:
                         dt,
                     )
                 else:
-                    smoothing = 1.0 - math.exp(-dt / 0.11) if dt > 0.0 else 0.0
+                    # Short acceleration ramp: respond on the first control tick while
+                    # retaining gradual acceleration and the existing speed/step limits.
+                    smoothing = 1.0 - math.exp(-dt / 0.035) if dt > 0.0 else 0.0
                     self.keyboard_linear_smoothed = [
                         current + (target - current) * smoothing
                         for current, target in zip(self.keyboard_linear_smoothed, self.keyboard_linear, strict=True)
@@ -2109,15 +2323,6 @@ class FollowerController:
                     # hard-held the entire arm near wrist-roll limits even
                     # though the bounded solver could safely project the
                     # remaining Cartesian motion along that hard limit.
-                    previous_clearance = rendered_minimum_height(previous_target)
-                    clearance = rendered_minimum_height(candidate_target)
-                    if previous_clearance >= RUNTIME_IK_MIN_CLEARANCE_M and clearance < RUNTIME_IK_MIN_CLEARANCE_M:
-                        self._stop_on_ik_guard(
-                            "Modeled arm clearance stopped motion at %.1f mm; "
-                            "target rebased to measured pose."
-                            % (clearance * 1000.0)
-                        )
-                        return
                     self.target_normalized = candidate_target
                     achieved_position = arm_pose(candidate_target).position
                     target_error = [
@@ -2152,6 +2357,7 @@ class FollowerController:
                         0.0,
                         min(100.0, self.target_normalized[5] + self.keyboard_gripper * 45.0 * precision_scale * dt),
                     )
+                    self._limit_keyboard_clearance(linear)
             self.applied_normalized = limit_step(
                 self.applied_normalized,
                 self.target_normalized,
@@ -2300,6 +2506,39 @@ class FollowerController:
         self.following_error_trip_count += 1
         self.following_error_started_at = 0.0
 
+    def _limit_keyboard_clearance(self, linear=None) -> None:
+        """Project only motion into the surface; keep control and tangents live."""
+        held = self.applied_normalized
+        floor = self.floor_constraint
+        floor.refresh()
+        allow_slide = True
+        if linear is not None:
+            world_motion = floor.geometry.base[:3, :3] @ linear
+            normal = floor.geometry.normal
+            tangent = world_motion-normal*float(normal@world_motion)
+            allow_slide = (float(tangent@tangent) > 1e-12
+                           or any(abs(v) > 0.001 for v in (*self.keyboard_wrist, *self.keyboard_angular)))
+        accepted, limited = floor.limit(held, self.target_normalized, self.profile.max_step, allow_slide=allow_slide)
+        self.target_normalized[:5] = accepted[:5]
+        commanded_jaw = limit_step(held, self.target_normalized, self.profile.max_step)[5]
+        if abs(accepted[5]-commanded_jaw) > 1e-8:
+            self.target_normalized[5] = accepted[5]
+        if limited:
+            if not self.ik_clearance_limited:
+                self.ik_guard_trip_count += 1
+            self.ik_clearance_limited = True
+            pose = arm_pose(self.target_normalized)
+            self.keyboard_position_target = list(pose.position)
+            if any(abs(v) > 0.001 for v in (*self.keyboard_wrist, *self.keyboard_angular)):
+                self.keyboard_orientation_target = pose.rotation
+            if self.keyboard_frame in ("base", "plane"):
+                self.keyboard_linear_smoothed[2] = max(0.0, self.keyboard_linear_smoothed[2])
+            self.status_message = "Claw/base clearance limit: blocked component clipped; valid directions remain enabled."
+        else:
+            if self.ik_clearance_limited:
+                self.status_message = "Keyboard control is armed."
+            self.ik_clearance_limited = False
+
     def _stop_on_ik_guard(self, reason: str) -> None:
         self.sample_feedback_safely()
         measured = list(self.follower_normalized)
@@ -2334,6 +2573,8 @@ class FollowerController:
         self._write_positions(self.follower_raw)
 
     def _clear_motion_inputs(self) -> None:
+        self.watchdog_holding = False
+        self.ik_clearance_limited = False
         self.leader_limited_joints = []
         self.keyboard_linear = [0.0, 0.0, 0.0]
         self.keyboard_angular = [0.0, 0.0, 0.0]
@@ -2373,6 +2614,10 @@ class FollowerController:
             "state": self.state,
             "armed": self.state == "armed",
             "torque_enabled": self.torque_enabled,
+            "watchdog_holding": self.watchdog_holding,
+            "watchdog_hold_count": self.watchdog_hold_count,
+            "watchdog_resume_count": self.watchdog_resume_count,
+            "last_watchdog": dict(self.last_watchdog),
             "gripper_torque_enabled": self.gripper_torque_enabled,
             "fault": self.fault,
             "message": self.status_message,
@@ -2381,6 +2626,7 @@ class FollowerController:
             "command_age_ms": age_ms,
             "command_latency_ms": self.command_latency_ms,
             "browser_transport_age_ms": self.browser_transport_age_ms,
+            "browser_input_timing": dict(self.browser_input_timing),
             "loop_hz": self.update_count / elapsed,
             "write_rate_hz": self._recent_rate(self.write_times),
             "read_rate_hz": self._recent_rate(self.read_times),
@@ -2437,6 +2683,10 @@ class FollowerController:
             "arm_contact_latched": self.arm_contact_latched,
             "arm_contact_trip_count": self.arm_contact_trip_count,
             "ik_guard_trip_count": self.ik_guard_trip_count,
+            "ik_clearance_limited": self.ik_clearance_limited,
+            "floor_geometry_source": self.floor_constraint.source,
+            "floor_reference_clearance_m": self.floor_constraint.reference,
+            "floor_geometry_warning": self.floor_constraint.warning,
             "alignment_mode": "relative_start",
             "control_session": self.control_session,
             "control_source": self.control_source,
@@ -2453,6 +2703,7 @@ class FollowerController:
         }
 
     def fail(self, message: str) -> None:
+        self.watchdog_holding = False
         # Retain the first failure until recovery; later errors while already
         # faulted must not erase the pose/exception that actually stopped motion.
         new_fault = self.state != "fault"
@@ -2557,10 +2808,13 @@ def run_service(
     feedback_hz: float,
     hold_on_connect: bool = False,
 ) -> int:
+    from robot_teleop.state import godot_app_userdata_root
     controller = FollowerController(
         profile, bus,
         fault_report_path=Path(__file__).resolve().parents[3] / ".teleop/so101_follower_fault.json",
+        floor_constraint=RuntimeFloorConstraint(godot_app_userdata_root() / "Robot Teleop Vision"),
     )
+    controller.floor_constraint.refresh()
     command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     command_socket.bind(("127.0.0.1", command_port))
     command_socket.setblocking(False)

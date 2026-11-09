@@ -189,15 +189,32 @@ def test_shared_runtime_contains_no_so101_wire_protocol_tokens():
     root = Path(__file__).resolve().parents[1]
     shared_roots = [root / name for name in ("robot_teleop", "web", "godot", "tools")]
     forbidden = ("so101", "so-101", "/arm-control", "arm_cartesian_velocity", "arm_hold")
+    # The current study UI, visual overlay, and calibration integration select
+    # the reference module directly. Keep these references explicit and continue
+    # checking every shared file for SO-101 wire commands.
+    known_module_references = {
+        "godot/runtime/point_cloud/unified_point_cloud_view.gd",
+        "robot_teleop/camera_alignment.py",
+        "robot_teleop/robot_joint_animation.py",
+        "tools/robot_overlay_pose_service.gd",
+        "web/claw_mesh_mask.js",
+        "web/controller_hybrid.js",
+        "web/hybrid_rgbd_renderer.js",
+        "web/robot_joint_animation.js",
+        "web/trial_controller.js",
+    }
     violations = []
     for shared_root in shared_roots:
         for path in shared_root.rglob("*"):
             if path.suffix not in {".py", ".js", ".gd", ".tscn", ".html"}:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace").lower()
+            relative = path.relative_to(root).as_posix()
             for token in forbidden:
+                if token == "so101" and relative in known_module_references:
+                    continue
                 if token in text:
-                    violations.append(f"{path.relative_to(root)}: {token}")
+                    violations.append(f"{relative}: {token}")
     assert violations == []
 
 

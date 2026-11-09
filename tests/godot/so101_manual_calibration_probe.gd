@@ -44,6 +44,14 @@ func _run() -> void:
 	var angles := []
 	for index in range(6):
 		angles.append(arm._normalized_joint_angle(index, 10.0))
+	check(action(arm, "begin").ok, "begin isolated claw translation")
+	check(action(arm, "preview", {"manual_tool_x": 0.0025}).ok, "preview 2.5mm claw shift")
+	check(is_equal_approx(arm.manual_tool_translation_local.x, 0.0025), "claw translation retains mm precision")
+	for index in range(6):
+		check(is_equal_approx(arm._normalized_joint_angle(index, 10.0), angles[index]), "claw shift preserves joint %d" % index)
+	check(arm.transform == base, "claw shift preserves base")
+	check(FileAccess.get_file_as_string(arm._registration_path) == initial, "claw preview preserves saved calibration")
+	action(arm, "cancel")
 	var corrections := {"manual_shoulder_lift_trim_degrees": 12.5, "manual_elbow_flex_trim_degrees": -90.0, "manual_wrist_flex_trim_degrees": 45.0, "manual_wrist_roll_trim_degrees": 90.0, "manual_opening_offset_degrees": 2.0}
 	check(action(arm, "begin").ok, "partial automatic base permits manual tuning")
 	check(action(arm, "preview", corrections).ok, "preview accepted")

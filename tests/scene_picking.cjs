@@ -1,0 +1,25 @@
+const assert=require('node:assert/strict'),fs=require('node:fs');
+(async()=>{
+ const source=fs.readFileSync(require('node:path').join(__dirname,'../web/scene_picking.js'),'utf8');
+ const {raycastTriangles,raycastRobotPrimitive}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+ const positions=new Float32Array([0,0,0,1,0,0,0,1,0]),ray={origin:[.2,.2,1],direction:[0,0,-1]};
+ const near=(actual,expected)=>assert.ok(actual.every((v,i)=>Math.abs(v-expected[i])<1e-6));
+ near(raycastTriangles(ray,positions).point,[.2,.2,0]);
+ near(raycastTriangles(ray,positions,new Uint32Array([2,1,0])).point,[.2,.2,0]);
+ for(const mode of [5,6])near(raycastTriangles(ray,positions,null,{mode}).point,[.2,.2,0]);
+ assert.equal(raycastTriangles(ray,positions,null,{mode:1}),null);
+ assert.equal(raycastTriangles({...ray,origin:[2,2,1]},positions),null);
+ assert.equal(raycastTriangles(ray,positions,null,{limit:.9}),null);
+ assert.equal(raycastTriangles({...ray,direction:[0,0,1]},positions),null);
+ const primitive={cpuPositions:positions,cpuIndices:null,mode:4};
+ const matrix=[2,0,0,0,0,3,0,0,0,0,4,0,.5,-.2,-2,1];
+ const world={origin:[.9,.4,3],direction:[0,0,-1]};
+ const hit=raycastRobotPrimitive(world,primitive,matrix);near(hit.point,[.9,.4,-2]);assert.equal(hit.distance,5);
+ const bounds=primitive.pickBounds;
+ assert.equal(raycastRobotPrimitive(world,primitive,matrix,4),null);
+ assert.equal(primitive.pickBounds,bounds,'rigid motion reuses the local mesh bound');
+ assert.equal(raycastRobotPrimitive({...world,origin:[5,5,3]},primitive,matrix),null);
+ assert.equal(raycastRobotPrimitive(world,{cpuPositions:null},matrix),null);
+ assert.equal(raycastRobotPrimitive(world,primitive,new Array(16).fill(0)),null);
+ console.log('Arm ray picking: indexed/nonindexed triangles, strips/fans, scaled/transformed meshes, occlusion limits, bounds and misses passed.');
+})().catch(e=>{console.error(e);process.exitCode=1;});

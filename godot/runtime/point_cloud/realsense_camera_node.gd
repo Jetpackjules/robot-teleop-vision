@@ -68,11 +68,11 @@ extends Node3D
 		laser_power_percent = clampf(value, 0.0, 100.0)
 		_notify_settings_changed()
 
-@export_group("Workspace Crop")
+@export_group("Image Crop")
 ## Image-space crop applied before rendering, picking, and calibration point sampling.
-@export var workspace_crop_enabled: bool = false:
+@export var image_crop_enabled: bool = false:
 	set(value):
-		workspace_crop_enabled = value
+		image_crop_enabled = value
 		_notify_settings_changed()
 @export_range(0.0, 45.0, 1.0, "suffix:%") var crop_left_percent: float = 0.0:
 	set(value):
@@ -231,7 +231,7 @@ func apply_settings(settings: Dictionary) -> void:
 	color_bias = settings.get("color_bias", color_bias) as Vector3
 	emitter_enabled = bool(settings.get("emitter_enabled", emitter_enabled))
 	laser_power_percent = float(settings.get("laser_power_percent", laser_power_percent))
-	workspace_crop_enabled = bool(settings.get("workspace_crop_enabled", workspace_crop_enabled))
+	image_crop_enabled = bool(settings.get("image_crop_enabled", settings.get("workspace_crop_enabled", image_crop_enabled)))
 	crop_left_percent = float(settings.get("crop_left_percent", crop_left_percent))
 	crop_right_percent = float(settings.get("crop_right_percent", crop_right_percent))
 	crop_top_percent = float(settings.get("crop_top_percent", crop_top_percent))
@@ -281,7 +281,7 @@ func get_settings() -> Dictionary:
 		"color_bias": color_bias,
 		"emitter_enabled": emitter_enabled,
 		"laser_power_percent": laser_power_percent,
-		"workspace_crop_enabled": workspace_crop_enabled,
+		"image_crop_enabled": image_crop_enabled,
 		"crop_left_percent": crop_left_percent,
 		"crop_right_percent": crop_right_percent,
 		"crop_top_percent": crop_top_percent,

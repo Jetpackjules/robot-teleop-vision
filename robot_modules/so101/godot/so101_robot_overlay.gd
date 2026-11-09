@@ -136,6 +136,7 @@ const JOINTS := [
 		overlay_transparency = clampf(value, 0.0, 0.95)
 		_apply_overlay_transparency()
 @export var mask_scanned_robot: bool = true
+var overlay_style := "alignment"
 @export var load_saved_registration: bool = true
 @export_range(0.25, 2.0, 0.01) var model_scale: float = 1.0:
 	set(value):
@@ -263,7 +264,16 @@ var _udp_bind_error: int = OK
 var _next_udp_bind_msec := 0
 var _last_status: Dictionary = {}
 var _registration_status: Dictionary = {}
+var manual_base_calibration_enabled := false
+var _manual_base_session_id := ""
+var _manual_base_before := Transform3D.IDENTITY
+var _manual_base_before_status: Dictionary = {}
+var _manual_base_before_file: Dictionary = {}
+var _manual_base_offsets := Vector3.ZERO # world X, world Z, yaw in degrees
+var _manual_base_offset_y := 0.0
+var _manual_base_last_update_msec := 0
 var _registration_modified_time: int = 0
+var _last_rigid_registration_error: String = ""
 var _next_registration_poll_msec: int = 0
 var _scene_fallback_transform := Transform3D.IDENTITY
 var _scene_fallback_mapping: Dictionary = {}
@@ -296,6 +306,8 @@ func _exit_tree() -> void:
 	_udp_bound = false
 
 func _process(delta: float) -> void:
+	if manual_base_calibration_enabled and Time.get_ticks_msec() - _manual_base_last_update_msec > 15000:
+		_cancel_manual_base()
 	if not _udp_bound and Time.get_ticks_msec() >= _next_udp_bind_msec:
 		_bind_telemetry()
 	_poll_saved_registration()
@@ -311,6 +323,13 @@ func set_overlay_enabled(enabled: bool) -> void:
 
 func set_overlay_transparency(value: float) -> void:
 	overlay_transparency = value
+
+func set_overlay_style(value: String) -> void:
+	if value not in ["alignment", "solid", "realistic"]:
+		return
+	overlay_style = value
+	if _model_root != null:
+		_configure_visual(_model_root)
 
 func set_mask_scanned_robot(enabled: bool) -> void:
 	mask_scanned_robot = enabled
@@ -513,12 +532,29 @@ func get_manual_claw_calibration_state() -> Dictionary:
 
 
 func get_manual_calibration_status() -> Dictionary:
+	var render_state := get_hybrid_render_state()
+	# Keep the frequent control packet small; fit diagnostics remain available
+	# in the usual registration/camera payload, outside this visual pose path.
+	render_state["registration"] = {"registered": bool(_registration_status.get("registered", false))}
 	return {
 		"supported": true,
 		"enabled": manual_claw_calibration_enabled,
 		"registered": bool(_registration_status.get("registered", false)),
 		"reply": _manual_calibration_reply.duplicate(true),
 		"preview": get_manual_claw_calibration_state(),
+		# Small pose packets travel over the control/status channel, independently
+		# of the slower RGB-D stream. No camera payload or motor command is added.
+		"render_state": render_state,
+		"base_adjustment": {
+			"supported": true,
+			"enabled": manual_base_calibration_enabled,
+			"session_id": _manual_base_session_id,
+			"origin": [global_transform.origin.x, global_transform.origin.y, global_transform.origin.z] if is_inside_tree() else [position.x, position.y, position.z],
+			"offset_x": _manual_base_offsets.x,
+			"offset_y": _manual_base_offset_y,
+			"offset_z": _manual_base_offsets.y,
+			"yaw_degrees": _manual_base_offsets.z,
+		},
 	}
 
 
@@ -535,6 +571,10 @@ func handle_manual_calibration_action(action: Dictionary, settings: Dictionary =
 	var reply := {"request_id": request_id, "operation": operation, "ok": false, "message": ""}
 	if busy:
 		reply.message = "Wait for automatic calibration to finish, or cancel it first."
+	elif operation.begins_with("base_"):
+		reply.merge(_handle_manual_base_action(action), true)
+	elif manual_base_calibration_enabled:
+		reply.message = "Save or cancel base placement before joint tuning or importing."
 	elif operation == "export":
 		if not bool(_registration_status.get("registered", false)):
 			reply.message = "Align and save the robot base before exporting."
@@ -572,12 +612,90 @@ func handle_manual_calibration_action(action: Dictionary, settings: Dictionary =
 	else:
 		reply.message = "Open manual joint tuning before editing or saving."
 	# Preview acknowledgements must not overwrite an in-flight Save/Export reply.
-	if operation != "preview":
+	if operation not in ["preview", "base_preview"]:
 		_manual_calibration_reply = reply.duplicate(true)
 		_manual_calibration_replies[request_id] = reply.duplicate(true)
 	while _manual_calibration_replies.size() > 32:
 		_manual_calibration_replies.erase(_manual_calibration_replies.keys()[0])
 	return reply
+
+
+func _cancel_manual_base() -> void:
+	if not manual_base_calibration_enabled:
+		return
+	transform = _manual_base_before
+	_registration_status = _manual_base_before_status.duplicate(true)
+	manual_base_calibration_enabled = false
+	_manual_base_session_id = ""
+	_manual_base_offsets = Vector3.ZERO
+	_manual_base_offset_y = 0.0
+
+
+func _handle_manual_base_action(action: Dictionary) -> Dictionary:
+	var operation := str(action.get("operation", ""))
+	if operation == "base_begin":
+		if manual_claw_calibration_enabled or manual_base_calibration_enabled:
+			return {"ok": false, "message": "Save or cancel the current calibration preview first."}
+		_manual_base_before = transform
+		_manual_base_before_status = _registration_status.duplicate(true)
+		_manual_base_before_file = _read_registration_payload().duplicate(true)
+		_manual_base_session_id = str(action.request_id)
+		_manual_base_offsets = Vector3.ZERO
+		_manual_base_offset_y = 0.0
+		manual_base_calibration_enabled = true
+		_manual_base_last_update_msec = Time.get_ticks_msec()
+		var origin := global_transform.origin if is_inside_tree() else position
+		return {"ok": true, "message": "Drag the base across the table, or turn it with Yaw.", "session_id": _manual_base_session_id, "origin": [origin.x, origin.y, origin.z]}
+	if not manual_base_calibration_enabled or str(action.get("session_id", "")) != _manual_base_session_id:
+		return {"ok": false, "message": "Base preview expired. Open Adjust Base again."}
+	_manual_base_last_update_msec = Time.get_ticks_msec()
+	if operation == "base_cancel":
+		_cancel_manual_base()
+		return {"ok": true, "message": "Base placement restored."}
+	if operation == "base_reset":
+		transform = _manual_base_before
+		_manual_base_offsets = Vector3.ZERO
+		_manual_base_offset_y = 0.0
+		return {"ok": true, "message": "Base preview reset."}
+	if operation not in ["base_preview", "base_save"]:
+		return {"ok": false, "message": "Unsupported base adjustment."}
+	var offsets := Vector3.ZERO
+	var names := ["offset_x", "offset_z", "yaw_degrees"]
+	for index in range(3):
+		var raw = action.get(names[index])
+		if (not raw is float and not raw is int) or not is_finite(float(raw)) or absf(float(raw)) > (180.0 if index == 2 else 2.0):
+			return {"ok": false, "message": "Base adjustment is out of range."}
+		offsets[index] = float(raw)
+	var height = action.get("offset_y", 0.0)
+	if (not height is float and not height is int) or not is_finite(float(height)) or absf(float(height)) > 2.0:
+		return {"ok": false, "message": "Base height adjustment is out of range."}
+	# Translation uses world axes; rotation remains world-up yaw only. Preserve
+	# the original scale and tilt, including under a transformed parent.
+	var parent := get_parent_node_3d()
+	var parent_frame := parent.global_transform if is_inside_tree() and parent != null else Transform3D.IDENTITY
+	var original := parent_frame * _manual_base_before
+	var desired := Transform3D(Basis(Vector3.UP, deg_to_rad(offsets.z)) * original.basis, original.origin + Vector3(offsets.x, float(height), offsets.y))
+	transform = parent_frame.affine_inverse() * desired
+	_manual_base_offsets = offsets
+	_manual_base_offset_y = float(height)
+	if operation == "base_preview":
+		return {"ok": true}
+	if _read_registration_payload() != _manual_base_before_file:
+		return {"ok": false, "message": "Saved calibration changed during this preview. Cancel and reopen Adjust Base."}
+	var previous_status := _registration_status.duplicate(true)
+	_registration_status["registered"] = true
+	_registration_status["confidence"] = 0.0 # user alignment, not automatic validation
+	_registration_status["registration_source"] = "manual_base_placement"
+	_registration_status["base_reference_only"] = false
+	_registration_status["saved_unix_ms"] = Time.get_unix_time_from_system() * 1000.0
+	var payload := _build_registration_payload()
+	payload["manual_base_adjustment"] = {"offset_x": offsets.x, "offset_y": float(height), "offset_z": offsets.y, "yaw_degrees": offsets.z, "previous_source": str(previous_status.get("registration_source", "scene"))}
+	if not _write_registration_payload(payload):
+		_registration_status = previous_status
+		return {"ok": false, "message": "Could not save base placement. The preview remains open; retry or cancel."}
+	manual_base_calibration_enabled = false
+	_manual_base_session_id = ""
+	return {"ok": true, "message": "Base placement saved. Joint calibration kept."}
 
 
 func _validate_portable_mapping(file: Variant) -> String:
@@ -632,6 +750,7 @@ func _import_visual_calibration(file: Variant, restore_base: bool) -> String:
 	payload["confidence"] = 0.0
 	payload["joint_refinement"] = {"manual_import": {"saved_unix_ms": payload.saved_unix_ms, "restored_base": restore_base}}
 	if restore_base:
+		payload["base_reference_only"] = bool(file.get("base_reference_only", false))
 		payload.erase("base_axis_fit")
 		payload.erase("base_registration_source")
 		payload.erase("calibrated_through_joint")
@@ -940,6 +1059,9 @@ func get_best_available_normalized_pose() -> Array:
 
 func get_hybrid_render_state() -> Dictionary:
 	var link_transforms: Dictionary = {}
+	var parents := {}
+	for joint in JOINTS:
+		parents[joint.child] = joint.parent
 	for link_name in LINK_MODELS:
 		var link := _links.get(link_name, null) as Node3D
 		if link != null:
@@ -947,8 +1069,60 @@ func get_hybrid_render_state() -> Dictionary:
 	return {
 		"available": not link_transforms.is_empty(),
 		"links": link_transforms,
+		"parents": parents,
+		"pose_unix_ms": Time.get_unix_time_from_system() * 1000.0,
+		"registration": get_registration_status(),
 		"manual_claw_calibration": get_manual_claw_calibration_state(),
+		"kinematics": get_browser_kinematics(),
 	}
+
+func get_browser_kinematics() -> Dictionary:
+	# Read-only export of the live model, never stock calibration defaults.
+	if _joint_origin_transforms.size() != JOINTS.size() or not _links.has("base_link"):
+		return {}
+	var joints: Array = []
+	for index in range(JOINTS.size()):
+		var entry: Dictionary = JOINTS[index]
+		var origin: Transform3D = _joint_origin_transforms[index]
+		var axis := Vector3(0, 0, 1)
+		var post := Transform3D.IDENTITY
+		var translation := Vector3.ZERO
+		if index == 5 and moving_jaw_calibration_enabled:
+			origin = Transform3D(Basis.IDENTITY, moving_jaw_pivot_parent)
+			axis = moving_jaw_axis_parent.normalized()
+			post = Transform3D(moving_jaw_closed_basis_parent, Vector3.ZERO)
+		if index == 4:
+			translation = gripper_mount_correction_local
+			post = _gripper_visual_correction_transform()
+		if index == 3 and d455_visual_correction_enabled:
+			translation = _d455_distal_correction_local
+		var limits: Vector2 = entry.limits
+		joints.append({
+			"parent": entry.parent, "child": entry.child,
+			"origin": _transform_to_dictionary(origin), "post": _transform_to_dictionary(post),
+			"axis": [axis.x, axis.y, axis.z],
+			"parent_translation": [translation.x, translation.y, translation.z],
+			"direction": _joint_direction(index), "offset_degrees": _joint_offset(index),
+			"limits": [limits.x, limits.y],
+			"extra_degrees": _signed_wrist_roll_preview_degrees() if index == 4 else 0.0,
+			"force_zero": index == 4 and force_wrist_roll_straight,
+		})
+	return {
+		"schema": "so101_measured_fk_v1", "base_link": "base_link",
+		"base_transform": _transform_to_dictionary((_links.base_link as Node3D).global_transform),
+		"joints": joints, "clamp_limits": clamp_visual_joint_limits,
+		"manual_active": manual_claw_calibration_enabled or manual_base_calibration_enabled,
+		"gripper": {
+			"moving_jaw": moving_jaw_calibration_enabled,
+			"clamp_limits": clamp_visual_joint_limits,
+			"samples_normalized": Array(gripper_angle_samples_normalized),
+			"samples_degrees": Array(moving_jaw_opening_samples_degrees if moving_jaw_calibration_enabled else gripper_angle_samples_degrees),
+			"fallback_samples_degrees": Array(gripper_angle_samples_degrees),
+			"offset": gripper_angle_offset_degrees, "scale": gripper_angle_scale_degrees_per_normalized,
+			"curvature": gripper_angle_curvature_degrees,
+		},
+	}
+
 
 func get_registration_status() -> Dictionary:
 	var result := _registration_status.duplicate(true)
@@ -977,13 +1151,60 @@ func _calibration_transaction_is_stale(
 	)
 
 
+func get_alignment_token() -> String:
+	var payload := _build_registration_payload()
+	# An unregistered model has no saved timestamp; the payload supplies the
+	# current time for exports, which must not invalidate a capture every frame.
+	payload.erase("saved_unix_ms")
+	for name in ["model_scale", "clamp_visual_joint_limits", "wrist_housing_mount_flipped", "wrist_roll_alignment_preview_degrees"]:
+		payload[name] = get(name)
+	payload["alignment_global_transform"] = _transform_to_dictionary(global_transform if is_inside_tree() else transform)
+	var file_text := FileAccess.get_file_as_string(_registration_path) if FileAccess.file_exists(_registration_path) else ""
+	return (JSON.stringify(payload) + file_text).sha256_text()
+
+
+func get_last_rigid_registration_error() -> String:
+	return _last_rigid_registration_error
+
+
+func apply_rigid_registration(value: Transform3D, confidence: float, started_unix_ms: float, metrics: Dictionary, expected_token: String) -> bool:
+	_last_rigid_registration_error = ""
+	if expected_token.is_empty() or expected_token != get_alignment_token():
+		_last_rigid_registration_error = "Robot placement, joint settings, or the saved file changed during alignment."
+		return false
+	if not _global_registration_is_upright(value):
+		_last_rigid_registration_error = "The fitted world placement is invalid or its base up direction is unsafe."
+		return false
+	var previous_transform := transform
+	var previous_status := _registration_status.duplicate(true)
+	if is_inside_tree():
+		global_transform = Transform3D(value.basis.orthonormalized(), value.origin)
+	else:
+		transform = Transform3D(value.basis.orthonormalized(), value.origin)
+	_registration_status["registered"] = true
+	_registration_status["base_registration_source"] = "fixed_kinematics_whole_arm_registration"
+	_registration_status["base_reference_only"] = false
+	_registration_status["registration_source"] = "fixed_kinematics_whole_arm_registration"
+	_registration_status["confidence"] = clampf(confidence, 0.0, 1.0)
+	_registration_status["calibration_started_unix_ms"] = started_unix_ms
+	_registration_status["saved_unix_ms"] = Time.get_unix_time_from_system() * 1000.0
+	var payload := _build_registration_payload()
+	payload["registration_fit"] = metrics.duplicate(true)
+	if _write_registration_payload(payload):
+		return true
+	_last_rigid_registration_error = str(_registration_status.get("fault", "Could not write the robot registration file."))
+	transform = previous_transform
+	_registration_status = previous_status
+	return false
+
+
 func apply_calibrated_global_transform(
 	value: Transform3D,
 	confidence: float = 0.0,
 	calibration_started_unix_ms: float = 0.0,
 	registration_source: String = "markerless_motion_fit",
 ) -> bool:
-	if not value.is_finite() or not _registration_is_upright(value):
+	if not _global_registration_is_upright(value):
 		return false
 	var existing := _read_registration_payload()
 	var existing_started := float(existing.get("calibration_started_unix_ms", 0.0))
@@ -1098,16 +1319,19 @@ func _reset_to_scene_fallback() -> void:
 	_apply_moving_jaw_visual_geometry()
 
 
-func _registration_is_upright(value: Transform3D) -> bool:
+func _global_registration_is_upright(value: Transform3D) -> bool:
+	# Solver outputs are already in world space. Apply no parent rotation here.
 	if not value.is_finite() or value.basis.determinant() <= 0.0:
 		return false
-	var world_up := value.basis.orthonormalized().y.normalized()
+	return value.basis.orthonormalized().y.normalized().dot(Vector3.UP) >= MINIMUM_REGISTRATION_WORLD_UP_DOT
+
+
+func _registration_is_upright(value: Transform3D) -> bool:
+	# Saved registrations and manual base edits are local to WorldLevelAnchor.
 	var parent := get_parent() as Node3D
 	if parent != null:
-		world_up = (
-			parent.global_transform.basis.orthonormalized() * world_up
-		).normalized()
-	return world_up.dot(Vector3.UP) >= MINIMUM_REGISTRATION_WORLD_UP_DOT
+		return _global_registration_is_upright(parent.global_transform * value)
+	return _global_registration_is_upright(value)
 
 
 func clear_saved_registration() -> void:
@@ -1218,6 +1442,35 @@ func get_pose_joint_frames_local(values: Variant) -> Array:
 	return result
 
 
+func get_pose_link_visual_transforms_local(values: Variant) -> Dictionary:
+	# Exact imported-mesh transforms for optional surface/edge registration.
+	# Pure forward kinematics: never change the displayed pose or servo mapping.
+	if not values is Array or (values as Array).size() < JOINTS.size():
+		return {}
+	var chains := {"base_link": Transform3D.IDENTITY}
+	var chain := Transform3D.IDENTITY
+	for index in range(JOINTS.size()):
+		var entry: Dictionary = JOINTS[index]
+		var angle := _normalized_joint_angle(index, float(values[index]))
+		if index == 5 and moving_jaw_calibration_enabled:
+			chain = chain * _moving_jaw_transform(angle)
+		else:
+			var origin := Transform3D(_basis_from_urdf_rpy(entry["rpy"]), entry["xyz"])
+			chain = chain * origin * Transform3D(Basis(Vector3(0.0, 0.0, 1.0), angle), Vector3.ZERO)
+		if index == 4:
+			chain.origin += gripper_mount_correction_local
+			chain = chain * _gripper_visual_correction_transform()
+		chains[str(entry["child"])] = chain
+	var conversion := Transform3D(ROS_TO_GODOT.scaled(Vector3.ONE * model_scale), Vector3.ZERO)
+	var result := {}
+	for name in chains:
+		var link := _links.get(name, null) as Node3D
+		var visual := link.get_node_or_null("Visual") as Node3D if link != null else null
+		if visual != null:
+			result[name] = conversion * (chains[name] as Transform3D) * visual.transform
+	return result
+
+
 func get_pose_mesh_points_local(values: Variant, maximum_points_per_link: int = 220) -> Dictionary:
 	_ensure_link_surface_points(maximum_points_per_link)
 	var result := {}
@@ -1240,14 +1493,18 @@ func get_pose_mesh_points_local(values: Variant, maximum_points_per_link: int = 
 	for index in range(link_names.size()):
 		var raw: PackedVector3Array = _link_surface_points.get(link_names[index], PackedVector3Array())
 		var posed := PackedVector3Array()
-		posed.resize(raw.size())
-		for point_index in range(raw.size()):
+		# A fingertip lookup may have filled a much denser shared cache. This
+		# call's requested limit still applies to each exported calibration link.
+		var count := mini(raw.size(), maxi(1, maximum_points_per_link))
+		posed.resize(count)
+		for sample_index in range(count):
+			var point_index := int(float(sample_index) * raw.size() / count)
 			var point := raw[point_index]
 			if link_names[index] == "moving_jaw_so101_v1_link" and moving_jaw_calibration_enabled:
 				point.x *= moving_jaw_visual_radial_scale
 				point.y *= moving_jaw_visual_radial_scale
 				point.z += moving_jaw_visual_axial_translation_local
-			posed[point_index] = ROS_TO_GODOT * ((link_transforms[index] * point) * model_scale)
+			posed[sample_index] = ROS_TO_GODOT * ((link_transforms[index] * point) * model_scale)
 		result[link_names[index]] = posed
 	return result
 
@@ -1372,8 +1629,12 @@ func _ensure_link_surface_points(maximum_points_per_link: int) -> void:
 		if link == null:
 			continue
 		var vertices := PackedVector3Array()
-		for child in link.get_children():
-			_collect_visual_vertices(child, Transform3D.IDENTITY, vertices)
+		# Joint nodes are descendants too. Walking the entire link subtree freezes
+		# the downstream arm into this link's cache and poses it a second time.
+		# Only the link's own imported visual belongs in link-local samples.
+		var visual := link.get_node_or_null("Visual")
+		if visual != null:
+			_collect_visual_vertices(visual, Transform3D.IDENTITY, vertices)
 		if vertices.is_empty():
 			continue
 		var sampled := PackedVector3Array()
@@ -1648,7 +1909,21 @@ func _apply_wrist_housing_mount_visual() -> void:
 func _configure_visual(node: Node) -> void:
 	if node is GeometryInstance3D:
 		(node as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		(node as GeometryInstance3D).transparency = overlay_transparency
+		(node as GeometryInstance3D).transparency = overlay_transparency if overlay_style == "alignment" else 0.0
+	if node is MeshInstance3D:
+		var instance := node as MeshInstance3D
+		if instance.mesh != null:
+			for surface in range(instance.mesh.get_surface_count()):
+				var material: StandardMaterial3D = null
+				if overlay_style == "realistic":
+					var arrays := instance.mesh.surface_get_arrays(surface)
+					var colors: PackedColorArray = arrays[Mesh.ARRAY_COLOR] if arrays.size() > Mesh.ARRAY_COLOR and arrays[Mesh.ARRAY_COLOR] != null else PackedColorArray()
+					var printed := not colors.is_empty() and colors[0].r > 0.8 and colors[0].g > 0.5
+					material = StandardMaterial3D.new()
+					material.albedo_color = Color(0.19, 0.20, 0.215) if printed else Color(0.105, 0.12, 0.14)
+					material.roughness = 0.78 if printed else 0.34
+					material.metallic = 0.0 if printed else 0.03
+				instance.set_surface_override_material(surface, material)
 	for child in node.get_children():
 		_configure_visual(child)
 
@@ -1659,7 +1934,7 @@ func _apply_overlay_transparency() -> void:
 
 func _set_overlay_transparency_recursive(node: Node) -> void:
 	if node is GeometryInstance3D:
-		(node as GeometryInstance3D).transparency = overlay_transparency
+		(node as GeometryInstance3D).transparency = overlay_transparency if overlay_style == "alignment" else 0.0
 	for child in node.get_children():
 		_set_overlay_transparency_recursive(child)
 
@@ -1723,7 +1998,7 @@ func _normalized_joint_angle(index: int, normalized: float) -> float:
 		)
 		if manual_claw_calibration_enabled:
 			calibrated = calibrated * manual_opening_scale + deg_to_rad(manual_opening_offset_degrees)
-		return clampf(calibrated, limits.x, limits.y)
+		return clampf(calibrated, limits.x, limits.y) if clamp_visual_joint_limits else calibrated
 	if index == 4 and force_wrist_roll_straight and not manual_claw_calibration_enabled:
 		return 0.0
 	var direction := manual_wrist_roll_direction if manual_claw_calibration_enabled and index == 4 else _joint_direction(index)
@@ -1914,6 +2189,7 @@ func _build_registration_payload() -> Dictionary:
 	payload["calibration_started_unix_ms"] = float(_registration_status.get("calibration_started_unix_ms", 0.0))
 	payload["saved_unix_ms"] = _registration_status.get("saved_unix_ms", Time.get_unix_time_from_system() * 1000.0)
 	payload["registration_source"] = str(_registration_status.get("registration_source", "markerless_motion_fit"))
+	payload["base_reference_only"] = bool(_registration_status.get("base_reference_only", false))
 	payload["joint_angle_directions"] = _packed_float_array_to_array(joint_angle_directions)
 	payload["joint_angle_offsets_degrees"] = _packed_float_array_to_array(joint_angle_offsets_degrees)
 	payload["force_wrist_roll_straight"] = force_wrist_roll_straight
@@ -2034,7 +2310,7 @@ func _registration_file_modified_time() -> int:
 	return int(FileAccess.get_modified_time(_registration_path))
 
 func _poll_saved_registration() -> void:
-	if not load_saved_registration:
+	if not load_saved_registration or manual_base_calibration_enabled:
 		return
 	var now := Time.get_ticks_msec()
 	if now < _next_registration_poll_msec:
@@ -2081,6 +2357,7 @@ func _load_registration() -> void:
 	transform = loaded
 	_registration_status = {
 		"registered": true,
+		"base_reference_only": bool(parsed.get("base_reference_only", false)),
 		"confidence": float(parsed.get("confidence", 0.0)),
 		"calibration_started_unix_ms": float(parsed.get("calibration_started_unix_ms", 0.0)),
 		"saved_unix_ms": float(parsed.get("saved_unix_ms", 0.0)),

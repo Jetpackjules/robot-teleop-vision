@@ -1,5 +1,50 @@
 # Camera stream performance
 
+## Camera preview and input latency
+
+The fixed RGB view prefers a native-resolution H.264 preview through the authenticated
+`/camera-preview-stream` WebSocket. WebCodecs decodes and paints the selected camera.
+The encoder uses full-range JPEG color, CRF 10, no B frames, no lookahead, and an
+ultrafast preset. This is high-quality preview recompression, not a lossless RGB
+transport. Original host recordings, capture profiles, depth samples, and the 3D
+RGB-D textures are unchanged. `?rgb_preview=jpeg` selects the original JPEG preview
+for comparisons; browsers without a working VideoDecoder fall back automatically.
+
+Only RGB mode opens this preview. Returning to 3D closes it; RGB mode pauses hidden
+RGB-D processing unless a visible calibration panel needs that data. Leaving the
+page or hiding the tab closes the camera decoder and connection. Camera changes
+retain the last painted image until the new camera decodes. The server retains one
+newest source image and allows at most sixteen unacknowledged encoded frames;
+backpressure drops source images before encoding, preserving the H.264 reference
+chain. A lagging decoder can request an independent keyframe.
+
+Independent native RGB-D WebSocket viewers also negotiate `flow_control=1`.
+Small sequence messages accompany the unchanged binary RGB-D packets, and the
+browser acknowledges their receipt. The sender bounds outstanding frames using
+the smallest observed acknowledgement round trip and requested cadence (2–16
+frames). Congestion cannot inflate that window indefinitely. When credit runs
+out, source draining continues in its newest-frame slot and expensive packet
+processing waits. The next available credit selects current captures rather
+than replaying every missed frame. Legacy clients and temporal-reference streams
+retain their existing wire protocol.
+
+The browser also bounds GPU work to two submitted views using nonblocking WebGL
+fences. While the GPU is busy, camera uploads continue coalescing to the newest
+complete frame per camera; the main thread remains available for input and
+decoder completion. No sensor samples, RGB texture dimensions, or shader detail
+are reduced. Submitted-render FPS is not a measurement of display presentation.
+
+Keyboard press/release transitions send immediately, with the existing 30 Hz
+heartbeat retained. OS repeats do not add commands. The follower loop frequency,
+physical speed/step limits, watchdog, Pause, and explicit Enable behavior are unchanged.
+
+Fresh-frame FPS, camera-frame age, and command-to-visible-motion latency are different
+measurements. Public-route request round trips alone were 214–261 ms in the
+2026-10-26 Singapore-host probe; direct STUN-only WebRTC did not connect during its
+twenty-second observation window. A sub-100 ms end-to-end guarantee is not established
+for that route. Measure actual physical movement in captured images and browser
+presentation separately; do not treat an animated robot overlay as physical feedback.
+
 Measure fresh acquisitions, encoded frames and browser redraws separately.
 A 60 Hz redraw can reuse an older camera frame; the Controller's camera FPS
 counter counts newly decoded captures, not animation frames.
@@ -266,3 +311,250 @@ Capture-profile reconnects retain the picked world pivot, camera frame, viewing
 angles, dolly and head-tracking baseline. Pan moves the pivot with the same
 camera motion as before; a new double-click or middle-click pivot replaces the
 previous pan translation. Zoom distance and height behavior are unchanged.
+
+## Native-frame rendering benchmark and point-color cache
+
+The October 26 frozen-frame benchmark replays one actual three-camera RGB-D
+packet on the laptop, with network and robot control disconnected. It retains
+the packet's two 640×360 depth views, one 1280×720 depth view, and three original
+1920×1080 RGB images. The output canvas remains 2240×1260 pixels (1280×720 CSS
+at device pixel ratio 1.75). The GPU is Intel Iris Xe through ANGLE/D3D11.
+
+Point-cloud color evaluation uses the same calibrated projection, surface
+normals, RGB visibility, black-pixel handling and linear-light blending as the
+direct shader. These calculations depend on the native point and camera rig,
+not on the operator's viewpoint. `NativePointColors` caches their RGBA8 result
+per native depth sample. New captures, rig metadata, calibration, freshness and
+robot masks invalidate the cache. Shader/allocation failures retain the direct
+path. Mesh and BlendPCR programs retain their existing shaders and caches.
+
+Conservative point-cloud tiles reject only empty or wholly off-screen regions,
+including shared sample borders and the maximum point-sprite radius. Every
+remaining native sample is retained. Tile ranges are computed in the existing
+decoder workers; dense views use regular grids when tiling overhead would cost
+more than the rejection saves. Existing workspace bounds remain authoritative.
+
+The frozen captured image was pixel-identical with point colors cached versus
+direct shading, and with conservative culling enabled versus disabled. Browser
+regressions cover projection, peer updates, freshness, calibration, depth-only
+mode, rig reallocation, partial tiles, and viewport movement. Local render FPS
+and GPU timer queries are distinct from fresh camera FPS and command-to-visible
+motion latency. Refreshing capture-dependent work in a replay is a rendering
+stress test; it does not measure capture, encoding or network throughput.
+
+Adaptive sampling and changes to the 3D wire representation are separate work;
+this rendering phase changes neither camera resolution nor the wire format.
+
+In the sequential Iris Xe replay, moving the viewpoint over the frozen native
+point cloud improved from 23.4 to 60.0 rendered FPS; median GPU time fell from
+41.8 to 9.6 ms. Refreshing capture-dependent work at a requested 30 Hz produced
+38.3 rendered FPS versus 15.8 before. Independent mesh remained about 37 FPS for
+viewpoint movement and 21 FPS under capture refresh; BlendPCR was about 60 and
+37 FPS respectively. These short local replay measurements are not live WAN
+sensor-rate or command-to-motion measurements. Raw evidence remains in
+`.teleop/render-native-20261026/` alongside the captured source frame.
+
+## Live Quality BlendPCR follow-up
+
+The full controller was profiled with live cameras in a separate diagnostic
+browser on the laptop, using the production tunnel/WebSocket path. This is a
+larger workload than the frozen replay above: three 1280×720 native depth views,
+three 1920×1080 original RGB images, seven loaded arm models, and an 1888×2041
+output canvas (1079×1166 CSS at DPR 1.75). Robot-control messages were intercepted
+in the diagnostic browser; the run sent no robot commands to the host.
+
+Native arm masking now caches the existing capsule test in an R8UI flag for
+each measured depth sample. Capture revisions, camera calibration, transforms
+and capsule poses invalidate the affected layers. Every triangle still rejects
+if any of its exact three measured corners is masked. Allocation or shader
+failure retains the direct capsule test. Masking remains enabled.
+
+RGB visibility rejects only empty tiles or tiles wholly outside the actual RGB
+sensor frustum, retaining occluders outside the displayed workspace. BlendPCR's
+metadata raster also rejects tiles wholly outside the current viewing frustum.
+The native pixel cones and fixed optical-plane slopes are reused across capture
+updates. Retained triangles use the same native vertices and integer IDs.
+Shared visibility vertices retain separate triangle validity in two passes;
+the original provoking-vertex path remains available for comparison.
+
+An earlier full-UI sequence measured 11.7 FPS stationary and 10.0 FPS orbiting
+before these changes. Subsequent candidates reached about 31 FPS stationary;
+view-frustum rejection reached about 28 FPS while orbiting. These are short
+measurements, not a sustained minimum. Later tests with GeForce NOW and other
+laptop activity running varied substantially; the final warmed run measured
+14.5 FPS stationary and 11.6 FPS orbiting, with roughly 10–12 decoded camera
+batches/s. An adjacent warmed baseline run under that load measured 8.1 FPS
+stationary and 6.8 FPS orbiting. **A sustained 30 FPS minimum, and 60 FPS, remain unverified.** The
+earlier 60 FPS frozen replay must not be presented as live UI performance.
+
+Captured full-Quality comparisons at three viewpoints were pixel-identical for
+BlendPCR, points and unified mesh. Regressions cover cached masks, pose and
+camera updates, view culling, original RGB visibility, gray material and CAD
+depth occlusion. Rendering FPS, fresh camera FPS and command-to-visible-motion
+latency remain separate measurements. Startup intervals without fresh camera
+updates are excluded from meaningful performance claims.
+
+No sensor resolution, depth sample, JPEG quality, output resolution policy or
+3D wire representation changed in this follow-up. Adaptive geometry and new
+lossy compression remain deferred. Experimental visibility-minimum caches,
+fragment-stage validity, and framebuffer-copy presentation were rejected.
+JPEG coefficient-preserving entropy repacking saved only about 1.3% and added
+processing delay, so it was not enabled. Raw diagnostic evidence is retained
+under `.teleop/live-quality-20261026/`.
+
+### Exact JPEG decode follow-up with GeForce NOW running
+
+The laptop still misses the sustained 30 FPS UI target. A further live
+comparison, after the independent host RGB-buffer repair, used the same full
+controller, three Quality cameras, seven arm models and 1888×2041 canvas.
+The existing Canvas decoder measured 11.6 and 10.9 median rendered FPS in
+alternating windows; an exact CPU decoder measured 9.8 and 11.7. Decode times
+were 74/106 ms versus 81/77 ms. These windows demonstrate substantial runtime
+variation, **not a consistent UI FPS improvement**. They are measurements of
+an isolated production controller on this laptop, not the operator's existing
+foreground tab or physical display presentation.
+
+The added JPEG path uses ImageDecoder's native I420 planes and a 1,487-byte
+WebAssembly SIMD converter, avoiding the Canvas readback for supported images.
+It reconstructs the existing integer JPEG chroma rounding and RGB bytes;
+ordinary VideoFrame-to-RGBA conversion was rejected because it changed pixels.
+Each worker verifies every RGBA byte of its first image at each size against
+the existing Canvas path. It then prefers the new decoder only if that same
+image's decode/conversion was at least 10% faster, excluding verification and
+Wasm loading time. Unsupported formats, profiles, dimensions, unavailable Wasm,
+or a mismatch retain Canvas. This startup choice is a conservative local
+measurement, not a guarantee against later CPU/GPU contention changes.
+
+The final check loaded the deployed assets through the public gateway, with
+no local candidate-file overrides. It measured about 17 median rendered FPS
+stationary and 13.6 while orbiting, with roughly 16–18 fresh decoded batches/s,
+41–51 ms codec time and 11–13 ms upload time. GeForce NOW stayed running;
+the same native camera and output dimensions were retained. This is still
+below the 30 FPS requirement. Public hashes matched all five deployed assets.
+
+The converter follows the integer H2V2 interpolation described in
+[libjpeg's upsampler](https://skia.googlesource.com/external/github.com/libjpeg-turbo/libjpeg-turbo/%2B/refs/tags/jpeg-ari/jdsample.c).
+Rebuild the checked-in binary with `python tools/build_jpeg_rgba_wasm.py`
+using the development-only `wasmtime` package. Production needs no new package.
+The browser regression covers 54 checks, including exact RGB/alpha at seven
+sizes through 1920×1080, concurrent conversions, full worker transfers, native
+depth preservation and the Canvas fallback.
+
+GPU timer instrumentation of the full UI attributed about 58% of measured
+draw/copy time to native RGB visibility, 15% to final composition, and 12% to
+the arm overlay. Timer queries perturb throughput; those shares identify work
+to investigate and are not normal FPS measurements. The visibility pass
+projects native depth triangles into each independent RGB camera for correct
+occlusion, and remains the main GPU cost. Other laptop CPU activity was also
+present; GeForce NOW and unrelated processes were left running.
+
+Additional experiments were rejected: larger fixed draw batches produced no
+useful gain; individual peer visibility caches and a float32 source-position
+cache did not justify their cost. Exact planar GPU color reconstruction passed
+80 checks and reduced CPU upload time to about 6 ms, but shifted work onto the
+busy GPU without improving live UI FPS. None of those experiments is enabled.
+The stream, native depth, JPEG quality, rendering resolution policy, calibration,
+adaptive geometry and 3D wire representation are unchanged.
+
+Raw follow-up evidence is in the laptop's task-local temporary directory
+`teleop-quality-20261026-pass2`, outside OneDrive to avoid synchronizing large
+profiling artifacts. No robot commands were sent by these tests.
+
+### Crop-aware RGB visibility regions — 2026-10-27
+
+RGB visibility now derives a conservative RGB sampling rectangle from the
+retained workspace/table bounds. Native tiles wholly outside that RGB
+subfrustum can be skipped. The actual projection, native vertices, triangles,
+depth precision and RGB sampling are unchanged. Outside-crop geometry that
+projects into the sampling rectangle still participates as an occluder.
+Near-plane crossings retain full-camera coverage.
+
+Shrinking a crop can reuse the existing maps. Expanding or disabling it
+reconstructs affected current/previous maps from their original raw depth
+captures using the original quality shader. Crop-only changes preserve the
+existing history indices. Raw captures are retained only for narrowed maps;
+full maps require no added capture history. Active workspace drags use full
+maps to avoid repeated historical reconstruction during continuous resizing.
+
+Synthetic and saved native-Quality comparisons cover 190 checks each, with
+no differences in rendered image bytes or the visibility/history depth texels
+that retained points can sample. Cases include outside-crop occluders,
+asynchronous camera updates, crop growth/removal/rotation, table modeling,
+depth-only transitions, dragging and enabling/disabling the optimization.
+The region-math test checks 17,710 geometric conditions. Existing RGB
+visibility/original-RGB checks (39/95) and native renderer checks (1,076) passed.
+
+A captured-frame GPU cache/visibility test fell from about 29.3 to 26.2 ms.
+A separate live, isolated production controller matched the screenshot's
+roughly 4.6% retained-point fraction using a representative table placement;
+it did not read or change the operator's unsaved table draft. It used three
+1280×720 depth views, three 1920×1080 RGB images, seven arm models, an active
+table editor and a 1972×1290 output canvas. The table dimensions were
+0.502×0.730×0.580 m at 5.6 degrees. GeForce NOW was left running.
+
+In an A–B–B–A orbit sequence, 64 sampled UI counter readings per method gave:
+
+| Sampled viewer FPS | Baseline | RGB regions |
+| --- | ---: | ---: |
+| Median | 35.62 | 38.05 |
+| 10th percentile | 29.54 | 33.16 |
+| Lowest sampled reading | 25.68 | 31.62 |
+
+These are short, one-second-style UI counter windows in an isolated browser,
+not per-frame presentation timings or measurements inside the operator's
+existing tab. Earlier trials with different retained fractions varied and
+showed little or no consistent gain. The improvement is modest; these results
+do not promise 60 FPS or a universal 30 FPS minimum. Fresh camera updates
+remain separate from rendered FPS.
+
+The final live check loaded the deployed files through the public gateway
+without candidate-file overrides, and all four public asset hashes matched.
+At the same output dimensions and roughly 4.6% retained points, its 32 sampled
+UI readings had a median of 35.99 FPS and a minimum of 28.72 FPS. All three
+native depth/RGB feeds advanced, seven arm models loaded, and the browser
+reported no errors. This confirms deployment and a useful live result, but
+still does not establish a steady 30 FPS floor. The operator's existing tab
+and unsaved table draft were left untouched.
+
+The larger GPU triangle-compaction experiment reduced measured visibility
+work further but failed cross-backend depth/coverage parity; it remains
+experimental. See `visibility-compaction-experiment.md`. No adaptive geometry,
+lossy compression, 3D wire-format change, robot command or shared-service
+restart is part of this region optimization. Evidence is retained outside
+OneDrive in `teleop-compaction-20261027` under the laptop's temporary directory.
+
+### Native RGB snapshot encoding — 2026-10-27
+
+The native encoder can now retain an immutable, owned BGR/BGRA capture snapshot
+and submit its original scanlines directly to libjpeg-turbo. The capture owner
+reuses storage only after encoder references are released; no SDK/UVC frame is
+held between captures. Normal full-resolution RGB-D requests no longer expand
+1080p RGB to RGBA on the Godot service thread. Scaled RGB previews, color gain
+and uncommon/platform-specific paths materialize the same RGBA pixels in the
+encoder worker. Aligned desktop-preview generation remains unchanged.
+
+Production JPEG comparisons passed 80 byte-equality cases, including 1920×1080,
+BGR/BGRA, padded rows and qualities 1/78/95/100, plus 20 ownership checks.
+Production depth-packing and both lossless compression-backend checks passed.
+The native depth grid, depth compression, JPEG settings, intrinsics, calibration
+and browser shaders are unchanged.
+
+In three-camera Quality loopback tests, the initial 30-second baseline delivered
+14.61 / 15.65 / 15.41 fresh FPS (serial suffixes 4294 / 5787 / 6048). The final
+60-second native-snapshot run delivered 15.92 / 15.90 / 15.99 FPS. Mean delivery
+improved about 5%; these sequential windows do not establish a universal gain.
+The same rebuilt library with snapshots disabled delivered 13.73 / 15.10 / 14.31
+FPS in a separate 30-second control. Median encoder submission fell from
+3.24 ms initially (3.92 ms in the control) to 0.16 ms. This removes avoidable
+service-thread work, but does not establish 30 fresh FPS or browser presentation
+at 30 FPS. CPU alignment, encoding and public transport remain limitations.
+
+`ROBOT_TELEOP_NATIVE_SNAPSHOT_ENCODING=0` selects the old handoff for reversible
+comparisons. A managed camera restart can also set
+`ROBOT_TELEOP_CAPTURE_PROFILE=highres30` to start directly in the active Quality
+profile, avoiding an initial fast60 open followed by a profile change. Without
+that variable the existing startup behavior remains available. Camera-only
+restarts must account for the desktop consumer's shared-memory mappings.
+
+Raw timings, camera exposure freshness, the original library and activation
+checkpoints are retained in `.teleop/native-snapshot-20261027` on the lab host.

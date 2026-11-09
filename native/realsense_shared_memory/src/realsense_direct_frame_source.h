@@ -1,4 +1,6 @@
 #pragma once
+#include "rgb_frame_freshness.h"
+#include "native_color_snapshot.h"
 
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/ref_counted.hpp>
@@ -81,6 +83,7 @@ public:
     godot::Ref<godot::Image> get_depth_image() const;
     godot::Ref<godot::Image> get_color_image() const;
     godot::Ref<godot::Image> get_raw_color_image() const;
+    NativeColorSnapshot get_raw_color_snapshot() const;
     godot::Vector2i get_raw_color_size() const;
     godot::Vector4 get_raw_color_intrinsics() const;
     godot::Dictionary get_raw_color_projection() const;
@@ -132,6 +135,7 @@ private:
     godot::Vector4 capture_stage_ms;
     godot::Vector4 sensor_rates;
     godot::Dictionary color_diagnostics;
+    realsense_capture::RgbFrameFreshness rgb_frame_freshness;
     double color_first_frame_sec = 0.0;
     double color_diagnostics_sec = 0.0;
     double color_white_balance_restore_sec = 0.0;
@@ -147,7 +151,7 @@ private:
     mutable godot::Ref<godot::Image> raw_color_image;
     mutable std::mutex raw_color_mutex;
     godot::Vector2i raw_color_size;
-    std::vector<uint8_t> raw_color_pixels;
+    std::shared_ptr<std::vector<uint8_t>> raw_color_pixels;
     int raw_color_bpp = 0;
     int raw_color_pitch = 0;
     void clear_raw_color();

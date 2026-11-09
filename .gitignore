@@ -23,3 +23,6 @@ native/realsense_shared_memory/bin/*.lib
 robot_modules/*/local/
 robot_modules/so101/tools/so101_rest_pose.json*
 user_data/
+
+# Per-host archive of previous visual calibration values.
+robot_modules/*/web/*.local.json

@@ -1,0 +1,31 @@
+const {chromium}=require('C:/Users/jetpa/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const {spawn}=require('node:child_process');const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const root=path.resolve(__dirname,'..'),output=path.join(root,'.teleop/point-cleanup-selected-20261102/browser-'+Date.now());fs.mkdirSync(output,{recursive:true});
+let server,browser,logs='';
+async function start(){server=spawn(path.join(root,'.venv/Scripts/python.exe'),[path.join(root,'tests/serve_recording_fixture.py'),'--port','0','--output',output],{cwd:root,windowsHide:true,stdio:['ignore','pipe','pipe']});server.stderr.on('data',d=>logs+=d);
+ return new Promise((resolve,reject)=>{let text='';const timer=setTimeout(()=>reject(Error(logs.slice(-1000))),20000);server.stdout.on('data',d=>{text+=d;for(const l of text.split('\n'))try{const v=JSON.parse(l);if(v.port){clearTimeout(timer);resolve(v.port);}}catch{}});});}
+async function open(port){const context=await browser.newContext({viewport:{width:1024,height:768}}),page=await context.newPage();page.setDefaultTimeout(20000);
+ page.on('pageerror',e=>{throw e;});await page.route('**/controller_hybrid.js*',async route=>{const r=await route.fetch();await route.fulfill({response:r,body:(await r.text()).replace('const trialController = new TrialController','const trialController = window.testTrials = new TrialController')});});
+ await page.goto(`http://127.0.0.1:${port}/controller.html`,{waitUntil:'domcontentloaded'});await page.waitForFunction(()=>window.testTrials?.protocolMessage?.includes('loaded'));
+ await page.evaluate(()=>{const g=document.getElementById('guided-trials');g.checked=false;g.dispatchEvent(new Event('change',{bubbles:true}));const d=document.getElementById('display-mode');d.value='blendpcr';d.dispatchEvent(new Event('change',{bubbles:true}));});
+ await page.locator('#open-advanced').click();await page.locator('#tab-view').click();return {page,context};}
+(async()=>{try{let port=await start();browser=await chromium.launch({headless:true,channel:'msedge'});let {page,context}=await open(port);
+ assert.equal(await page.locator('#point-cleanup-enabled').isChecked(),false);assert.equal(await page.locator('#point-cleanup-radius').isDisabled(),true);
+ const writes=[];page.on('request',r=>{if(r.url().endsWith('/api/v1/site-settings')&&r.method()==='POST')writes.push(r.postDataJSON());});
+ await page.locator('#point-cleanup-enabled').check();await page.locator('#point-cleanup-support').fill('12');await page.locator('#point-cleanup-radius').fill('4');await page.waitForTimeout(400);
+ assert.ok(writes.every(w=>w.point_cleanup_enabled!==true),'unsaved edits cannot become host defaults');
+ await page.locator('#save-site-defaults').click();await page.waitForFunction(()=>document.getElementById('site-settings-status').textContent.startsWith('Saved.'));
+ assert.equal(writes.at(-1).point_cleanup_enabled,true);assert.equal(writes.at(-1).point_cleanup_radius_mm,4);
+ await page.screenshot({path:path.join(output,'cleanup-settings.png')});await context.close();
+ const stopped=new Promise(resolve=>server.once('exit',resolve));server.kill();await stopped;port=await start();({page,context}=await open(port));
+ assert.equal(await page.locator('#point-cleanup-enabled').isChecked(),true,'a new browser after host restart inherits saved toggle');
+ assert.equal(await page.locator('#point-cleanup-support').inputValue(),'12');assert.equal(await page.locator('#point-cleanup-radius').inputValue(),'4');
+ await page.locator('#point-cleanup-enabled').uncheck();await page.reload({waitUntil:'domcontentloaded'});await page.waitForFunction(()=>window.testTrials?.protocolMessage?.includes('loaded'));
+ assert.equal(await page.locator('#point-cleanup-enabled').isChecked(),true,'unsaved disable is temporary');
+ await page.locator('#open-advanced').click();await page.locator('#tab-view').click();
+ await page.evaluate(()=>{const g=document.getElementById('guided-trials');g.checked=false;g.dispatchEvent(new Event('change',{bubbles:true}));const d=document.getElementById('display-mode');d.value='blendpcr';d.dispatchEvent(new Event('change',{bubbles:true}));});
+ await page.locator('#point-cleanup-enabled').uncheck();await page.locator('#save-site-defaults').click();await page.waitForFunction(()=>document.getElementById('site-settings-status').textContent.startsWith('Saved.'));
+ const saved=await (await page.request.get(`http://127.0.0.1:${port}/api/v1/site-settings`)).json();assert.equal(saved.point_cleanup_enabled,false);
+ const names=await page.locator('#rgb-camera-select').textContent();assert.ok(!names.includes('\u00c2'),'camera labels contain no encoding debris');
+ await context.close();console.log('PASS cleanup Off default, temporary edits, bottom Save, new browser + host restart persistence, saved disable and camera labels');
+}finally{await browser?.close();server?.kill();}})().catch(e=>{console.error(e);console.error(logs.slice(-1200));process.exitCode=1;});

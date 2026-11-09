@@ -14,7 +14,9 @@ extends Node
 @export_storage var target_fps: float = 30.0
 @export_storage var max_width: int = 720
 @export_storage var jpeg_quality: int = 42
-@export_storage var max_clients: int = 4
+# Three recording feeds coexist with live viewers, RGB-D and short camera-list
+# requests. Four total slots rejected the third recording feed at startup.
+@export_storage var max_clients: int = 12
 @export_storage var hybrid_target_fps: float = 60.0
 @export_storage var hybrid_context_fps: float = 30.0
 @export_storage var hybrid_detail_fps: float = 60.0
@@ -71,9 +73,23 @@ var _renderers_cache_root := 0
 var _model_property_cache: Dictionary = {}
 
 func _runs_in_current_context() -> bool:
-	# Opt in only for a dedicated remote editor session. Normal editors must
-	# leave the runtime's streaming port and camera ownership alone.
-	return not Engine.is_editor_hint() or OS.get_environment("ROBOT_TELEOP_EDITOR_STREAM") == "1"
+	return not Engine.is_editor_hint() or (is_inside_tree() and get_tree().edited_scene_root == get_parent())
+
+func _runtime_details() -> Dictionary:
+	var configuration = JSON.parse_string(OS.get_environment("ROBOT_TELEOP_RUNTIME_CONFIG"))
+	if Engine.is_editor_hint() or not configuration is Dictionary:
+		if FileAccess.file_exists("res://.teleop/runtime_config.json"):
+			configuration = JSON.parse_string(FileAccess.get_file_as_string("res://.teleop/runtime_config.json"))
+	if not configuration is Dictionary:
+		configuration = {}
+	var robot := {}
+	for key in ["schema_version", "module", "enabled", "module_settings", "calibration_status_port"]:
+		if configuration.has(key): robot[key] = configuration[key]
+	var capture: Dictionary = configuration.get("capture", {}).duplicate()
+	if OS.get_environment("ROBOT_TELEOP_CAPTURE_PUBLISH") == "1" and not capture.is_empty():
+		capture["pid"] = OS.get_process_id()
+	return {"pid": OS.get_process_id(), "project_root": ProjectSettings.globalize_path("res://").trim_suffix("/"),
+		"editor": Engine.is_editor_hint(), "robot_configuration": robot, "capture": capture}
 
 func _ready() -> void:
 	if OS.get_environment("ROBOT_TELEOP_CAPTURE_ONLY") == "1":
@@ -82,10 +98,7 @@ func _ready() -> void:
 		var capture_port := OS.get_environment("ROBOT_TELEOP_CAPTURE_PORT")
 		port = 8781 if capture_port.is_empty() else clampi(int(capture_port), 1024, 65535)
 		process_priority = 10
-	if not _runs_in_current_context():
-		set_process(false)
-		return
-	if stream_enabled:
+	if stream_enabled and _runs_in_current_context():
 		_start_server()
 	set_process(true)
 	if RenderingServer.has_signal("frame_post_draw") and not RenderingServer.frame_post_draw.is_connected(_on_frame_post_draw):
@@ -103,7 +116,7 @@ func _start_server() -> void:
 	if err != OK:
 		stream_status = "Viewport stream failed on %s:%d error=%d" % [listen_host, port, err]
 		_next_listen_retry_msec = Time.get_ticks_msec() + 1000
-		push_warning(stream_status)
+		if not Engine.is_editor_hint(): push_warning(stream_status)
 		return
 	stream_status = "Viewport stream listening at http://%s:%d/stream" % [listen_host, port]
 	print(stream_status)
@@ -120,6 +133,7 @@ func _stop_server() -> void:
 
 func _process(delta: float) -> void:
 	if not _runs_in_current_context() or not stream_enabled:
+		if _server.is_listening(): _stop_server()
 		return
 	if not _server.is_listening():
 		if Time.get_ticks_msec() < _next_listen_retry_msec:
@@ -270,7 +284,7 @@ func _handle_http_request(client: Dictionary) -> void:
 				"render_fps":float(renderer.call("get_render_fps")),
 				"age_ms":float(renderer.call("get_display_frame_age_ms"))})
 		var root_node := get_node_or_null(rgbd_root_path)
-		var body := JSON.stringify({"scene_fps":Engine.get_frames_per_second(),"cameras":cameras,
+		var body := JSON.stringify({"runtime":_runtime_details(),"scene_fps":Engine.get_frames_per_second(),"cameras":cameras,
 			"stream_preset":root_node.call("get_remote_stream_preset") if root_node!=null and root_node.has_method("get_remote_stream_preset") else "custom",
 			"stream_cpu":_cpu_profile,"frame_cpu_ms":Performance.get_monitor(Performance.TIME_PROCESS)*1000.0,
 			"view_cpu_ms":root_node.get("_capture_view_cpu_ms") if root_node!=null else 0}).to_utf8_buffer()
@@ -390,12 +404,24 @@ func _apply_rgbd_query(path: String) -> void:
 			"q", "quality", "jpeg_quality":
 				hybrid_jpeg_quality = clampi(int(value), 1, 100)
 
+static func merge_original_rgb_request(requests: Dictionary, options: Dictionary) -> void:
+	if options.is_empty():
+		return
+	# A host recorder can require native RGB while another viewer asks for a
+	# smaller preview. Serve the strongest request without mutating client data.
+	if requests.has(options.camera):
+		requests[options.camera].w = maxi(int(requests[options.camera].w), int(options.w))
+		requests[options.camera].q = maxi(int(requests[options.camera].q), int(options.q))
+	else:
+		requests[options.camera] = options.duplicate()
+
+
 func _pump_camera_rgb_encoder() -> bool:
 	var requests: Dictionary = {}
 	for client in _clients:
 		if client.get("stream_type", "") == "camera_rgb":
 			var options: Dictionary = client.get("camera_rgb_options", {})
-			if not options.is_empty(): requests[options.camera] = options
+			merge_original_rgb_request(requests, options)
 	var updated := false
 	for renderer in _find_rgbd_renderers():
 		var serial := str(renderer.call("get_direct_realsense_serial"))
@@ -419,8 +445,10 @@ func _pump_camera_rgb_encoder() -> bool:
 				"height":int(fallback.headers["X-Frame-Height"]),"sequence":int(fallback.headers["X-Frame-Sequence"]),
 				"capture_unix_ms":float(fallback.headers["X-Capture-Unix-Ms"])}
 		if frame.is_empty(): continue
+		var source_size := Vector2i(int(frame.width), int(frame.height))
 		if renderer.has_method("get_raw_color_size"):
 			var size: Vector2i = renderer.call("get_raw_color_size")
+			source_size = size
 			var expected_width := mini(size.x, int(options.w))
 			var expected_height := roundi(float(size.y) * expected_width / maxf(1, size.x))
 			if int(frame.width) != expected_width or int(frame.height) != expected_height: continue
@@ -429,6 +457,7 @@ func _pump_camera_rgb_encoder() -> bool:
 		frame["profile"] = profile
 		frame["headers"] = {"X-Camera-Id":serial,"X-Frame-Width":str(frame.width),
 			"X-Frame-Height":str(frame.height),"X-Frame-Sequence":str(frame.sequence),
+			"X-Source-Width":str(source_size.x),"X-Source-Height":str(source_size.y),
 			"X-Capture-Unix-Ms":str(roundi(frame.capture_unix_ms)),
 			"X-Capture-Epoch":"%d:%d" % [OS.get_process_id(),renderer.get_instance_id()]}
 		_camera_rgb_frame_counter += 1
@@ -706,7 +735,10 @@ func _publish_encoded_rgbd_frames(completed: Array[Dictionary]) -> bool:
 			"depth_encoding": str(encoded.get("depth_encoding", "u16_mm_deflate")),
 			"encode_ms": float(encoded.get("encode_ms", 0.0)),
 			"requested_fps": _renderer_hybrid_fps(renderer, _find_rgbd_renderers().size()),
-			"color_projection": renderer.call("get_raw_color_projection") if renderer.has_method("get_raw_color_projection") else {},
+			"color_space": str(encoded.get("color_space", "aligned_depth")),
+			"color_width": int(encoded.get("color_width", width)),
+			"color_height": int(encoded.get("color_height", height)),
+			"color_projection": encoded.get("color_projection", {}) if str(encoded.get("color_space", "aligned_depth")) == "original_rgb" else (renderer.call("get_raw_color_projection") if renderer.has_method("get_raw_color_projection") else {}),
 		})
 		payloads.append(color_jpeg)
 		payloads.append(compressed_depth)
@@ -820,6 +852,21 @@ func _robot_overlay_metadata() -> Dictionary:
 			var state = node.call("get_hybrid_render_state")
 			if state is Dictionary:
 				return state
+	if OS.get_environment("ROBOT_TELEOP_CAPTURE_ONLY") == "1":
+		# Capture deliberately runs without a robot module. The active control
+		# owner publishes these poses atomically; never open a second servo or
+		# telemetry connection just to decorate the camera stream.
+		var mirror_path := "user://robot_overlay_render_state.json"
+		if FileAccess.file_exists(mirror_path):
+			var mirror = JSON.parse_string(FileAccess.get_file_as_string(mirror_path))
+			if mirror is Dictionary and mirror.get("project_root") == ProjectSettings.globalize_path("res://"):
+				var age := Time.get_unix_time_from_system() - float(mirror.get("updated", 0.0))
+				var robot = mirror.get("robot")
+				if age >= 0.0 and age < 2.0 and robot is Dictionary:
+					return robot
+		# Explicit unavailability lets the browser retire old transforms when
+		# the owner exits, changes project, or has not published an overlay yet.
+		return {"available": false}
 	return {}
 
 func _find_rgbd_renderers() -> Array[Node]:

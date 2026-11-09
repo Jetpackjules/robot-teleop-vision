@@ -458,6 +458,46 @@ def test_keyboard_controller_starts_at_follower_pose_and_integrates_smoothly():
     assert controller.status()["control_source"] == "keyboard"
 
 
+def test_keyboard_key_release_freezes_applied_pose_without_ik_or_smoothing_tail():
+    pair = profile()
+    clock = [10.0]
+    bus = FakeFollowerBus(pair.follower_calibration.normalized_to_raw([8, -12, 24, -18, 15, 40]))
+    controller = FollowerController(pair, bus, now=lambda: clock[0])
+    controller.connect()
+    def intent(seq, linear, wrist=(0.0, 0.0), gripper=0.0):
+        controller.receive({"type": "arm_cartesian_velocity", "seq": seq,
+                            "sent_unix_ms": int(time.time()*1000), "linear": list(linear),
+                            "angular": [0.0]*3, "wrist": list(wrist), "gripper": gripper,
+                            "frame": "plane", "deadman": True})
+    intent(1, [1, 0, 0], [1, 0])
+    controller.enable("keyboard")
+    for seq in range(2, 6):
+        clock[0] += 1/30
+        intent(seq, [1, 0, 0], [1, 0])
+        controller.update()
+    held = list(controller.applied_normalized)
+    # A long movement can leave an unreached Cartesian goal after the keyup.
+    controller.keyboard_position_target[0] += 0.02
+    controller.target_normalized[1] += 2
+    intent(6, [0, 0, 0])
+    assert controller.keyboard_linear_smoothed == [0.0]*3
+    assert controller.keyboard_wrist_smoothed == [0.0]*2
+    assert controller.target_normalized == held
+    assert controller.keyboard_position_target == pytest.approx(arm_pose(held).position)
+    for seq in range(7, 12):
+        clock[0] += 1/30
+        intent(seq, [0, 0, 0])
+        controller.update()
+        assert controller.applied_normalized == pytest.approx(held, abs=1e-6)
+        assert controller.state == "armed"
+    # Claw-only input must not disturb the stopped arm's pose.
+    intent(12, [0, 0, 0], gripper=1)
+    clock[0] += 1/30
+    controller.update()
+    assert controller.applied_normalized[:5] == pytest.approx(held[:5], abs=1e-6)
+    assert controller.applied_normalized[5] > held[5]
+
+
 def test_cartesian_translation_holds_absolute_claw_orientation():
     initial = [8.0, -12.0, 24.0, -18.0, 15.0, 40.0]
     desired_rotation = arm_pose(initial).rotation
@@ -500,7 +540,7 @@ def test_persistent_pose_target_ik_converges_without_joint_branch_jump():
     assert math.dist(arm_pose(solved).position, target_position) < initial_error * 0.35
 
 
-def test_cartesian_retraction_stops_before_folding_into_joint_limit():
+def test_cartesian_retraction_limits_clearance_without_disarming_or_rebasing():
     pair = profile()
     clock = [10.0]
     initial = [-61.084, 20.654, -89.297, 164.180, -20.918, 2.03]
@@ -527,22 +567,71 @@ def test_cartesian_retraction_stops_before_folding_into_joint_limit():
             controller.receive({"type": "arm_enable", "source": "keyboard"})
         clock[0] += 1.0 / 35.0
         controller.update()
+        floor = controller.floor_constraint
+        assert floor.geometry.evaluate(controller.applied_normalized) >= floor.reference-floor.TOLERANCE-1e-8
         if controller.state != "armed":
             break
         controller.sample()
 
-    # The redundant two-degree joint-margin stop is gone. This deliberately
-    # pathological retraction is still stopped by the independent whole-mesh
-    # table-clearance guard before the model folds through the base plane.
-    assert controller.state == "hold"
-    assert controller.ik_guard_trip_count == 1
-    assert "Modeled arm clearance" in controller.status_message
+    # The floor boundary rejects further unsafe steps, retaining the last goal
+    # and keyboard session instead of cycling Hold/Enable from measured sag.
+    assert controller.state == "armed"
+    assert controller.torque_enabled
+    assert controller.ik_guard_trip_count >= 1
+    assert controller.ik_clearance_limited
+    assert "Claw/base clearance limit" in controller.status_message
     assert "IK workspace boundary" not in controller.status_message
     joints = normalized_to_joint_radians(controller.target_normalized)
     assert all(
         limits[0] <= joint <= limits[1]
         for joint, limits in zip(joints, JOINT_LIMITS_RAD, strict=True)
     )
+
+
+def test_floor_limit_retains_commanded_pose_and_accepts_escape_without_key_release():
+    pair = profile()
+    controller = FollowerController(pair, FakeFollowerBus())
+    controller.connect()
+    controller.state = "armed"
+    controller.control_source = "keyboard"
+    controller.torque_enabled = True
+    import numpy as np
+    from so101_floor_constraint import RuntimeFloorConstraint
+    class Geometry:
+        base = np.eye(4)
+        normal = np.array([0., 0., 1.])
+        def evaluate(self, q, derivatives=False):
+            height = q[1]/1000
+            if not derivatives:
+                return height
+            return height, np.array([0., .001, 0., 0., 0.]), np.array([[.001, 0., 0., 0., 0.], [0., 0., .001, 0., 0.]])
+    controller.floor_constraint = RuntimeFloorConstraint(geometry=Geometry())
+    controller.applied_normalized = [0.0, 2.0, 0.0, 0.0, 0.0, 40.0]
+    controller.follower_normalized = [0.0, 1.0, 0.0, 0.0, 0.0, 40.0]
+    held = list(controller.applied_normalized)
+    for _ in range(3):
+        controller.target_normalized = [0.0, -2.0, 0.0, 0.0, 0.0, 50.0]
+        controller._limit_keyboard_clearance([0., 0., -1.])
+        assert controller.target_normalized[0] == held[0]
+        assert controller.target_normalized[1] >= 0.5-1e-6
+        assert controller.target_normalized[5] == 50  # Claw remains independent.
+        assert controller.state == "armed"
+        assert not controller.arm_contact_latched
+    assert controller.ik_guard_trip_count == 1
+    controller.target_normalized[1] = 3.0
+    controller._limit_keyboard_clearance()
+    assert controller.target_normalized[1] == 3.0
+    assert not controller.ik_clearance_limited
+    # Starting below the modeled boundary permits escape, never further descent.
+    controller.floor_constraint.reset()
+    controller.applied_normalized[1] = -2.0
+    controller.target_normalized[1] = -4.0
+    controller._limit_keyboard_clearance([0., 0., -1.])
+    assert controller.target_normalized[1] >= -2.5-1e-6
+    controller.target_normalized[1] = 0.0
+    controller._limit_keyboard_clearance([0., 0., 1.])
+    assert controller.target_normalized[1] == 0.0
+    assert not controller.ik_clearance_limited
 
 
 def test_task_priority_keeps_forward_and_lateral_motion_distinct():
@@ -666,7 +755,8 @@ def test_wrist_frame_twist_uses_live_tool_orientation():
 def test_wrist_keyboard_controller_uses_wrist_frame():
     pair = profile()
     clock = [10.0]
-    initial = [-35.0, 165.0, 88.0, 125.0, 12.0, 45.0]
+    # Keep this frame-mapping test clear of the floor boundary.
+    initial = [-40.0, 117.0, 94.0, 33.0, -157.0, 2.5]
     bus = FakeFollowerBus(pair.follower_calibration.normalized_to_raw(initial))
     controller = FollowerController(pair, bus, now=lambda: clock[0])
     controller.connect()
@@ -756,7 +846,8 @@ def test_explicit_wrist_roll_updates_telemetry_without_moving_position_joints():
     )
     controller.receive({"type": "arm_enable", "source": "keyboard"})
     before = list(controller.target_normalized)
-    for _ in range(8):
+    # Inspect active wrist telemetry before the command watchdog.
+    for _ in range(7):
         clock[0] += 1.0 / 30.0
         controller.update()
     status = controller.status()
@@ -817,6 +908,70 @@ def test_guarded_rest_return_reaches_saved_raw_pose_and_finishes_in_hold():
     assert bus.positions == rest["raw_positions"]
 
 
+@pytest.mark.parametrize("result", ["settles", "moves", "timeout", "stale_feedback", "hold", "safety_stop"])
+def test_explicit_slow_leader_match_reuses_guarded_motion(tmp_path, result):
+    pair, clock = profile(), [10.0]
+    initial = load_rest_pose(pair, REST_POSE)["normalized_positions"]
+    bus = FakeFollowerBus(pair.follower_calibration.normalized_to_raw(initial))
+    controller = FollowerController(pair, bus, now=lambda: clock[0], rest_pose_path=tmp_path / "unsaved.json")
+    controller.connect()
+
+    def leader(seq, joint):
+        controller.receive({"type": "arm_command", "seq": seq, "control_session": "operator",
+                            "sent_unix_ms": int(time.time() * 1000),
+                            "positions": pair.leader_calibration.normalized_to_raw([joint] + [20.] * 5)})
+
+    leader(1, 20.)
+    controller.receive({"type": "arm_enable", "source": "leader", "control_session": "operator"})
+    assert controller.state == "armed"
+    controller.hold("operator hold")
+    held = list(bus.positions)
+    leader(2, 30.)
+    if result == "safety_stop":
+        controller.following_error_stop = True
+    controller.receive({"type": "arm_match_leader", "seq": 3, "control_session": "operator",
+                        "sent_unix_ms": int(time.time() * 1000)})
+    assert bus.positions == held  # No jump at the start.
+    if result == "safety_stop":
+        assert controller.state == "hold" and not controller.rest_return_active
+        return
+    assert controller.state == "returning_rest" and controller.rest_return_active
+    assert controller.rest_return_duration >= .75
+    destination = controller.rest_return_waypoints[-1][0]
+    assert destination[0] - initial[0] == pytest.approx(10. * pair.leader_joint_directions[0], abs=.15)
+    if result == "moves":
+        leader(4, 35.)
+    elif result == "timeout":
+        clock[0] += .55
+        controller.update()
+    elif result == "stale_feedback":
+        clock[0] += .65
+        leader(4, 30.)
+        controller.update()
+        assert "telemetry became stale" in controller.status_message
+    elif result == "hold":
+        controller.receive({"type": "arm_hold"})
+    else:
+        for seq in range(4, 160):
+            clock[0] += 1 / 30
+            leader(seq, 30.)
+            controller.update()
+            controller.sample()
+            if controller.state != "returning_rest":
+                break
+        assert controller.state == "armed"
+        assert bus.positions == pair.follower_calibration.normalized_to_raw(destination)
+        leader(seq + 1, 30.)
+        assert controller.target_normalized == pytest.approx(destination)
+        leader(seq + 2, 33.)
+        assert controller.target_normalized[0] - destination[0] == pytest.approx(
+            3. * pair.leader_joint_directions[0], abs=.15)
+        return
+    assert controller.state == "hold" and not controller.rest_return_active
+    leader(5, 30.)
+    assert controller.state == "hold"  # Cancellation requires another explicit action.
+
+
 def test_idle_rest_return_is_opt_in_and_requires_torque_enabled():
     pair = profile()
     clock = [10.0]
@@ -852,6 +1007,44 @@ def test_idle_rest_return_is_opt_in_and_requires_torque_enabled():
     assert controller.rest_return_reason == "idle"
 
 
+def test_idle_rest_return_after_five_minutes_ignores_heartbeats_and_resets_on_gripper_input():
+    pair = profile()
+    clock = [10.0]
+    rest = load_rest_pose(pair, REST_POSE)
+    initial = list(rest["normalized_positions"])
+    initial[2] -= 5.0
+    bus = FakeFollowerBus(pair.follower_calibration.normalized_to_raw(initial))
+    controller = FollowerController(pair, bus, now=lambda: clock[0], rest_pose_path=REST_POSE)
+    controller.connect()
+    controller.target_normalized = list(initial)
+    bus.enable_torque()
+    controller.torque_enabled = controller.gripper_torque_enabled = True
+    controller.state = "hold"
+    controller.receive({"type": "arm_idle_return_settings", "enabled": True, "timeout_seconds": 300.0})
+
+    def intent(seq, gripper=0.0):
+        controller.receive({"type": "arm_cartesian_velocity", "seq": seq,
+                            "sent_unix_ms": int(time.time() * 1000),
+                            "linear": [0.0] * 3, "angular": [0.0] * 3, "gripper": gripper})
+
+    clock[0] = 309.99
+    intent(1)
+    controller.update()
+    assert not controller.rest_return_active, "five minutes must fully elapse"
+    intent(2, gripper=1.0)
+    activity_at = clock[0]
+    for second in range(1, 300):
+        clock[0] = activity_at + second
+        intent(second + 2)
+        controller.update()
+        assert not controller.rest_return_active, "real input restarts the full timer"
+    clock[0] = activity_at + 300
+    intent(302)
+    controller.update()
+    assert controller.rest_return_active and controller.rest_return_reason == "idle"
+    assert controller.torque_enabled
+
+
 def test_enable_requires_fresh_matching_pose_and_watchdog_holds():
     pair = profile()
     clock = [10.0]
@@ -869,6 +1062,166 @@ def test_enable_requires_fresh_matching_pose_and_watchdog_holds():
     controller.update()
     assert controller.state == "hold"
     assert controller.torque_enabled
+
+
+def test_keyboard_watchdog_retains_commanded_pose_across_sag_and_repeated_recovery():
+    pair = profile()
+    clock = [10.0]
+    initial = [8.0, -12.0, 24.0, -18.0, 15.0, 40.0]
+    bus = FakeFollowerBus(pair.follower_calibration.normalized_to_raw(initial))
+    controller = FollowerController(pair, bus, now=lambda: clock[0])
+    controller.connect()
+
+    def intent(seq, session="one"):
+        controller.receive({"type": "arm_cartesian_velocity", "seq": seq,
+                            "sent_unix_ms": int(time.time() * 1000),
+                            "linear": [0.0] * 3, "angular": [0.0] * 3,
+                            "deadman": True, "control_session": session})
+
+    intent(1)
+    controller.receive({"type": "arm_enable", "source": "keyboard", "control_session": "one"})
+    held = list(controller.applied_normalized)
+    held_raw = pair.follower_calibration.normalized_to_raw(held)
+    for seq in range(2, 7):
+        # A pending goal and smoothed velocity must not continue after timeout.
+        controller.target_normalized[1] += 4
+        controller.keyboard_linear_smoothed = [1.0, 0.0, 0.0]
+        controller.keyboard_wrist = [1.0, 1.0]
+        controller.keyboard_wrist_smoothed = [1.0, 1.0]
+        clock[0] += pair.watchdog_ms / 1000.0 + 0.01
+        controller.update()
+        assert controller.state == "armed"
+        assert controller.status()["armed"] is True
+        assert controller.watchdog_holding
+        assert controller.target_normalized == held
+        assert controller.keyboard_linear_smoothed == [0.0] * 3
+        assert controller.keyboard_wrist == [0.0] * 2
+        assert controller.keyboard_wrist_smoothed == [0.0] * 2
+        # Simulate gravity sag in the encoders independently of the retained goal.
+        bus.positions[1] -= 12
+        controller.sample()
+        assert controller.follower_normalized != held
+        clock[0] += 1.0
+        controller.update()
+        assert bus.positions == held_raw  # Hold continues writing the retained goal.
+        bus.positions[1] -= 12
+        intent(seq)
+        # Fresh intent alone resumes: no automatic or manual enable message.
+        assert not controller.watchdog_holding
+        assert controller.state == "armed"
+        assert controller.applied_normalized == held
+        assert controller.target_normalized == held
+        assert controller.keyboard_position_target == pytest.approx(arm_pose(held).position)
+        controller.update()
+        assert controller.target_normalized == pytest.approx(held, abs=1e-6)
+        assert controller.torque_enabled
+    assert controller.watchdog_hold_count == 5
+    assert controller.watchdog_resume_count == 5
+
+    # Explicit Hold and controller handoff must keep their fresh-pose clutch.
+    controller.hold("operator hold")
+    bus.positions[1] -= 12
+    intent(7)
+    controller.enable("keyboard")
+    assert controller.target_normalized != held
+    controller.keyboard_linear = [1., 0., 0.]
+    clock[0] += 1
+    controller.update()
+    assert controller.watchdog_holding
+    bus.positions[1] -= 12
+    intent(1, "two")
+    assert not controller.watchdog_holding
+    controller.enable("keyboard")
+    assert controller.target_normalized == controller.follower_normalized
+
+
+def test_leader_watchdog_holds_pose_and_resumes_fresh_input_without_replaying_gap():
+    pair, clock = profile(), [10.0]
+    bus = FakeFollowerBus(pair.follower_calibration.normalized_to_raw([20.0] * 6))
+    controller = FollowerController(pair, bus, now=lambda: clock[0])
+    controller.connect()
+
+    def leader(seq, position, session='one', age=0):
+        controller.receive({'type': 'arm_command', 'seq': seq, 'control_session': session,
+                            'sent_unix_ms': int(time.time()*1000)-age,
+                            'positions': pair.leader_calibration.normalized_to_raw([position]*6),
+                            'input_timing': {'gapMs': 300, 'readMs': 6}})
+
+    leader(1, 20)
+    controller.enable('leader')
+    held = list(controller.applied_normalized)
+    held_raw = pair.follower_calibration.normalized_to_raw(held)
+    clock[0] += .45
+    controller.update()
+    assert controller.state == 'armed'
+    controller.target_normalized[1] += 10
+    clock[0] += .10
+    controller.update()
+    assert controller.state == 'hold' and controller.watchdog_holding
+    assert controller.target_normalized == held
+    assert controller.last_watchdog['source'] == 'leader'
+    assert controller.last_watchdog['gap_ms'] == pytest.approx(550)
+    bus.positions[1] -= 12
+    controller.sample()
+    controller.update()
+    assert bus.positions == held_raw and controller.torque_enabled
+    leader(2, 60, age=pair.watchdog_ms+10)
+    assert controller.watchdog_holding and controller.state == 'hold'
+    assert controller.target_normalized == held
+    leader(3, 70)
+    assert controller.state == 'armed' and not controller.watchdog_holding
+    assert controller.target_normalized == pytest.approx(held)
+    assert controller.applied_normalized == held
+    assert controller.watchdog_resume_count == 1
+    controller.update()
+    assert bus.positions == held_raw
+    leader(4, 72)
+    assert controller.target_normalized != held
+
+    # Explicit Hold cannot be converted back into a recoverable timeout by
+    # delayed packets. A controller handoff must also require explicit Enable.
+    controller.hold('operator hold')
+    leader(5, 73, age=pair.watchdog_ms+10)
+    assert not controller.watchdog_holding
+    leader(6, 74)
+    assert controller.state == 'hold'
+    controller.enable('leader')
+    assert controller.state == 'armed'
+    assert controller.target_normalized == controller.applied_normalized == held
+    assert controller.leader_enable_normalized == controller.leader_normalized
+    clock[0] += .55
+    controller.update()
+    assert controller.watchdog_holding
+    leader(1, 75, session='two')
+    assert controller.state == 'hold' and not controller.watchdog_holding
+
+
+def test_leader_timing_diagnostics_are_bounded_and_reach_status():
+    packet = validate_browser_arm_message({'type': 'arm_command', 'seq': 1,
+        'sent_unix_ms': int(time.time()*1000), 'positions': [2048]*6,
+        'input_timing': {'gapMs': 300, 'readMs': 80, 'sampleAgeMs': 40,
+                         'bufferedBytes': -1, 'extra': 'discard'}})
+    assert packet['input_timing'] == {'gapMs': 300, 'readMs': 80, 'sampleAgeMs': 40}
+    controller = FollowerController(profile(), FakeFollowerBus())
+    controller.connect()
+    controller.receive(packet)
+    assert controller.status()['browser_input_timing'] == packet['input_timing']
+
+
+def test_keyboard_timing_diagnostics_are_bounded_and_reach_follower_status():
+    packet = {"type": "arm_cartesian_velocity", "seq": 1,
+              "sent_unix_ms": int(time.time() * 1000), "linear": [0.0] * 3,
+              "angular": [0.0] * 3, "deadman": False,
+              "input_timing": {"gapMs": 1001.25, "hidden": True, "focused": False,
+                               "longTaskMs": float("nan"), "bufferedBytes": -1,
+                               "extra": "discard"}}
+    validated = validate_browser_arm_message(packet)
+    assert validated["input_timing"] == {"gapMs": 1001.25, "hidden": True, "focused": False}
+    pair = profile()
+    controller = FollowerController(pair, FakeFollowerBus())
+    controller.connect()
+    controller.receive(validated)
+    assert controller.status()["browser_input_timing"] == validated["input_timing"]
 
 
 def test_enable_clutches_mismatched_poses_without_startup_jump_and_release_disables_torque():
@@ -1575,3 +1928,74 @@ def test_linear_gripper_commands_are_clamped_to_calibrated_range():
     above = calibration.normalized_to_raw([0, 0, 0, 0, 0, 150])[5]
     assert below == calibration.start_pos[5]
     assert above == calibration.end_pos[5]
+
+
+def test_rest_save_and_route_use_same_live_clearance_metric(tmp_path):
+    from so101_rest_pose import save_rest_pose
+    from test_so101_saved_rest import pair as pair_fixture, FOLDED_RAW
+    pair = pair_fixture.__wrapped__(tmp_path)
+    raw = list(FOLDED_RAW)
+    calls = []
+    def live_clearance(q):
+        calls.append(list(q))
+        return .024
+    result = save_rest_pose(pair, raw, path=tmp_path/"rest.json", height_metric=live_clearance)
+    assert result["height_m"] == .024 and not result["saved"]
+    q = pair.follower_calibration.raw_to_normalized(raw)
+    end = q.copy(); end[0] += 1
+    route = build_rest_return_waypoints(q, end, height_metric=live_clearance)
+    assert route[-1][0] == end
+    assert len(calls) > 80
+    with pytest.raises(ValueError, match="Rest claw"):
+        save_rest_pose(pair, raw, height_metric=lambda q: -.003)
+
+
+def test_keyboard_start_ramp_reaches_effective_speed_within_three_control_ticks():
+    pair = profile()
+    clock = [10.]
+    initial = [-40.,117.,94.,33.,-157.,2.5]
+    controller = FollowerController(pair, FakeFollowerBus(pair.follower_calibration.normalized_to_raw(initial)), now=lambda:clock[0])
+    controller.connect()
+    controller.receive({"type":"arm_cartesian_velocity", "seq":1,"sent_unix_ms":int(time.time()*1000),
+                        "linear":[1.,0.,0.],"angular":[0.,0.,0.],"gripper":0.,"frame":"base"})
+    controller.receive({"type":"arm_enable","source":"keyboard"})
+    for _ in range(3):
+        clock[0] += 1/30
+        controller.update()
+    assert controller.keyboard_linear_smoothed[0] > .94
+
+
+def test_keyboard_timeout_holds_for_five_minutes_without_consuming_enable():
+    pair = profile()
+    clock = [10.]
+    initial = [-40.,117.,94.,33.,-157.,2.5]
+    controller = FollowerController(pair, FakeFollowerBus(pair.follower_calibration.normalized_to_raw(initial)), now=lambda:clock[0])
+    controller.connect()
+    def intent(seq, linear):
+        controller.receive({"type":"arm_cartesian_velocity","seq":seq,"sent_unix_ms":int(time.time()*1000),
+                            "linear":linear,"angular":[0.,0.,0.],"deadman":True})
+    intent(1,[1.,0.,0.]);controller.enable("keyboard")
+    clock[0]+=.03;controller.update();held=list(controller.applied_normalized)
+    clock[0]+=.5;controller.update()
+    assert controller.watchdog_holding and controller.status()["armed"]
+    clock[0]+=300.;controller.update()
+    assert controller.applied_normalized==held and controller.target_normalized==held
+    assert controller.watchdog_hold_count==1 and controller.torque_enabled
+    intent(2,[-1.,0.,0.])
+    assert controller.state=="armed" and not controller.watchdog_holding
+    clock[0]+=.03;controller.update()
+    assert controller.applied_normalized!=held
+    controller.hold("operator hold")
+    intent(3,[1.,0.,0.]);assert controller.state=="hold"
+
+
+def test_idle_keyboard_session_has_no_timeout_transition_or_notice():
+    pair = profile(); clock = [10.]
+    controller = FollowerController(pair, FakeFollowerBus(pair.follower_calibration.normalized_to_raw([-40.,117.,94.,33.,-157.,2.5])), now=lambda:clock[0])
+    controller.connect()
+    controller.receive({"type":"arm_cartesian_velocity","seq":1,"sent_unix_ms":int(time.time()*1000),"linear":[0.,0.,0.],"angular":[0.,0.,0.]})
+    controller.enable("keyboard");held=list(controller.applied_normalized)
+    clock[0]+=3600;controller.update()
+    assert controller.state=="armed" and controller.torque_enabled
+    assert not controller.watchdog_holding and controller.watchdog_hold_count==0
+    assert controller.applied_normalized==held
