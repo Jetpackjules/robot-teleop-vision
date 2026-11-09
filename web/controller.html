@@ -311,7 +311,7 @@
   </style>
   <link rel="stylesheet" href="./controller_ui.css?v=20261107_demo_overlay_axes">
   <script type="module" src="./godot_webcam_tracker_bridge.js?v=20261109_background_startup"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261109_background_startup"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261109_neutral_silhouette"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -515,7 +515,7 @@
             <label class="toggle-row"><span>Fuse RGB and filter conflicting depths</span><input id="squares-fusion-enabled" type="checkbox" checked></label>
             <p class="helper-text">Shares valid colour across matching surfaces and rejects depth contradictions. Where B/C agree, top camera A fills gaps without adding nearby duplicate layers. Uses fresh visible cameras only. Off keeps the original fast squares renderer. Preview only; calibration and recordings stay unchanged.</p>
             <label class="toggle-row"><span>Repair washed-out edge colors</span><input id="squares-edge-repair-enabled" type="checkbox"></label>
-            <p class="helper-text">Repairs a washed-out edge when nearby points on the same surface and another camera agree on its color.</p>
+            <p class="helper-text">Uses nearby color on the same surface to repair washed-out edges, including dark edges. Checks other cameras when they can see the same spot.</p>
             <label class="toggle-row"><span>Hide uncolored squares</span><input id="hide-gray-squares" type="checkbox"></label>
             <p class="helper-text">Hides points with no valid RGB after fusion. Keeps valid gray and white colors.</p>
             <label class="toggle-row"><span>Suppress tabletop fringes</span><input id="squares-table-fringes-enabled" type="checkbox"></label>

@@ -270,13 +270,20 @@ bool square_native_edge(vec3 local){
   }
   return false;
 }
+bool square_agrees_with_edge_color(vec3 sample_rgb, vec3 reference, bool neutral) {
+  if (!neutral) return square_matching_pigment(sample_rgb, reference);
+  return square_chroma(sample_rgb) <= .075 && distance(sample_rgb, reference) <= .135;
+}
 // Recover a partially washed color from the visible interior of its own depth
 // silhouette when another camera cannot corroborate a replacement.
-bool square_recover_silhouette_color(int camera, vec3 local, vec3 original, out vec3 recovered) {
+bool square_recover_silhouette_color(int camera, vec3 local, vec3 original,
+    bool allow_neutral, out bool neutral, out vec3 recovered) {
   float light = max(original.r, max(original.g, original.b));
   float chroma = square_chroma(original);
-  if (light < .125 || light > .725 || chroma < max(.046, .31 * light) || chroma > .75 * light ||
-      !square_color_visible(camera, local)) return false;
+  bool pigmented = light >= .125 && light <= .725 &&
+    chroma >= max(.046, .31 * light) && chroma <= .75 * light;
+  neutral = allow_neutral && !pigmented && light >= .28 && light <= .82 && chroma <= .105;
+  if ((!pigmented && !neutral) || !square_color_visible(camera, local)) return false;
 
   float z = -local.z;
   vec4 k = u_square_intrinsics[camera];
@@ -312,7 +319,12 @@ bool square_recover_silhouette_color(int camera, vec3 local, vec3 original, out 
       float donor_light = max(donor.r, max(donor.g, donor.b));
       float donor_chroma = square_chroma(donor.rgb);
       float neutral_drop = (light - chroma) - (donor_light - donor_chroma);
-      if (donor.a <= .5 || donor_chroma < minimum_saturation * donor_light ||
+      if (donor.a <= .5) continue;
+      if (neutral) {
+        // A neutral edge needs a sharp brightness transition into the measured foreground.
+        // A consistently gray or white surface has no darker interior reference.
+        if (donor_chroma > .065 || donor_light > min(.33, min(.68 * light, light - .13))) continue;
+      } else if (donor_chroma < minimum_saturation * donor_light ||
           donor_light < .56 * light || donor_light > 1.50 * light ||
           (donor_chroma < chroma + .012 && (donor_chroma < chroma - .010 || neutral_drop < .018)) ||
           distance(square_hue(donor.rgb), original_hue) > .35) continue;
@@ -345,6 +357,14 @@ bool fuse_square_surface(vec3 world,vec3 local,inout vec4 color,bool repair_edge
   if(color.a>0. && !square_color_visible(own,local))color.a=0.;
   vec3 edge_reference;
   bool repair_edge=repair_edges && color.a>0. && square_edge_reference(own,local,color.rgb,edge_reference);
+  vec3 silhouette_color;
+  bool neutral_candidate=false;
+  bool has_silhouette_color=repair_edges && color.a>0. &&
+    square_recover_silhouette_color(own,local,color.rgb,!repair_edge,neutral_candidate,silhouette_color);
+  bool neutral_edge=has_silhouette_color && neutral_candidate;
+  if(neutral_edge)edge_reference=silhouette_color;
+  repair_edge=repair_edge || neutral_edge;
+  bool neutral_corroborated=false;
   float best=-1.,repair_error=1e5;vec3 borrowed=vec3(0),repaired=vec3(0);int contradictions=0,agreements=0;
   for(int peer=0;peer<4;peer++){
     if(peer>=u_square_count)break;
@@ -358,8 +378,8 @@ bool fuse_square_surface(vec3 world,vec3 local,inout vec4 color,bool repair_edge
     // Verify the receiver's projected pixel as well as the donor. A visible
     // neighboring donor cannot supply color through an occluder at the target.
     bool canBorrow=color.a<=0. && square_rgb_visibility(peer,p)>=0;
-    bool canRepair=repair_edge && square_rgb_visibility(peer,p)>=0;
-    int repair_support=0;
+    bool canRepair=repair_edge && square_rgb_visibility(peer,p)>=(neutral_edge?1:0);
+    int repair_support=0, original_support=0;
     float repair_distance=1e5;vec3 repair_sum=vec3(0);
     float tolerance=min(.012,.008+.002*z),nearest=1e5,farthest=0.;int support=0;
     float candidate_error=1e5,surface_error=1e5;vec3 candidate=vec3(0);bool candidate_valid=false;
@@ -373,9 +393,11 @@ bool fuse_square_surface(vec3 world,vec3 local,inout vec4 color,bool repair_edge
         vec3 donor=square_local_point(peer,pixel,d);
         float distance_to_edge=distance(donor,p);
         if(rgb.a>.5 && distance_to_edge<=.010 && square_color_visible(peer,donor)){
-          if(square_matching_pigment(rgb.rgb,edge_reference)){
+          if(square_agrees_with_edge_color(rgb.rgb,edge_reference,neutral_edge)){
             repair_support++;repair_sum+=rgb.rgb;
             repair_distance=min(repair_distance,distance_to_edge);
+          } else if(neutral_edge && distance_to_edge<=.006 && distance(rgb.rgb,color.rgb)<=.095){
+            original_support++;
           }
         }
       }
@@ -418,11 +440,12 @@ bool fuse_square_surface(vec3 world,vec3 local,inout vec4 color,bool repair_edge
         vec3 donor=square_local_point(peer,pixel,d);
         float distance_to_edge=distance(donor,p);
         vec4 rgb=texelFetch(u_square_color,ivec3(pixel,peer),0);
-        if(rgb.a<=.5 || distance_to_edge>.007 || !square_color_visible(peer,donor) || !square_matching_pigment(rgb.rgb,edge_reference))continue;
+        if(rgb.a<=.5 || distance_to_edge>.007 || !square_color_visible(peer,donor) || !square_agrees_with_edge_color(rgb.rgb,edge_reference,neutral_edge))continue;
         repair_support++;repair_sum+=rgb.rgb;
         repair_distance=min(repair_distance,distance_to_edge);
       }
     }
+    neutral_corroborated=neutral_corroborated || original_support>=2;
     if(repair_support>=2 && repair_distance<=.005 && repair_distance<repair_error){
       repaired=repair_sum/float(repair_support);
       repair_error=repair_distance;
@@ -436,9 +459,9 @@ bool fuse_square_surface(vec3 world,vec3 local,inout vec4 color,bool repair_edge
   }
   // One misaligned camera must not veto a surface corroborated by another.
   if(contradictions>0 && agreements==0)return false;
-  if (repair_error < 1e5) color.rgb = repaired;
-  else if (repair_edges && color.a > 0. && square_recover_silhouette_color(own, local, color.rgb, repaired)) {
-    color.rgb = repaired;
+  if (!neutral_corroborated) {
+    if (repair_error < 1e5) color.rgb = repaired;
+    else if (has_silhouette_color) color.rgb = silhouette_color;
   }
   if (color.a <= 0. && best > 0.) color = vec4(borrowed, 1);
   return true;

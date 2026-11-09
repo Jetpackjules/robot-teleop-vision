@@ -1,5 +1,5 @@
 import { SquareSurfacePreview } from "./square_surface_preview.js?v=20261109_background_startup";
-import {SquaresCameraFusion,SQUARES_FUSION_SHADER,bindSquareSamples} from './squares_camera_fusion.js?v=20261109_background_startup';
+import {SquaresCameraFusion,SQUARES_FUSION_SHADER,bindSquareSamples} from './squares_camera_fusion.js?v=20261109_neutral_silhouette';
 import {CLAW_MASK_SHADER,bindClawMeshMask} from './claw_mesh_mask.js';
 import {sampleDepthPoints} from './point_preview_sampling.js?v=20261027_compact_gpu';
 import {compileGpuProgram, prepareGpuProgram} from './hybrid_camera_quality.js?v=20261109_background_startup';
