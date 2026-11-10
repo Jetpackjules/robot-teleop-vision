@@ -12,6 +12,8 @@ uniform vec2 u_inverse_focal;
 uniform vec4 u_viewer_y;
 uniform float u_table_plane;
 uniform int u_guard_table;
+uniform int u_small_gaps;
+uniform int u_plane_completion;
 out vec4 out_color;
 
 // Camera depth in meters, computed from the exact projection used for points.
@@ -270,18 +272,112 @@ bool repair_face_color(ivec2 cell, vec3 original, float measured_z, float scale,
   return best < 1.;
 }
 
+vec3 view_point(ivec2 cell, float z) {
+  vec2 ndc = 2. * (vec2(cell) + .5) / vec2(u_size) - 1.;
+  return z * vec3(ndc * u_inverse_focal, -1.);
+}
+
+float height_over_table(vec3 view_position) {
+  return dot(u_viewer_y.xyz, view_position) + u_viewer_y.w - u_table_plane;
+}
+
+// Inverse depth of a plane is affine in screen coordinates. Fit both
+// slopes from measured samples and check a fifth point off those axes.
+struct PlaneSpan {
+  vec3 color;
+  float inverse_depth;
+  float slope;
+  int extrapolated;
+};
+
+bool plane_span(ivec2 cell, ivec2 dir, int radius, out PlaneSpan span) {
+  vec3 a, b;
+  float za, zb;
+  int p = -radius, q = radius;
+  bool left = point_at(cell + dir * p, a, za);
+  bool right = point_at(cell + dir * q, b, zb);
+  if (!left && !right) return false;
+  int extrapolated = 0;
+  if (!left || !right) {
+    // Extend just past a measured patch, and only if the orthogonal
+    // span and a diagonal sample can still bound the gap.
+    extrapolated = left ? 1 : -1;
+    if (left) {
+      q = p; p -= radius;
+      b = a; zb = za;
+      if (!point_at(cell + dir * p, a, za)) return false;
+    } else {
+      p = q; q += radius;
+      a = b; za = zb;
+      if (!point_at(cell + dir * q, b, zb)) return false;
+    }
+    if (float(radius) * max(za, zb) / u_projection.z > .004 ||
+        !is_pigment(a) || !is_pigment(b)) return false;
+  }
+  float width = float(q - p) * max(za, zb) / u_projection.z;
+  if (width > .026 || abs(za-zb) > .004 + width * 1.65 || color_delta(a,b) > .085) return false;
+  float slope = (1. / zb - 1. / za) / float(q - p);
+  float center = 1. / za - slope * float(p);
+  if (center <= 0. || abs(1. / center - (za + zb) * .5) > .018) return false;
+  span = PlaneSpan((a + b) * .5, center, slope, extrapolated);
+  return true;
+}
+
+bool complete_plane(ivec2 cell, float scale, out vec4 filled) {
+  const int radii[4] = int[4](8, 13, 20, 29);
+  for (int i = 0; i < 4; i++) {
+    int radius = max(2, int(round(float(radii[i]) * scale)));
+    PlaneSpan x, y;
+    if (!plane_span(cell, ivec2(1,0), radius, x) ||
+        !plane_span(cell, ivec2(0,1), radius, y) ||
+        (x.extrapolated != 0 && y.extrapolated != 0)) continue;
+    vec3 rgb = (x.color + y.color) * .5;
+    if (color_delta(x.color,y.color) > .085 ||
+        abs(1. / x.inverse_depth - 1. / y.inverse_depth) > .0025) continue;
+    float inverse = (x.inverse_depth + y.inverse_depth) * .5;
+    float z = 1. / inverse;
+    // Keep modeled table cutouts intact even if only the plane toggle is on.
+    if (u_guard_table == 1 && height_over_table(view_point(cell,z)) <= .004) continue;
+    int diagonal = max(1, radius * 3 / 4);
+    for (int j = 0; j < 4; j++) {
+      ivec2 sign_offset = ivec2(j < 2 ? -1 : 1, (j % 2) == 0 ? -1 : 1);
+      if ((x.extrapolated != 0 && x.extrapolated != sign_offset.x) ||
+          (y.extrapolated != 0 && y.extrapolated != sign_offset.y)) continue;
+      ivec2 offset = diagonal * sign_offset;
+      vec3 color;
+      float measured;
+      if (!point_at(cell + offset,color,measured) || color_delta(color,rgb) > .085) continue;
+      float expected = inverse + dot(vec2(offset),vec2(x.slope,y.slope));
+      if (expected > 0. && abs(1. / expected - measured) <= .0022) {
+        filled = vec4(rgb,z);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+
 void main(){
   ivec2 cell=ivec2(gl_FragCoord.xy);
   vec4 point=texelFetch(u_points,cell,0);
   float original_depth=texelFetch(u_depth,cell,0).r;
   bool has_point=point.a>0.;
-  if(point.a>.75){
+  if(point.a>.75 || (has_point && u_small_gaps==0)){
     out_color=vec4(point.rgb,1.);
     gl_FragDepth=original_depth;
     return;
   }
   float coverage = has_point ? 1. : nearby_coverage(cell);
   if (coverage <= 0.) discard;
+  if (u_small_gaps == 0) {
+    vec4 filled;
+    if (u_plane_completion == 0 ||
+        !complete_plane(cell,clamp(float(u_size.y)/1280.,.45,1.5),filled)) discard;
+    out_color=vec4(filled.rgb,1.);
+    gl_FragDepth=window_depth(filled.w);
+    return;
+  }
   float z0=has_point?view_depth(original_depth):0.;
   const ivec2 axes[4]=ivec2[4](ivec2(1,0),ivec2(0,1),ivec2(1,1),ivec2(1,-1));
   const int radii[5]=int[5](2,4,7,10,15);
@@ -316,7 +412,8 @@ void main(){
   }
   if(!has_point){
     vec4 repaired;
-    if(!close_supported_seam(cell,repaired) || !above_table(cell,repaired.rgb,repaired.w))discard;
+    if((!close_supported_seam(cell,repaired) || !above_table(cell,repaired.rgb,repaired.w)) &&
+       (u_plane_completion==0 || !complete_plane(cell,scale,repaired))) discard;
     out_color=vec4(repaired.rgb,1.);
     gl_FragDepth=window_depth(repaired.w);
     return;
@@ -337,7 +434,7 @@ export class SquareSurfacePreview {
     this.program = program;
     this.vao = gl.createVertexArray();
     this.uniforms = Object.fromEntries(
-      ["u_points", "u_depth", "u_size", "u_coverage_level", "u_projection", "u_inverse_focal", "u_viewer_y", "u_table_plane", "u_guard_table"]
+      ["u_points", "u_depth", "u_size", "u_coverage_level", "u_projection", "u_inverse_focal", "u_viewer_y", "u_table_plane", "u_guard_table", "u_small_gaps", "u_plane_completion"]
         .map((name) => [name, gl.getUniformLocation(this.program, name)]),
     );
     this.clearColor = new Float32Array(4);
@@ -393,7 +490,7 @@ export class SquareSurfacePreview {
     gl.clearBufferfv(gl.DEPTH, 0, this.clearDepth);
   }
 
-  draw({ projection, viewer }, tablePlane) {
+  draw({ projection, viewer }, tablePlane, settings = {}) {
     const gl = this.gl;
     const u = this.uniforms;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -412,6 +509,8 @@ export class SquareSurfacePreview {
     gl.uniform3f(u.u_projection, projection[10], projection[14], projection[5] * this.height / 2);
     gl.uniform2f(u.u_inverse_focal, 1 / projection[0], 1 / projection[5]);
     gl.uniform4f(u.u_viewer_y, viewer[1], viewer[5], viewer[9], viewer[13]);
+    gl.uniform1i(u.u_small_gaps, settings.squares_fill_surface_gaps === false ? 0 : 1);
+    gl.uniform1i(u.u_plane_completion, settings.squares_plane_completion === true ? 1 : 0);
     gl.uniform1i(u.u_guard_table, Number.isFinite(tablePlane) ? 1 : 0);
     gl.uniform1f(u.u_table_plane, tablePlane ?? 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

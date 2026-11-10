@@ -53,6 +53,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from robot_teleop.camera_preview import CameraPreviewEncoder
+from robot_teleop.realsense_depth_recovery import DepthRecovery
 from robot_teleop.modules import public_robot_module
 from robot_teleop.operator import RobotCommandError, load_robot_operator
 from robot_teleop.recording import CaptureRgbSource, HostEpisodeRecorder, RecordingError, camera_id
@@ -1870,6 +1871,8 @@ class LanRemoteServer(ThreadingHTTPServer):
             / "operator_site_settings.json"
         )
         self.site_settings_lock = threading.Lock()
+        self.depth_recovery = DepthRecovery(self.site_settings_path.with_name("d435_depth_recovery.json"))
+        self.depth_recovery.start()
         self.robot_command_port = int(
             robot_command_port
             if robot_command_port is not None
@@ -2458,6 +2461,12 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/v1/cameras":
             self.serve_camera_list()
             return
+        if parsed.path == "/api/v1/realsense-depth-recovery":
+            try:
+                self.serve_json(self.server.depth_recovery.status())
+            except (OSError, ValueError) as exc:
+                self.serve_json({"error": str(exc)[:180]}, status=503)
+            return
         if parsed.path == "/api/v1/robot-module":
             self.serve_json(self.server.robot_manifest)
             return
@@ -2695,6 +2704,9 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
         if parsed.path in ("/webrtc-offer", "/frame-stream/webrtc-offer", "/api/v1/webrtc-offer"):
             self.handle_webrtc_offer()
             return
+        if parsed.path == "/api/v1/realsense-depth-recovery":
+            self.handle_depth_recovery()
+            return
         if parsed.path == "/api/v1/camera-alignment":
             self.handle_camera_alignment()
             return
@@ -2708,6 +2720,27 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             self.handle_trial_protocol_save()
             return
         self.send_error(404, "Not found")
+
+    def handle_depth_recovery(self) -> None:
+        origin = urlsplit(self.headers.get("Origin", ""))
+        if origin.scheme not in ("http", "https") or origin.netloc.lower() != self.headers.get("Host", "").lower():
+            self.serve_json({"error": "Depth recovery requires a same-origin page."}, status=403)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 256 or self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
+                raise ValueError("Depth recovery requires a small JSON request.")
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict) or set(data) != {"camera_id", "enabled"}:
+                raise ValueError("Invalid depth recovery request.")
+            # Recording start and alignment take the same lock.
+            with self.server.camera_alignment.lock:
+                if self.server.episode_recorder.state != "idle" or self.server.camera_alignment.status().get("busy"):
+                    raise ValueError("Wait for recording or camera alignment to finish.")
+                result = self.server.depth_recovery.set_enabled(data["camera_id"], data["enabled"])
+            self.serve_json(result)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.serve_json({"error": str(exc)[:180]}, status=409)
 
     def handle_camera_alignment(self) -> None:
         origin = urlsplit(self.headers.get('Origin', ''))

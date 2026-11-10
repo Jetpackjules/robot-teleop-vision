@@ -311,7 +311,7 @@
   </style>
   <link rel="stylesheet" href="./controller_ui.css?v=20261107_demo_overlay_axes">
   <script type="module" src="./godot_webcam_tracker_bridge.js?v=20261109_background_startup"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=20261109_neutral_silhouette"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=planar_depth_recovery_v1"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -522,7 +522,16 @@
             <p class="helper-text">Hides stray scan points near the modeled tabletop where depth and color support a nearby colored object. Requires fusion and a modeled tabletop. Preview only.</p>
             <label class="toggle-row"><span>Fill small surface gaps</span><input id="squares-fill-surface-gaps" type="checkbox"></label>
             <p class="helper-text">Fills narrow breaks where nearby points agree in depth and color. With edge repair on, it can also recover color near depth edges. Preview only.</p>
+            <label class="toggle-row"><span>Complete planar gaps</span><input id="squares-plane-completion" type="checkbox" aria-describedby="squares-plane-help"></label>
+            <p id="squares-plane-help" class="helper-text">Estimates missing squares from measured points that agree on a plane. Fills supported gaps and short extensions near a measured edge. Preview only.</p>
             <p id="squares-fusion-status" class="helper-text" role="status">Off.</p>
+          </fieldset>
+          <fieldset id="measured-depth-recovery">
+            <legend>Measured depth recovery · RealSense D435</legend>
+            <label>Camera <select disabled></select></label>
+            <label class="toggle-row"><span>Accept more stereo matches</span><input type="checkbox" disabled></label>
+            <p class="helper-text">Relaxes one firmware match check for this camera. May admit noisy matches. Affects live capture and future recordings on the host.</p>
+            <p class="helper-text" role="status">Checking camera availability…</p>
           </fieldset>
           <fieldset id="point-cleanup-controls">
             <legend>Point cleanup</legend>
@@ -676,6 +685,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=20261109_background_startup"></script>
+  <script type="module" src="./controller_hybrid.js?v=planar_depth_recovery_v1"></script>
 </body>
 </html>

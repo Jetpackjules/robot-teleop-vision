@@ -24,7 +24,7 @@ import {visibleNativeTiles} from './native_geometry.js?v=20261026_native_render'
 import {NativeRobotMask} from './native_robot_mask.js?v=20261026_quality_profile';
 import {triangleNormals,robotSurfaceMaterial} from './robot_surface_materials.js?v=20261026_realistic_arm';
 import {fetchRobotModel} from './robot_model_loader.js?v=20261027_link_recovery';
-import {SampledPointPreview} from './sampled_point_preview.js?v=20261109_neutral_silhouette';
+import {SampledPointPreview} from './sampled_point_preview.js?v=planar_depth_recovery_v1';
 
 const EMPTY_ROBOT_RENDERER = Object.freeze({
   modelUrls: {},

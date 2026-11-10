@@ -1,3 +1,4 @@
+    import { DepthRecoveryControl } from "./depth_recovery_controls.js";
     import { PreviewCameraControls } from "./preview_camera_controls.js";
     import { CameraAlignmentControl } from "./camera_alignment.js";
     import { robotModuleReady } from "./robot_module_host.js";
@@ -60,6 +61,17 @@
       localStorage.setItem('robotTeleopSquaresSurfaceGaps',String(fillSurfaceGaps.checked));
       window.setGodotHybridViewSettings?.({squares_fill_surface_gaps:fillSurfaceGaps.checked});
     });
+    const planeCompletion=document.getElementById('squares-plane-completion');
+    if (planeCompletion) {
+      const saved=localStorage.getItem('robotTeleopSquaresPlaneCompletion');
+      if (saved !== null) planeCompletion.checked=saved==='true';
+      planeCompletion.addEventListener('change',()=>{
+        localStorage.setItem('robotTeleopSquaresPlaneCompletion',String(planeCompletion.checked));
+        window.setGodotHybridViewSettings?.({squares_plane_completion:planeCompletion.checked});
+      });
+    }
+    const recoveryRoot=document.getElementById('measured-depth-recovery');
+    if (recoveryRoot) new DepthRecoveryControl(recoveryRoot);
     const hideGraySquares=document.getElementById('hide-gray-squares');
     hideGraySquares.checked=localStorage.getItem('robotTeleopHideGraySquares')==='true';
     hideGraySquares.addEventListener('change',()=>{
@@ -108,7 +120,7 @@
         point_preview_visible_only: workspacePointBudget.checked,
         display_mode: displayModeSelect.value,
       });
-      window.setGodotHybridViewSettings?.({squares_fusion_enabled:squaresFusionEnabled.checked,squares_edge_repair_enabled:repairEdgeColors.checked,squares_table_fringes_enabled:suppressTableFringes.checked,squares_fill_surface_gaps:fillSurfaceGaps.checked,hide_gray_squares:hideGraySquares.checked,square_point_scale:Number(squarePointSize.value),...cleanupSettings(),point_preview_enabled:pointPreviewActive(),mesh_preview_enabled:pointPreviewToggle.value==='-2',point_preview_budget:selectedPointBudget(),...blendSettings()});
+      window.setGodotHybridViewSettings?.({squares_fusion_enabled:squaresFusionEnabled.checked,squares_edge_repair_enabled:repairEdgeColors.checked,squares_table_fringes_enabled:suppressTableFringes.checked,squares_fill_surface_gaps:fillSurfaceGaps.checked,squares_plane_completion:planeCompletion?.checked===true,hide_gray_squares:hideGraySquares.checked,square_point_scale:Number(squarePointSize.value),...cleanupSettings(),point_preview_enabled:pointPreviewActive(),mesh_preview_enabled:pointPreviewToggle.value==='-2',point_preview_budget:selectedPointBudget(),...blendSettings()});
     };
     squaresFusionEnabled.addEventListener('change',()=>{applyPointOptions();sendViewSettings();});
     applyPointOptions();

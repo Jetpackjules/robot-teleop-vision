@@ -1,4 +1,4 @@
-import { SquareSurfacePreview } from "./square_surface_preview.js?v=20261109_background_startup";
+import { SquareSurfacePreview } from "./square_surface_preview.js?v=planar_depth_recovery_v1";
 import {SquaresCameraFusion,SQUARES_FUSION_SHADER,bindSquareSamples} from './squares_camera_fusion.js?v=20261109_neutral_silhouette';
 import {CLAW_MASK_SHADER,bindClawMeshMask} from './claw_mesh_mask.js';
 import {sampleDepthPoints} from './point_preview_sampling.js?v=20261027_compact_gpu';
@@ -116,7 +116,9 @@ export class SampledPointPreview {
         }
     }
     const wantsFusion = settings.squares_fusion_enabled !== false;
-    const wantsSurface = wantsFusion && settings.squares_fill_surface_gaps === true && settings.depth_only_enabled !== true;
+    const wantsSmallGaps = wantsFusion && settings.squares_fill_surface_gaps === true;
+    const wantsPlanes = settings.squares_plane_completion === true;
+    const wantsSurface = (wantsSmallGaps || wantsPlanes) && settings.depth_only_enabled !== true;
     let fusionStatus = {active: false, message: 'Off.'};
     if (wantsFusion && !this.fusionError) {
       fusionStatus = {active: false, message: 'Preparing camera fusion…'};
@@ -154,7 +156,7 @@ export class SampledPointPreview {
     }
 
     let surface = null;
-    if (wantsSurface && visible.length >= 2 && !this.surfaceError) {
+    if (wantsSurface && visible.length >= (wantsPlanes ? 1 : 2) && !this.surfaceError) {
       try {
         if (!this.surface) {
           if (!this.surfaceRequest) {
@@ -167,7 +169,7 @@ export class SampledPointPreview {
             }
           }
         }
-        if (this.surface && fusionStatus.active) {
+        if (this.surface && (fusionStatus.active || wantsPlanes)) {
           this.surface.begin(view.width, view.height);
           surface = this.surface;
         }
@@ -178,7 +180,7 @@ export class SampledPointPreview {
         this.surface = null;
         this.surfaceError = String(error.message || error);
       }
-    } else if (settings.squares_fill_surface_gaps !== true) {
+    } else if (!wantsSurface) {
       this.surface?.releaseTargets();
       this.surfaceError = "";
     }
@@ -192,7 +194,7 @@ export class SampledPointPreview {
     gl.uniform1i(u.u_hide_gray,settings.hide_gray_squares===true?1:0);
     gl.uniform1i(u.u_repair_edges,settings.squares_edge_repair_enabled===true?1:0);
     gl.uniform1i(u.u_suppress_table_fringes,settings.squares_table_fringes_enabled===true?1:0);
-    gl.uniform1i(u.u_surface_color_hint,surface&&settings.squares_edge_repair_enabled===true?1:0);
+    gl.uniform1i(u.u_surface_color_hint,surface&&wantsSmallGaps&&settings.squares_edge_repair_enabled===true?1:0);
     gl.uniformMatrix4fv(u.u_view_projection,false,view.viewProjection);
     const pointScale=Number.isFinite(settings.square_point_scale)?Math.max(.25,Math.min(4,settings.square_point_scale)):1;
     gl.uniform1f(u.u_point_scale,.005*view.height*.5*pointScale);gl.uniform1f(u.u_max_point_size,this.maxPointSize);
@@ -223,8 +225,8 @@ export class SampledPointPreview {
       for(const [camera,entry]of this.entries)if(!cameras.includes(camera)){gl.deleteBuffer(entry.buffer);this.entries.delete(camera);}
     }finally{gl.bindVertexArray(null);gl.bindFramebuffer(gl.FRAMEBUFFER,null);}
     if(surface){
-      const table=settings.squares_table_fringes_enabled===true?modeledWorkspace(settings):null;
-      surface.draw(view,table?.center[1]);
+      const table = settings.squares_table_fringes_enabled === true || wantsPlanes ? modeledWorkspace(settings) : null;
+      surface.draw(view,table?.center[1],{...settings,squares_fill_surface_gaps:wantsSmallGaps});
     }
     return {budget,counts,sourceCounts,cleanup,surface:{active:!!surface,pending:wantsSurface&&!!this.surfaceRequest,message:this.surfaceError||""},total:Object.values(counts).reduce((a,b)=>a+b,0),selectionMs,gpuUploadBytes,compactCameras,fusion:fusionStatus};
   }
