@@ -774,6 +774,7 @@ void RealSenseDirectFrameSource::clear_raw_color() {
 }
 
 void RealSenseDirectFrameSource::clear_frame() {
+    native_infrared_pair.disparity_scale_mm = 0.0f;
     sequence = 0;
     frame_id = 0;
     capture_fps = 0.0;
@@ -1193,13 +1194,14 @@ bool RealSenseDirectFrameSource::open() {
                 break;
             }
         }
-        const auto configure = [&](const StreamSettings &s) {
+        const auto configure = [&](const StreamSettings &s, bool publish_ir = false) {
             rs2::config config;
             if (!device_serial.is_empty()) config.enable_device(std::string(device_serial.utf8().get_data()));
-            if (is_fast_foundation_source()) {
+            if (is_fast_foundation_source() || publish_ir) {
                 config.enable_stream(RS2_STREAM_INFRARED, 1, s.depth_width, s.depth_height, RS2_FORMAT_Y8, s.depth_fps);
                 config.enable_stream(RS2_STREAM_INFRARED, 2, s.depth_width, s.depth_height, RS2_FORMAT_Y8, s.depth_fps);
-            } else config.enable_stream(RS2_STREAM_DEPTH, s.depth_width, s.depth_height, RS2_FORMAT_Z16, s.depth_fps);
+            }
+            if (!is_fast_foundation_source()) config.enable_stream(RS2_STREAM_DEPTH, s.depth_width, s.depth_height, RS2_FORMAT_Z16, s.depth_fps);
             if (color_output_enabled) config.enable_stream(RS2_STREAM_COLOR, s.color_width, s.color_height, RS2_FORMAT_BGR8, s.color_fps);
             return config;
         };
@@ -1215,8 +1217,60 @@ bool RealSenseDirectFrameSource::open() {
             auto proposed = configure(candidate);
             if (proposed.can_resolve(pipeline)) { settings = candidate; config = proposed; break; }
         }
-        pipeline_profile = pipeline.start(config);
-        pipeline_started = true;
+        bool infrared_started = false;
+        const char *capture_prefix = std::getenv("ROBOT_TELEOP_CAPTURE_SHM_PREFIX");
+        const char *publish_native = std::getenv("ROBOT_TELEOP_NATIVE_SPARSE_PUBLISH");
+        const char *enable_ir = std::getenv("ROBOT_TELEOP_SCOPED_IR");
+        if (!is_fast_foundation_source() && color_output_enabled &&
+                capture_prefix && *capture_prefix && (!publish_native || std::strcmp(publish_native, "0") != 0) &&
+                (!enable_ir || std::strcmp(enable_ir, "0") != 0) &&
+                device_serial == String(NativeInfraredPair::CAMERA_SERIAL) &&
+                settings.depth_width == NativeInfraredPair::WIDTH && settings.depth_height == NativeInfraredPair::HEIGHT &&
+                settings.depth_fps == NativeInfraredPair::FPS) {
+            try {
+                auto infrared_config = configure(settings, true);
+                if (infrared_config.can_resolve(pipeline)) {
+                    pipeline_profile = pipeline.start(infrared_config);
+                    infrared_started = true;
+                    pipeline_started = true;
+                }
+            } catch (const rs2::error &error) {
+                UtilityFunctions::push_warning(String("Optional RealSense IR streams unavailable: ") + error.what());
+            }
+        }
+        if (!infrared_started) {
+            pipeline_profile = pipeline.start(config);
+            pipeline_started = true;
+        } else {
+            // Feed only RGB and depth to align; the two IR images are already rectified.
+            sdk_rgbd_only = std::make_unique<rs2::filter>(
+                [](rs2::frame input, rs2::frame_source &output) {
+                    auto frames = input.as<rs2::frameset>();
+                    auto rgbd = output.allocate_composite_frame({frames.get_depth_frame(), frames.get_color_frame()});
+                    output.frame_ready(std::move(rgbd));
+                });
+            const auto left = pipeline_profile.get_stream(RS2_STREAM_INFRARED, 1).as<rs2::video_stream_profile>();
+            const auto right = pipeline_profile.get_stream(RS2_STREAM_INFRARED, 2).as<rs2::video_stream_profile>();
+            const auto depth = pipeline_profile.get_stream(RS2_STREAM_DEPTH).as<rs2::video_stream_profile>();
+            const auto left_k = left.get_intrinsics();
+            const auto matching_intrinsics = [&left_k](const rs2_intrinsics &k) {
+                return std::abs(k.fx - left_k.fx) < 0.05f && std::abs(k.fy - left_k.fy) < 0.05f &&
+                    std::abs(k.ppx - left_k.ppx) < 0.05f && std::abs(k.ppy - left_k.ppy) < 0.05f;
+            };
+            const auto rectified = [](const rs2_extrinsics &pose) {
+                for (int i = 0; i < 9; ++i) {
+                    if (std::abs(pose.rotation[i] - (i % 4 == 0 ? 1.0f : 0.0f)) > 0.001f) return false;
+                }
+                return std::abs(pose.translation[1]) < 0.0002f && std::abs(pose.translation[2]) < 0.0002f;
+            };
+            const auto baseline = left.get_extrinsics_to(right);
+            const auto depth_to_left = depth.get_extrinsics_to(left);
+            if (matching_intrinsics(depth.get_intrinsics()) && matching_intrinsics(right.get_intrinsics()) &&
+                    rectified(baseline) && rectified(depth_to_left) && std::abs(depth_to_left.translation[0]) < 0.0002f &&
+                    baseline.translation[0] < -0.0001f) {
+                native_ir_disparity_scale_mm = -baseline.translation[0] * left_k.fx * 1000.0f;
+            }
+        }
         apply_sensor_options();
         if (is_fast_foundation_source()) {
             rs2::video_stream_profile left_profile = pipeline_profile.get_stream(RS2_STREAM_INFRARED, 1).as<rs2::video_stream_profile>();
@@ -1271,6 +1325,8 @@ bool RealSenseDirectFrameSource::open() {
 }
 
 void RealSenseDirectFrameSource::close() {
+    sdk_rgbd_only.reset();
+    native_ir_disparity_scale_mm = 0.0f;
     clear_raw_color();
     if (pipeline_started) {
         restore_color_auto_white_balance();
@@ -1292,6 +1348,33 @@ bool RealSenseDirectFrameSource::poll() {
         return poll_fast_foundation();
     }
     return poll_sdk_depth();
+}
+
+void RealSenseDirectFrameSource::copy_native_infrared_pair(const rs2::frameset &frames, const rs2::frame &depth) {
+    native_infrared_pair.disparity_scale_mm = 0.0f;
+    if (native_ir_disparity_scale_mm <= 0.0f || !depth || stride != 1 ||
+            crop_rect != Vector4(0.0f, 0.0f, 1.0f, 1.0f)) return;
+    const auto left = frames.get_infrared_frame(1);
+    const auto right = frames.get_infrared_frame(2);
+    constexpr int w = NativeInfraredPair::WIDTH;
+    constexpr int h = NativeInfraredPair::HEIGHT;
+    // D435 IR and depth share a hardware timestamp. Their frame counters can start at different offsets.
+    const auto synchronized = [&](const rs2::video_frame &ir) {
+        return ir && ir.get_width() == w && ir.get_height() == h && ir.get_bytes_per_pixel() == 1 &&
+            ir.get_stride_in_bytes() >= w && ir.get_frame_timestamp_domain() == depth.get_frame_timestamp_domain() &&
+            std::abs(ir.get_timestamp() - depth.get_timestamp()) <= 0.5;
+    };
+    if (!synchronized(left) || !synchronized(right)) return;
+    const auto copy = [](const rs2::video_frame &frame, std::vector<uint8_t> &pixels) {
+        pixels.resize(w * h);
+        const auto *data = static_cast<const uint8_t *>(frame.get_data());
+        for (int y = 0; y < h; ++y) {
+            std::memcpy(pixels.data() + y * w, data + y * frame.get_stride_in_bytes(), w);
+        }
+    };
+    copy(left, native_infrared_pair.left);
+    copy(right, native_infrared_pair.right);
+    native_infrared_pair.disparity_scale_mm = native_ir_disparity_scale_mm;
 }
 
 bool RealSenseDirectFrameSource::poll_sdk_depth() {
@@ -1326,6 +1409,10 @@ bool RealSenseDirectFrameSource::poll_sdk_depth() {
             metadata(raw_depth_frame,RS2_FRAME_METADATA_ACTUAL_EXPOSURE),metadata(raw_color_frame_raw,RS2_FRAME_METADATA_ACTUAL_EXPOSURE));
         const auto alignment_started = std::chrono::steady_clock::now();
         if (color_output_enabled) {
+            if (sdk_rgbd_only) {
+                copy_native_infrared_pair(frames, raw_depth_frame);
+                frames = sdk_rgbd_only->process(frames).as<rs2::frameset>();
+            }
             frames = align_to_depth.process(frames);
         }
         const auto alignment_finished = std::chrono::steady_clock::now();

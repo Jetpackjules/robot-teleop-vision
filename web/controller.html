@@ -311,7 +311,7 @@
   </style>
   <link rel="stylesheet" href="./controller_ui.css?v=20261107_demo_overlay_axes">
   <script type="module" src="./godot_webcam_tracker_bridge.js?v=20261109_background_startup"></script>
-  <script type="module" src="./hybrid_rgbd_renderer.js?v=planar_depth_recovery_v1"></script>
+  <script type="module" src="./hybrid_rgbd_renderer.js?v=scoped_ir_recovery_v1"></script>
 </head>
 <body>
   <video id="viewport-video" muted autoplay playsinline></video>
@@ -526,6 +526,12 @@
             <p id="squares-plane-help" class="helper-text">Estimates missing squares from measured points that agree on a plane. Fills supported gaps and short extensions near a measured edge. Preview only.</p>
             <p id="squares-fusion-status" class="helper-text" role="status">Off.</p>
           </fieldset>
+          <fieldset id="scoped-ir-recovery">
+            <legend>Infrared depth recovery · Camera B</legend>
+            <label class="toggle-row"><span>Recover gaps using B’s infrared pair</span><input id="scoped-ir-enabled" type="checkbox" aria-describedby="scoped-ir-help"></label>
+            <p id="scoped-ir-help" class="helper-text">For Low latency at 848 × 480 in a square-points mode. Finds missing depth near measured surfaces and checks both infrared images. Preview only.</p>
+            <p id="scoped-ir-status" class="helper-text" role="status">Off.</p>
+          </fieldset>
           <fieldset id="measured-depth-recovery">
             <legend>Measured depth recovery · RealSense D435</legend>
             <label>Camera <select disabled></select></label>
@@ -685,6 +691,6 @@
   </div>
   <div id="video-preview"></div>
 
-  <script type="module" src="./controller_hybrid.js?v=planar_depth_recovery_v1"></script>
+  <script type="module" src="./controller_hybrid.js?v=scoped_ir_recovery_v1"></script>
 </body>
 </html>

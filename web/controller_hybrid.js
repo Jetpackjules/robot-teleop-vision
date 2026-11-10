@@ -4,7 +4,7 @@
     import { robotModuleReady } from "./robot_module_host.js";
     import { EpisodeRecordingControl } from './episode_recording.js?v=20261106_recording_reconnect';
     import { TrialController } from './trial_controller.js?v=20261107_demo_overlay_axes';
-    import { CapturePresetControl, WorkspaceStreamControl, nativeStreamPreset } from "./capture_presets.js?v=20261109_workspace_point_budget";
+    import { CapturePresetControl, WorkspaceStreamControl, nativeStreamPreset } from "./capture_presets.js?v=scoped_ir_recovery_v1";
     import { MODELED_WORKSPACE_DEFAULTS, modeledWorkspace } from './modeled_workspace.js?v=20261021_original_rgb';
     import { renderCropStatistics } from './crop_statistics.js';
     import { resolvePointDetail } from './point_detail_settings.js';
@@ -14,7 +14,9 @@
     const fusionStatusTimer=setInterval(()=>{
       const target=document.getElementById('squares-fusion-status');
       if(!target)return;
-      const preview=window.getGodotHybridRendererStatus?.()?.pointPreview;
+      const renderer=window.getGodotHybridRendererStatus?.();
+      const preview=renderer?.pointPreview;
+      updateScopedIrStatus(renderer?.scopedIr);
       const fusion=preview?.fusion;
       const surface=preview?.surface;
       const label=fusion?.active?`GPU fusion active · ${fusion.cameras} cameras`:fusion?.message||'Off.';
@@ -70,6 +72,29 @@
         window.setGodotHybridViewSettings?.({squares_plane_completion:planeCompletion.checked});
       });
     }
+    const scopedIr=document.getElementById('scoped-ir-enabled');
+    const scopedIrStatus=document.getElementById('scoped-ir-status');
+    scopedIr.checked=localStorage.getItem('robotTeleopScopedIrRecovery')==='true';
+    scopedIr.addEventListener('change',()=>{
+      localStorage.setItem('robotTeleopScopedIrRecovery',String(scopedIr.checked));
+      applyPointOptions();
+      updateScopedIrStatus();
+    });
+    function updateScopedIrStatus(recovery) {
+      let label='Off.';
+      if (scopedIr.checked) {
+        if (!pointPreviewActive() || displayModeSelect.value==='rgb_camera' || streamPresetSelect.value!=='latency') {
+          label='Choose Low latency and a square-points mode.';
+        } else if (recovery?.status==='active') {
+          label=Number(recovery.points).toLocaleString()+' matching depth samples in the latest B frame.';
+        } else if (recovery?.status==='no_pair' || recovery?.status==='unavailable') {
+          label='B’s paired infrared frames are unavailable.';
+        } else {
+          label='Waiting for B’s native square stream.';
+        }
+      }
+      if (scopedIrStatus.textContent!==label) scopedIrStatus.textContent=label;
+    }
     const recoveryRoot=document.getElementById('measured-depth-recovery');
     if (recoveryRoot) new DepthRecoveryControl(recoveryRoot);
     const hideGraySquares=document.getElementById('hide-gray-squares');
@@ -118,6 +143,7 @@
         point_preview_enabled: pointPreviewActive(),
         point_preview_budget: selectedPointBudget(),
         point_preview_visible_only: workspacePointBudget.checked,
+        scoped_ir_enabled: scopedIr.checked && pointPreviewActive() && displayModeSelect.value!=='rgb_camera',
         display_mode: displayModeSelect.value,
       });
       window.setGodotHybridViewSettings?.({squares_fusion_enabled:squaresFusionEnabled.checked,squares_edge_repair_enabled:repairEdgeColors.checked,squares_table_fringes_enabled:suppressTableFringes.checked,squares_fill_surface_gaps:fillSurfaceGaps.checked,squares_plane_completion:planeCompletion?.checked===true,hide_gray_squares:hideGraySquares.checked,square_point_scale:Number(squarePointSize.value),...cleanupSettings(),point_preview_enabled:pointPreviewActive(),mesh_preview_enabled:pointPreviewToggle.value==='-2',point_preview_budget:selectedPointBudget(),...blendSettings()});

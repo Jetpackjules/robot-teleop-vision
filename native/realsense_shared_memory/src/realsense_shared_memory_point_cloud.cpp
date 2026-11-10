@@ -814,7 +814,8 @@ void RealSenseSharedMemoryPointCloud::_process(double p_delta) {
             if (!native_snapshot_writer_open && (!std::getenv("ROBOT_TELEOP_NATIVE_SPARSE_PUBLISH") || std::strcmp(std::getenv("ROBOT_TELEOP_NATIVE_SPARSE_PUBLISH"),"0")!=0)) native_snapshot_writer_open = native_snapshot_writer.open(publish_shared_memory_name + "_native");
             if (native_snapshot_writer_open && direct_realsense.is_valid()) {
                 native_snapshot_writer.publish_native(current_frame_sequence,current_stride,current_intrinsics / real_t(std::max(1,current_stride)),
-                    depth_image,direct_realsense->get_raw_color_snapshot(),get_raw_color_projection(),get_global_transform(),
+                    depth_image,direct_realsense->get_raw_color_snapshot(),direct_realsense->get_native_infrared_pair(),
+                    get_raw_color_projection(),get_global_transform(),
                     get_direct_realsense_capture_fps(),std::chrono::duration<double,std::milli>(std::chrono::system_clock::now().time_since_epoch()).count(),
                     max_depth,color_match_enabled,color_gain,color_bias);
             }

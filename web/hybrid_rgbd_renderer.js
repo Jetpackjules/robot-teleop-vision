@@ -3889,7 +3889,10 @@ export function getGodotHybridRendererStatus() {
   const robotModelWarning = state.settings.robot_overlay_enabled && loaded < expected
     ? `Arm overlay ${loaded}/${expected} links${state.stats.robotModelsPending?.length ? ' loading' : ' loaded'}${state.stats.robotLoadError ? `: ${state.stats.robotLoadError}` : ''}` : '';
   const pointCounts=Object.fromEntries(state.cameras.map(c=>[String(c.metadata.id),c.metadata.mesh_preview?Number(c.metadata.preview_source_points||0):Number.isFinite(c.validPoints)?c.validPoints:(c.depth?.reduce((n,z)=>n+(z>0),0)||0)]));
-  return { ...state.stats, pointCounts, pointCountTotal:Object.values(pointCounts).reduce((a,b)=>a+b,0), robotModelWarning, captureAgeMs, packetAgeMs, stalled, queueDepth: state.pendingFrameQueue.length, decodeBusy: state.decoding };
+  const ir = state.cameras.find(c=>c.metadata.scoped_ir_status)?.metadata;
+  const scopedIr = ir && Date.now() - ir.capture_unix_ms < 1500
+    ? {status: ir.scoped_ir_status, points: ir.scoped_ir_points} : null;
+  return { ...state.stats, scopedIr, pointCounts, pointCountTotal:Object.values(pointCounts).reduce((a,b)=>a+b,0), robotModelWarning, captureAgeMs, packetAgeMs, stalled, queueDepth: state.pendingFrameQueue.length, decodeBusy: state.decoding };
 }
 
 window.startGodotHybridRenderer = startGodotHybridRenderer;

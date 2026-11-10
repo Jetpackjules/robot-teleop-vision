@@ -17,17 +17,27 @@ import zlib
 from collections import OrderedDict
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from tools.sparse_point_stream import ENCODING, sample_rgb_pixels
 from tools.native_sparse_kernels import depth_mm, pack_points
 from tools.preview_depth_smoothing import smooth_depth
+from tools.scoped_ir import CAMERA_SERIAL, FRAME_SHAPE, ScopedIrRecovery
 from tools.point_preview_cleanup import clean_selected_points
 from tools.workspace_stream_crop_native import compress_depth
 from tools.workspace_stream_crop import WorkspaceStreamCropper, crop_volumes
 
 MAGIC = b"RSNP01\0\0"
 HEADER = 256
+STEREO_IR_FLAG = 2
+_ir_worker = threading.local()
+
+
+def wants_scoped_ir(camera, settings):
+    return (settings.get('scoped_ir_enabled') is True
+            and settings.get('_mesh_profile') != 'balanced'
+            and str(camera.get('id', '')).removeprefix('realsense:') == CAMERA_SERIAL)
 
 
 class NativeSnapshot:
@@ -42,7 +52,7 @@ class NativeSnapshot:
         self.mapping = None
         self.inode = None
 
-    def read(self, previous=None, frame_lane=None, frame_lanes=1):
+    def read(self, previous=None, frame_lane=None, frame_lanes=1, *, include_ir=False):
         stat = self.path.stat()
         if self.mapping is None or self.inode != stat.st_ino:
             self.close()
@@ -73,7 +83,12 @@ class NativeSnapshot:
                 raise ValueError('invalid native camera dimensions')
             # Copy to owned storage before selecting points, then check the
             # producer sequence. No SDK/UVC buffer or writable mapping escapes.
-            body = data[HEADER:HEADER+depth_size+color_size]
+            rgb_end = depth_size + color_size
+            ir_pixels = width * height
+            ir_end = rgb_end + 4 + 2 * ir_pixels
+            has_ir = (include_ir and flags & STEREO_IR_FLAG and stride == 1
+                      and (height, width) == FRAME_SHAPE and HEADER + ir_end <= len(data))
+            body = data[HEADER:HEADER + (ir_end if has_ir else rgb_end)]
             if struct.unpack_from('<Q',data,8)[0] != sequence:
                 continue
             intrinsics = list(struct.unpack_from('<4f',header,40))
@@ -87,11 +102,17 @@ class NativeSnapshot:
                 raise ValueError('invalid native camera calibration metadata')
             depth = np.frombuffer(body,dtype='<f4',count=width*height).reshape(height,width)
             color = np.ndarray((rh,rw,bpp),np.uint8,buffer=body,offset=depth_size,strides=(pitch,bpp,1))
-            return dict(key=(self.inode,sequence),frame=struct.unpack_from('<Q',header,16)[0],
+            snapshot = dict(key=(self.inode,sequence),frame=struct.unpack_from('<Q',header,16)[0],
                         width=width,height=height,intrinsics=intrinsics,transform=transform,
                         depth=depth,rgb=color[:,:,:3][:,:,::-1],bgr=color,maximum=maximum,
                         projection=dict(model='pinhole',size=[rw,rh],intrinsics=color_k,extrinsics=extrinsics),
                         fps=fps,stamp=stamp,match=bool(flags&1),gain=correction[:3],bias=correction[3:])
+            if has_ir:
+                scale = struct.unpack_from('<f', body, rgb_end)[0]
+                if math.isfinite(scale) and 5000 <= scale <= 100000:
+                    pair = np.frombuffer(body, np.uint8, 2 * ir_pixels, rgb_end + 4).reshape(2, height, width)
+                    snapshot['infrared'] = (pair[0], pair[1], scale)
+            return snapshot
         return None
 
 
@@ -125,9 +146,36 @@ def encode_native_camera(snapshot, camera, settings, cropper, robot=None, viewer
         volumes = crop_volumes(settings)
     except (ValueError,TypeError,OverflowError):
         volumes = []
+    sensor_depth = depth
+    visible_only = budget > 0 and settings.get('point_preview_visible_only') is True
     if volumes:
-        visible_only = budget > 0 and settings.get('point_preview_visible_only') is True
         depth = cropper.point_depth(depth, metadata, volumes, visible_only=visible_only)
+
+    recovery_points = 0
+    if wants_scoped_ir(camera, settings):
+        ir_started = time.perf_counter()
+        status = 'no_pair'
+        pair = snapshot.get('infrared')
+        if pair is not None:
+            try:
+                if not hasattr(_ir_worker, 'matcher'):
+                    _ir_worker.matcher = ScopedIrRecovery()
+                recovered = _ir_worker.matcher.recover(sensor_depth, depth, *pair)
+                status = 'active'
+                if recovered.millimetres.size:
+                    keep = cropper.point_samples_in_workspace(
+                        depth, metadata, volumes, recovered.rows, recovered.columns, recovered.millimetres,
+                    )
+                    recovery_points = int(np.count_nonzero(keep))
+                    if recovery_points:
+                        if depth is sensor_depth:
+                            depth = depth.copy()
+                        depth[recovered.rows[keep], recovered.columns[keep]] = recovered.millimetres[keep]
+                metadata['scoped_ir_tiles'] = recovered.tiles
+            except cv2.error:
+                status = 'unavailable'
+        metadata.update(scoped_ir_status=status, scoped_ir_points=recovery_points,
+                        scoped_ir_ms=round((time.perf_counter() - ir_started) * 1000, 3))
     limit=depth.size if budget==0 else budget
     native=pack_points(depth,snapshot,limit)
     if native is not None:
@@ -177,7 +225,7 @@ def encode_native_camera(snapshot, camera, settings, cropper, robot=None, viewer
                     geometry_capture_unix_ms=snapshot['stamp'],color_encoding='sparse_rgb8',
                     depth_encoding=ENCODING,color_space='aligned_depth',color_length=0,
                     depth_length=len(packed),preview_budget=budget,preview_count=count,
-                    preview_source_points=source_count,preview_native=True,depth_exact=smoothing!='edge_aware_median_3x3',
+                    preview_source_points=source_count,preview_native=True,depth_exact=smoothing!='edge_aware_median_3x3' and recovery_points == 0,
                     preview_depth_smoothing=smoothing,preview_depth_smoothing_ms=round(smoothing_ms,3),
                     encode_ms=round((time.perf_counter()-started)*1000,3),source_capture_fps=snapshot['fps'])
     if isinstance(snapshot.get('key'),tuple) and len(snapshot['key'])==2:
@@ -223,13 +271,15 @@ class NativeSparseSession:
             while not self.stop_event.wait(.001):
                 if time.monotonic()<next_allowed:
                     continue
-                snapshot=reader.read(previous) if self.frame_lane is None else reader.read(previous,self.frame_lane,self.frame_lanes)
-                if snapshot is None:
-                    continue
                 settings=self.settings()
                 if settings.get('point_preview_enabled') is not True:
                     self.stop_event.set()
                     break
+                options = {'include_ir': True} if wants_scoped_ir(camera, settings) else {}
+                lanes = () if self.frame_lane is None else (self.frame_lane, self.frame_lanes)
+                snapshot = reader.read(previous, *lanes, **options)
+                if snapshot is None:
+                    continue
                 if time.time()*1000-snapshot['stamp']>1000:
                     continue
                 job_started=time.monotonic()

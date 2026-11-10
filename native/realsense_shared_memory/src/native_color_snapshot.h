@@ -20,3 +20,14 @@ struct NativeColorSnapshot {
             uint64_t(pitch) * uint64_t(height) <= pixels->size();
     }
 };
+
+struct NativeInfraredPair {
+    static constexpr int WIDTH = 848;
+    static constexpr int HEIGHT = 480;
+    static constexpr int FPS = 60;
+    static constexpr const char *CAMERA_SERIAL = "262522075787";
+
+    std::vector<uint8_t> left;
+    std::vector<uint8_t> right;
+    float disparity_scale_mm = 0.0f;
+};

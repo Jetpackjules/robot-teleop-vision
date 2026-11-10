@@ -91,7 +91,7 @@ public:
         double p_capture_fps, double p_capture_unix_ms);
     bool publish_native(uint64_t frame, int stride, const godot::Vector4 &intrinsics,
         const godot::Ref<godot::Image> &depth, const NativeColorSnapshot &color,
-        const godot::Dictionary &projection, const godot::Transform3D &transform,
+        const NativeInfraredPair &infrared, const godot::Dictionary &projection, const godot::Transform3D &transform,
         double fps, double stamp, double max_depth, bool match,
         const godot::Vector3 &gain, const godot::Vector3 &bias);
 private:

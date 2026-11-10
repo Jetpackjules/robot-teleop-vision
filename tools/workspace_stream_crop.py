@@ -24,6 +24,7 @@ _CROP_WORKERS = ThreadPoolExecutor(max_workers=3, thread_name_prefix='workspace-
 
 DEPTH_ENCODINGS = {"u16_mm_deflate", "u16_mm_vpredict_shuffle_deflate"}
 STREAM_SETTING_KEYS = frozenset({
+    'scoped_ir_enabled',
     'point_cleanup_enabled', 'point_cleanup_support', 'point_cleanup_radius_mm',
     'point_preview_visible_only',
     "workspace_stream_crop_enabled", "display_mode", "point_preview_enabled", "point_preview_budget",
@@ -216,6 +217,12 @@ class WorkspaceStreamCropper:
             lower, upper = bounds
             return np.where((depth >= lower) & (depth <= upper), depth, 0)
         return retained_depth(depth, camera, volumes, bounds)
+
+    def point_samples_in_workspace(self, depth, camera, volumes, rows, columns, millimetres):
+        if not volumes:
+            return np.ones(millimetres.shape, dtype=bool)
+        lower, upper = self._bounds(depth, camera, volumes, point_only=True)
+        return (millimetres >= lower[rows, columns]) & (millimetres <= upper[rows, columns])
 
     def _rgb(self, color, key):
         with self.cache_lock:

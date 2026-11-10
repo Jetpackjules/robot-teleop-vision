@@ -84,6 +84,7 @@ public:
     godot::Ref<godot::Image> get_color_image() const;
     godot::Ref<godot::Image> get_raw_color_image() const;
     NativeColorSnapshot get_raw_color_snapshot() const;
+    const NativeInfraredPair &get_native_infrared_pair() const { return native_infrared_pair; }
     godot::Vector2i get_raw_color_size() const;
     godot::Vector4 get_raw_color_intrinsics() const;
     godot::Dictionary get_raw_color_projection() const;
@@ -155,6 +156,7 @@ private:
     int raw_color_bpp = 0;
     int raw_color_pitch = 0;
     void clear_raw_color();
+    NativeInfraredPair native_infrared_pair;
     godot::Vector4 raw_color_intrinsics;
     bool raw_color_projection_linear = false;
     godot::PackedFloat32Array depth_to_raw_color_extrinsics;
@@ -253,6 +255,9 @@ private:
     rs2::pipeline pipeline;
     rs2::pipeline_profile pipeline_profile;
     rs2::align align_to_depth;
+    std::unique_ptr<rs2::filter> sdk_rgbd_only;
+    float native_ir_disparity_scale_mm = 0.0f;
+    void copy_native_infrared_pair(const rs2::frameset &frames, const rs2::frame &depth);
     rs2::decimation_filter decimation_filter;
     rs2::rotation_filter rotation_filter;
     rs2::hdr_merge hdr_merge_filter;

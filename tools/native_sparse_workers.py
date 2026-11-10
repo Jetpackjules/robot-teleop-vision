@@ -19,7 +19,8 @@ import sys
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT/'.teleop/native-preview-workers'
@@ -29,6 +30,7 @@ SLOT_HEADER = 32
 CONTROL_SIZE = 64 * 1024
 CONTROL_OFFSET = SLOT_SIZE * 2
 SETTINGS_KEYS = {
+    'scoped_ir_enabled',
     'workspace_stream_crop_enabled', 'display_mode', 'point_preview_enabled',
     'point_cleanup_enabled', 'point_cleanup_support', 'point_cleanup_radius_mm',
     'point_preview_visible_only',
@@ -105,8 +107,13 @@ def encode_loop(config):
         ctypes.CDLL(None).prctl(1, signal.SIGTERM)
         if os.getppid() != config['parent_pid']:
             return
-    from tools.native_sparse_stream import NativeSnapshot, encode_native_camera
+    from tools.native_sparse_stream import NativeSnapshot, encode_native_camera, wants_scoped_ir
     from tools.workspace_stream_crop import WorkspaceStreamCropper
+    from tools.scoped_ir import CAMERA_SERIAL
+    if str(config['camera']['id']).removeprefix('realsense:') == CAMERA_SERIAL:
+        # This process encodes one camera. Avoid a competing OpenCV thread pool.
+        import cv2
+        cv2.setNumThreads(1)
     stopping = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stopping.set())
@@ -116,11 +123,18 @@ def encode_loop(config):
     version = 0
     interval = 1/max(1, min(60, config['fps']))
     next_allowed = time.monotonic()
+    infrared_pool = None
+    pending = deque()
     with Path(config['output']).open('r+b') as stream:
         mapping = mmap.mmap(stream.fileno(), CONTROL_OFFSET+CONTROL_SIZE)
+        def publish(key, generation, packet):
+            nonlocal version
+            version += 2
+            write_slot(mapping, (key[1]//2) % 2, version, generation, packet)
+
         try:
             while not stopping.wait(.001):
-                if time.monotonic() < next_allowed:
+                if not pending and time.monotonic() < next_allowed:
                     continue
                 control = read_control(mapping, CONTROL_OFFSET)
                 if control is None:
@@ -128,7 +142,15 @@ def encode_loop(config):
                 generation, settings = control
                 if settings.get('point_preview_enabled') is not True:
                     break
-                snapshot = reader.read(previous)
+                include_ir = wants_scoped_ir(config['camera'], settings)
+                while pending and pending[0][2].done():
+                    key, job_generation, job = pending.popleft()
+                    packet = job.result()
+                    if job_generation == generation:
+                        publish(key, generation, packet)
+                if len(pending) >= 2 or (pending and not include_ir) or time.monotonic() < next_allowed:
+                    continue
+                snapshot = reader.read(previous, include_ir=include_ir)
                 if snapshot is None or time.time()*1000-snapshot['stamp'] > 1000:
                     continue
                 started = time.monotonic()
@@ -136,14 +158,21 @@ def encode_loop(config):
                 if settings.get('_mesh_profile') == 'balanced':
                     from tools.native_mesh_stream import encode_native_mesh_camera
                     encoder = encode_native_mesh_camera
-                packet = encoder(snapshot, config['camera'], settings, cropper,
-                                              packet_robot(config['robot_path']), config['viewer'])
+                arguments = (snapshot, config['camera'], settings, cropper,
+                             packet_robot(config['robot_path']), config['viewer'])
                 previous = snapshot['key']
-                slot = (snapshot['key'][1]//2) % 2
-                version += 2
-                write_slot(mapping, slot, version, generation, packet)
+                if include_ir:
+                    # Allow two B frames in flight. Publish in acquisition order
+                    # and never accumulate a queue when encoding falls behind.
+                    if infrared_pool is None:
+                        infrared_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='scoped-ir')
+                    pending.append((previous, generation, infrared_pool.submit(encoder, *arguments)))
+                else:
+                    publish(previous, generation, encoder(*arguments))
                 next_allowed = max(next_allowed+interval, started)
         finally:
+            if infrared_pool is not None:
+                infrared_pool.shutdown(cancel_futures=True)
             mapping.close()
             reader.close()
             Path(config['output']).unlink(missing_ok=True)

@@ -4751,6 +4751,7 @@ class LanRemoteHandler(BaseHTTPRequestHandler):
             packet[key] = max(minimum, min(maximum, float(value)))
         boolean_settings = {
             "point_preview_visible_only",
+            "scoped_ir_enabled",
             "squares_fusion_enabled",
             "point_cleanup_enabled",
             "inspect_enabled",

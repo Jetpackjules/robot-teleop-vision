@@ -329,7 +329,7 @@ bool RealSenseSharedMemoryWriter::publish(uint64_t p_frame_id, int p_stride, con
 
 // Separate mapping: existing RSPG01 readers and recording remain unchanged.
 bool RealSenseSharedMemoryWriter::publish_native(uint64_t frame, int stride, const Vector4 &intrinsics,
-        const Ref<Image> &depth_image, const NativeColorSnapshot &color, const Dictionary &projection,
+        const Ref<Image> &depth_image, const NativeColorSnapshot &color, const NativeInfraredPair &infrared, const Dictionary &projection,
         const Transform3D &transform, double fps, double stamp, double max_depth, bool match,
         const Vector3 &gain, const Vector3 &bias) {
     if (!view || depth_image.is_null() || depth_image->get_format()!=Image::FORMAT_RF || !color.valid()) return false;
@@ -338,7 +338,14 @@ bool RealSenseSharedMemoryWriter::publish_native(uint64_t frame, int stride, con
     if(size.size()!=2 || k.size()!=4 || e.size()!=12 || int(size[0])!=color.width || int(size[1])!=color.height) return false;
     const PackedByteArray depth=depth_image->get_data();
     const size_t rgb_size=size_t(color.pitch)*color.height;
-    if(256+size_t(depth.size())+rgb_size>CAPACITY) return false;
+    const size_t rgb_end = 256 + size_t(depth.size()) + rgb_size;
+    if (rgb_end > CAPACITY) return false;
+    constexpr size_t ir_pixels = NativeInfraredPair::WIDTH * NativeInfraredPair::HEIGHT;
+    const bool has_ir = infrared.disparity_scale_mm > 0.0f && stride == 1 &&
+        depth_image->get_width() == NativeInfraredPair::WIDTH &&
+        depth_image->get_height() == NativeInfraredPair::HEIGHT &&
+        infrared.left.size() == ir_pixels && infrared.right.size() == ir_pixels &&
+        rgb_end + sizeof(float) + 2 * ir_pixels <= CAPACITY;
     auto *counter=reinterpret_cast<std::atomic<uint64_t> *>(view+8);
     counter->store(++sequence,std::memory_order_seq_cst);
     const uint8_t magic[8]={'R','S','N','P','0','1',0,0};memcpy(view,magic,8);
@@ -348,7 +355,7 @@ bool RealSenseSharedMemoryWriter::publish_native(uint64_t frame, int stride, con
     float dk[4]={float(intrinsics.x),float(intrinsics.y),float(intrinsics.z),float(intrinsics.w)};memcpy(view+40,dk,16);
     uint32_t sizes[2]={uint32_t(depth.size()),uint32_t(rgb_size)};memcpy(view+56,sizes,8);
     memcpy(view+64,&fps,8);memcpy(view+72,&stamp,8);
-    uint32_t rgb_dims[4]={uint32_t(color.width),uint32_t(color.height),uint32_t(color.pitch),uint32_t(match?1:0)};memcpy(view+80,rgb_dims,16);
+    uint32_t rgb_dims[4]={uint32_t(color.width),uint32_t(color.height),uint32_t(color.pitch),uint32_t((match ? 1 : 0) | (has_ir ? 2 : 0))};memcpy(view+80,rgb_dims,16);
     float ck[4]={float(k[0]),float(k[1]),float(k[2]),float(k[3])};memcpy(view+96,ck,16);
     memcpy(view+112,e.ptr(),48);
     float matrix[16]={0};
@@ -359,6 +366,12 @@ bool RealSenseSharedMemoryWriter::publish_native(uint64_t frame, int stride, con
     memcpy(view+224,options,32);
     memcpy(view+256,depth.ptr(),depth.size());
     memcpy(view+256+depth.size(),color.pixels->data(),rgb_size);
+    // Flag bit 1 adds an optional stereo tail to RSNP01. Existing readers stop at RGB.
+    if (has_ir) {
+        memcpy(view + rgb_end, &infrared.disparity_scale_mm, sizeof(float));
+        memcpy(view + rgb_end + sizeof(float), infrared.left.data(), ir_pixels);
+        memcpy(view + rgb_end + sizeof(float) + ir_pixels, infrared.right.data(), ir_pixels);
+    }
     counter->store(++sequence,std::memory_order_release);
     return true;
 }
